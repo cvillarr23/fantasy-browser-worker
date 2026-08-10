@@ -1,0 +1,6 @@
+{
+  "roster_table": ".roster-table",
+  "move_button": "button:has-text(\"Move\")",
+  "search_input": "input[placeholder*=\"Search\"]",
+  "draft_button": "button.draft-player-action"
+}
