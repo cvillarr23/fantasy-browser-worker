@@ -35,8 +35,20 @@ const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..
 const VERIFY_ATTEMPTS = 4;
 const VERIFY_DELAY_MS = 1000;
 
-function isDryRun() {
-  return /^(1|true|yes)$/i.test(process.env.DRY_RUN || "");
+/**
+ * Live writes are OPT-IN, not opt-out.
+ *
+ * submitLineup()'s request body has never been confirmed against a real capture (see espn_api.js
+ * and issue #15), so an unset DRY_RUN must not mean "write to the live lineup" — the production
+ * queue path sets no env var of its own, and that default would have made every consumed message a
+ * live, unverified transaction. Only an explicit DRY_RUN=false opts in.
+ *
+ * Flip this default once #15 closes and the write shape is verified.
+ */
+function resolveDryRun() {
+  const raw = (process.env.DRY_RUN || "").trim();
+  if (raw === "") return { dryRun: true, defaulted: true };
+  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
 }
 
 /**
@@ -83,6 +95,19 @@ function planSwaps(swaps, roster, log) {
     const dropId = String(swap.drop_player_id);
     const addId = String(swap.add_player_id);
     const targetSlotId = resolveSlotId(swap.slot);
+
+    // lineup_slots.json is a documented reference; the league's live settings are the truth. A slot
+    // the league doesn't actually field (count 0 or absent) would otherwise be submitted anyway and
+    // come back as an opaque API rejection that requeues forever — catch it here as a clear,
+    // permanent configuration error instead.
+    const liveCount = roster.slotCounts[String(targetSlotId)];
+    if (!liveCount) {
+      throw new Error(
+        `Swap #${index + 1}: slot "${swap.slot}" resolves to ${describeSlot(targetSlotId)}, which ` +
+          `this league does not field (lineupSlotCounts has ${liveCount === 0 ? "0" : "no entry"} ` +
+          "for it). Producer and league settings disagree."
+      );
+    }
 
     const dropFrom = roster.slotByPlayerId.get(dropId);
     const addFrom = roster.slotByPlayerId.get(addId);
@@ -167,9 +192,9 @@ async function captureFailure(session, tracking, details) {
       await session.page.screenshot({ path: `${base}.png`, fullPage: true });
       written.push(`${base}.png`);
     }
-    console.error(`[Lineup Bot] Failure context written to: ${written.join(", ")}`);
+    console.error(`[Lineup Bot][${tracking}] Failure context written to: ${written.join(", ")}`);
   } catch (captureError) {
-    console.error(`[Lineup Bot] Could not capture failure context: ${captureError.message}`);
+    console.error(`[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
   }
 }
 
@@ -183,7 +208,9 @@ async function executeLineupAdjustments(payload) {
   const swaps = payload.optimized_swaps || [];
 
   if (!leagueId) {
-    throw new Error("[Lineup Bot] ESPN_LEAGUE_ID is not set — cannot identify which league to act on.");
+    throw new Error(
+      `[Lineup Bot][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify which league to act on.`
+    );
   }
   if (teamId === undefined || teamId === null || teamId === "") {
     throw new Error(`[Lineup Bot][${tracking}] Payload is missing team_id.`);
@@ -194,8 +221,16 @@ async function executeLineupAdjustments(payload) {
   }
 
   const target = { leagueId, seasonId, teamId };
-  const dryRun = isDryRun();
+  const { dryRun, defaulted } = resolveDryRun();
   log(`Starting realignment for team ${teamId} in league ${leagueId} (${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`);
+  if (defaulted) {
+    // Say this loudly: a silent no-op is its own failure mode, and someone deploying this and
+    // wondering why nothing changed deserves to see the reason in the logs.
+    log(
+      "DRY_RUN is unset, defaulting to TRUE — no changes will be written. Set DRY_RUN=false to " +
+        "submit for real (only once the write shape is verified, see issue #15)."
+    );
+  }
 
   let session = null;
   try {
@@ -210,19 +245,24 @@ async function executeLineupAdjustments(payload) {
           "happened yet, so there is nothing to realign."
       );
     }
+    const { items, intended, skipped } = planSwaps(swaps, roster, log);
+
+    // Plan BEFORE checking the lock. If a submit succeeded but verification failed transiently, the
+    // message gets requeued; should the lineup lock before redelivery, a lock-check-first ordering
+    // would throw forever on work that is in fact already done — an infinite requeue loop that
+    // blocks the whole queue under connection.js's prefetch(1). A retry with nothing left to do
+    // must succeed.
+    if (items.length === 0) {
+      log(`All ${skipped} requested swap(s) already satisfied. No transaction submitted.`);
+      return;
+    }
+
     if (roster.lineupLocked || roster.rosterLocked) {
       throw new Error(
         `[Lineup Bot][${tracking}] ESPN reports this lineup as locked ` +
           `(lineupLocked=${roster.lineupLocked}, rosterLocked=${roster.rosterLocked}) — games have ` +
-          "started and no changes will be accepted."
+          `started and the ${items.length} remaining change(s) will not be accepted.`
       );
-    }
-
-    const { items, intended, skipped } = planSwaps(swaps, roster, log);
-
-    if (items.length === 0) {
-      log(`All ${skipped} requested swap(s) already satisfied. No transaction submitted.`);
-      return;
     }
 
     if (dryRun) {
