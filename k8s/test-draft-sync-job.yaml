@@ -1,0 +1,77 @@
+# Manual test Job for draft_sync.js — NOT part of fantasy-infra's GitOps-synced tree, so it never
+# auto-deploys via Argo CD. Apply/delete this by hand whenever you want to test the pipeline
+# end-to-end against a live ESPN mock draft.
+#
+# Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
+# locally-built image — the repo is private, so the package stays private too, pulled via the
+# ghcr-pull-secret ExternalSecret (fantasy-infra: overlays/production/externalsecrets.yaml).
+# One-time setup, once for the whole cluster (not per test run):
+#   bao kv put secret/fantasy/ghcr username=<your-github-username> token=<PAT with read:packages scope>
+#
+# Usage:
+#   git push origin main                                        # triggers the build+publish workflow
+#   kubectl delete job draft-sync-test --ignore-not-found -n default
+#   kubectl apply -f k8s/test-draft-sync-job.yaml
+#   kubectl logs -f job/draft-sync-test -n default
+#
+# In another terminal, to watch the picks land in Redis:
+#   kubectl port-forward svc/fantasy-cache 6379:6379 -n default
+#   node scripts/watch_draft_picks.js
+#
+# To watch the browser live via CDP (optional):
+#   kubectl port-forward job/draft-sync-test 9222:9222 -n default
+#   # then open chrome://inspect locally and add localhost:9222 as a target
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: draft-sync-test
+  namespace: default
+  labels:
+    app: fantasy-browser-worker
+    component: draft-sync-test
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: fantasy-browser-worker
+        component: draft-sync-test
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: draft-sync
+          image: ghcr.io/cvillarr23/fantasy-browser-worker:latest
+          imagePullPolicy: Always # always pull latest for a test run, don't reuse a stale cached image
+          command: ["node", "src/bots/draft_sync.js"]
+          ports:
+            - containerPort: 9222
+              name: cdp-debug
+          env:
+            - name: DRAFT_MODE
+              value: "mock"
+            - name: CDP_DEBUG_PORT
+              value: "9222"
+            - name: REDIS_HOST
+              value: "fantasy-cache.default.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: ESPN_S2
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: espn_s2
+            - name: SWID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: swid
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1200Mi" # Same ceiling as the production ScaledJob — catches Chromium bloat here too
+              cpu: "1000m"
