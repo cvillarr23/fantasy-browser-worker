@@ -182,4 +182,4 @@ if (require.main === module) {
   runRecon();
 }
 
-module.exports = { runRecon };
+module.exports = { runRecon, launchWithManualLogin, waitForEnter, OUTPUT_DIR };

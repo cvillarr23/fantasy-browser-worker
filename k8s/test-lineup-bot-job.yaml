@@ -1,0 +1,85 @@
+# Manual test Job for lineup_bot.js (WORKER-03) — NOT part of fantasy-infra's GitOps-synced tree,
+# so it never auto-deploys via Argo CD. Apply/delete this by hand to exercise the lineup bot
+# against the real ESPN league.
+#
+# Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
+# locally-built image — the repo is private, so the package stays private too, pulled via the
+# ghcr-pull-secret ExternalSecret (fantasy-infra: overlays/production/externalsecrets.yaml).
+#
+# SAFETY: DRY_RUN defaults to "true" — the bot performs every read, validation and planning step
+# and logs the exact transaction items it *would* submit, then stops without writing. Only set it
+# to "false" when you actually intend to mutate the live lineup.
+#
+# PREREQUISITE: the league must have drafted. lineup_bot.js refuses to run against an empty roster,
+# and as of 2026-08-11 league 1248158344 had none (mRoster returned entries: []). Before the first
+# non-dry run, capture the real save request with:
+#   node src/bots/lineup_recon.js --watch-save
+# and confirm it matches what espn_api.js's submitLineup() sends — that body is still unverified.
+#
+# Usage:
+#   git push origin main                                   # triggers the build+publish workflow
+#   # edit LINEUP_PAYLOAD below with real player IDs from your roster
+#   kubectl delete job lineup-bot-test --ignore-not-found -n default
+#   kubectl apply -f k8s/test-lineup-bot-job.yaml
+#   kubectl logs -f job/lineup-bot-test -n default
+#
+# To inspect the roster the bot sees, without the Job:
+#   ESPN_LEAGUE_ID=1248158344 node src/bots/lineup_recon.js
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lineup-bot-test
+  namespace: default
+  labels:
+    app: fantasy-browser-worker
+    component: lineup-bot-test
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: fantasy-browser-worker
+        component: lineup-bot-test
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: lineup-bot
+          image: ghcr.io/cvillarr23/fantasy-browser-worker:latest
+          imagePullPolicy: Always # always pull latest for a test run, don't reuse a stale cached image
+          # The payload mirrors what fantasy-core-pipeline's POST /trigger/lineup publishes onto
+          # the lineup_updates queue (src/api/routes.py, LineupTriggerPayload).
+          command: ["node", "src/bots/lineup_bot.js"]
+          args:
+            - >-
+              {"tracking_id":"manual-k8s-test",
+               "team_id":"8",
+               "optimized_swaps":[
+                 {"drop_player_id":"REPLACE_ME","add_player_id":"REPLACE_ME","slot":"FLEX"}
+               ]}
+          env:
+            - name: DRY_RUN
+              value: "true" # flip to "false" only when you mean to mutate the real lineup
+            - name: ESPN_LEAGUE_ID
+              value: "1248158344"
+            - name: CURRENT_YEAR
+              value: "2026"
+            - name: ESPN_S2
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: espn_s2
+            - name: SWID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: swid
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1200Mi" # Same ceiling as the production ScaledJob — catches Chromium bloat here too
+              cpu: "1000m"

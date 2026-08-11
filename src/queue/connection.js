@@ -84,6 +84,19 @@ async function initializeQueueConsumer(messageProcessorCallback) {
         } catch (error) {
           console.error(`[Queue Bridge] Execution error encountered handling payload: ${error.message}`);
 
+          // A permanent error can never succeed on redelivery, so requeuing it would redeliver the
+          // same doomed message forever with no backoff — and because prefetch is channel-wide,
+          // that starves every consumer on this channel, not just this queue. Drop it, exactly as
+          // unparseable JSON is dropped above.
+          if (error && error.permanent) {
+            console.error(
+              `[Queue Bridge] Permanent failure on message ID ${msg.fields.deliveryTag} — ` +
+                "discarding (not requeued). Fix the payload or configuration and republish."
+            );
+            channel.nack(msg, false, false);
+            return;
+          }
+
           // Re-queue message if processing fails due to unexpected transient errors
           console.log(`[Queue Bridge] Rejecting message ID ${msg.fields.deliveryTag}. Triggering cluster re-queue logic...`);
           channel.nack(msg, false, true);
