@@ -27,7 +27,7 @@ async function scrapePendingTradeProposals() {
       const tradeCards = document.querySelectorAll(".trade-card-wrapper");
       if (tradeCards.length === 0) return "NO_PENDING_PROPOSALS";
       
-      return Array.from(tradeCards).map(card => card.innerText.replace(/\s+/g, " ").strip()).join(" | ");
+      return Array.from(tradeCards).map(card => card.innerText.replace(/\s+/g, " ").trim()).join(" | ");
     });
 
     console.log(`[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`);

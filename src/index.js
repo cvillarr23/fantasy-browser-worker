@@ -1,21 +1,23 @@
 const amqpConnectionManager = require("./queue/connection");
+const { executeLineupAdjustments } = require("./bots/lineup_bot");
+const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 
 // Centralized transaction dispatcher mapping queue events straight to automation targets
-async function handleIncomingMessage(queueName, _payload) {
+async function handleIncomingMessage(queueName, payload) {
   console.log(`[Worker Engine] Routing task parameters for queue event: "${queueName}"`);
-  
+
   try {
     switch (queueName) {
       case "lineup_updates":
         console.log("[Worker Engine] Invoking Lineup Adjustment Engine...");
-        // TODO: Require and call lineup_bot.js execution method passing payload properties
+        await executeLineupAdjustments(payload);
         break;
-        
+
       case "waiver_actions":
         console.log("[Worker Engine] Invoking Waiver Sniping Target Engine...");
-        // TODO: Require and call waiver_sniper.js execution method passing payload properties
+        await executeInstantWaiverClaim(payload);
         break;
-        
+
       default:
         console.warn(`[Worker Engine] Intercepted unsupported message format signature: ${queueName}`);
     }

@@ -9,10 +9,11 @@ const { startFreshPracticeDraft } = require("./mock_draft");
  * One-off recon tool — NOT part of the production worker pipeline.
  *
  * Run this by hand against a live ESPN mock draft to capture what actually happens on the wire
- * (WebSocket frames or HTTP polling responses) and in the DOM during a draft, before wiring real
- * extraction logic into draft_sync.js. draft_sync.js and espn_selectors.json currently ship with
- * placeholder/unverified URLs and selectors — this script's output (recon-output/*.jsonl, *.html,
- * *.png) is what replaces those placeholders with real values.
+ * (WebSocket frames or HTTP polling responses) and in the DOM during a draft. This is what
+ * originally produced the real URL/WebSocket-protocol values draft_sync.js now ships with
+ * (verified 2026-08-10, see its own header comment) — kept around for re-verifying if ESPN
+ * changes the draft room, and because espn_selectors.json's DOM selectors (used by the other
+ * bots, not draft_sync.js) are still unverified placeholders.
  *
  * Usage:
  *   node src/bots/draft_recon.js            # start a fresh practice draft from the lobby (default)

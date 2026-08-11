@@ -34,9 +34,12 @@ async function executeInstantWaiverClaim(payload) {
     await claimBtn.click();
     console.log(`[Sniper Bot] Claim button engaged for ${nameTarget}. Interfacing with verification modals...`);
 
-    // TODO: Require drop player configurations if rosters are currently full.
-    // Execute final confirmation modal button click to finalize transaction onto ESPN.
-    
+    // TODO: Require drop player configurations if rosters are currently full — this only handles
+    // the add-only path (an open roster spot). waiver_confirm_button's selector is unverified,
+    // same as everything else in espn_selectors.json that hasn't gone through a recon pass yet.
+    await session.page.waitForSelector(selectors.waiver_confirm_button, { timeout: 5000 });
+    await session.page.locator(selectors.waiver_confirm_button).click();
+
     console.log(`[Sniper Bot] SUCCESS: Transaction locked onto ESPN servers cleanly for ${nameTarget}.`);
   } catch (error) {
     console.error(`[Sniper Bot] Sniper timeline dropped or blocked by backend infrastructure: ${error.message}`);

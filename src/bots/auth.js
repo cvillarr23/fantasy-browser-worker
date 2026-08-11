@@ -52,6 +52,16 @@ function resolveEspnCookies() {
  * Establishes optimized browser context pools while keeping container RAM under 1200MiB.
  */
 async function createAuthenticatedSession() {
+  // Resolve credentials before launching anything — if this throws, there's no browser process
+  // left dangling with nothing left to close it.
+  const cookies = resolveEspnCookies();
+  if (!cookies) {
+    throw new Error(
+      "[Auth Engine] Critical Failure: Required session cookies (ESPN_S2/SWID) are missing — not found in environment variables or OpenBao."
+    );
+  }
+  const { espnS2, swid } = cookies;
+
   console.log("[Auth Engine] Spawning optimized headless Chromium sandbox instance...");
 
   // Opt-in live viewing: set CDP_DEBUG_PORT to expose a Chrome DevTools Protocol endpoint even
@@ -87,21 +97,9 @@ async function createAuthenticatedSession() {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
   });
 
-  // 3. Extract secure session credentials, injected via Kubernetes cluster secrets in production
-  // or resolved from OpenBao directly for local runs
-  const cookies = resolveEspnCookies();
-
-  if (!cookies) {
-    throw new Error(
-      "[Auth Engine] Critical Failure: Required session cookies (ESPN_S2/SWID) are missing — not found in environment variables or OpenBao."
-    );
-  }
-
-  const { espnS2, swid } = cookies;
-
   console.log("[Auth Engine] Injecting authentication state storage tokens into browser context pool...");
 
-  // 4. Force inject active cookies into the browser memory layer to trick ESPN into bypassing MFA challenges
+  // 3. Force inject active cookies into the browser memory layer to trick ESPN into bypassing MFA challenges
   await context.addCookies([
     {
       name: "espn_s2",
@@ -121,7 +119,7 @@ async function createAuthenticatedSession() {
     }
   ]);
 
-  // 5. Optimize network overhead by blocking media and tracking script downloads on demand
+  // 4. Optimize network overhead by blocking media and tracking script downloads on demand
   const page = await context.newPage();
   await page.route("**/*.{png,jpg,jpeg,gif,png,svg,css,woff,woff2,eot,ttf}", (route) => {
     // Blocks heavy structural css/images during instant waiver sniping windows to save network cycles

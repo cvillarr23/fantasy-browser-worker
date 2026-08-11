@@ -20,8 +20,12 @@ async function connectWithRetry() {
       });
 
       connection.on("close", () => {
-        console.error("[Queue Bridge] Connection closed by remote broker server pool. Triggering recycle...");
-        setTimeout(connectWithRetry, baseDelay);
+        // Reconnecting here would only replace the raw AMQP connection — the channel and its
+        // consumers (set up by initializeQueueConsumer, which this function has no access to)
+        // would stay gone, leaving the process alive but silently processing nothing forever.
+        // Exit and let the pod's restart policy bring up a fully re-initialized worker instead.
+        console.error("[Queue Bridge] Connection closed by remote broker server pool. Exiting for a clean restart...");
+        process.exit(1);
       });
 
       return connection;
@@ -40,9 +44,12 @@ async function initializeQueueConsumer(messageProcessorCallback) {
   const channel = await connection.createChannel();
 
   // 1. Enforce strict resource boundaries to limit processing to 1 message at a time
-  // This safeguards our 1200MiB pod limits by blocking concurrent Chromium execution cycles
-  await channel.prefetch(1);
-  console.log("[Queue Bridge] Resource concurrency limits locked successfully (Prefetch: 1).");
+  // This safeguards our 1200MiB pod limits by blocking concurrent Chromium execution cycles.
+  // `global: true` is required here — plain prefetch(1) applies per-consumer, and two consumers
+  // get registered below (lineup_updates, waiver_actions), which would allow 2 unacked messages
+  // (and 2 concurrent Chromium instances) at once instead of 1.
+  await channel.prefetch(1, true);
+  console.log("[Queue Bridge] Resource concurrency limits locked successfully (Prefetch: 1, channel-wide).");
 
   // 2. Declare and align standard system tracking exchange queues
   const targetQueues = ["lineup_updates", "waiver_actions"];
@@ -55,22 +62,31 @@ async function initializeQueueConsumer(messageProcessorCallback) {
       if (msg !== null) {
         const payloadString = msg.content.toString();
         console.log(`[Queue Bridge] Inbound message captured from queue "${queue}"`);
-        
+
+        // Malformed JSON can never succeed on retry — requeuing it would redeliver the same
+        // unparseable message forever, permanently blocking this queue under prefetch(1).
+        let parsedPayload;
         try {
-          const parsedPayload = JSON.parse(payloadString);
-          
+          parsedPayload = JSON.parse(payloadString);
+        } catch (parseError) {
+          console.error(`[Queue Bridge] Discarding unparseable message (not requeued): ${parseError.message}`);
+          channel.nack(msg, false, false);
+          return;
+        }
+
+        try {
           // Route data parameters to the application layer and wait for execution to complete
           await messageProcessorCallback(queue, parsedPayload);
-          
+
           // Acknowledge transaction safely strictly AFTER execution finishes cleanly
           channel.ack(msg);
           console.log(`[Queue Bridge] Transaction acknowledged cleanly for message ID: ${msg.fields.deliveryTag}`);
         } catch (error) {
           console.error(`[Queue Bridge] Execution error encountered handling payload: ${error.message}`);
-          
+
           // Re-queue message if processing fails due to unexpected transient errors
           console.log(`[Queue Bridge] Rejecting message ID ${msg.fields.deliveryTag}. Triggering cluster re-queue logic...`);
-          channel.nack(msg, false, true); 
+          channel.nack(msg, false, true);
         }
       }
     }, { noAck: false }); // Disable dangerous automatic acks to ensure data safety

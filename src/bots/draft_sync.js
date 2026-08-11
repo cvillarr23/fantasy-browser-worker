@@ -34,6 +34,7 @@ const REST_RECONCILE_INTERVAL_MS = 15000;
  *    draft board including overallPickNumber, roundId, roundPickNumber, teamId, playerId (-1 for
  *    not-yet-drafted slots). Polled on startup (to seed/backfill state for a worker joining
  *    mid-draft) and periodically thereafter to reconcile/correct anything the WebSocket missed.
+ *    REST always wins on conflict — it's authoritative; WS is just the low-latency nudge.
  *
  * DRAFT_MODE=mock (for local/k8s test runs only — never set this against the real draft): instead
  * of navigating straight to ESPN_LEAGUE_ID, joins a fresh ESPN practice draft from the mock draft
@@ -63,22 +64,44 @@ function parseSelectedFrame(raw) {
   };
 }
 
+/**
+ * Durably records a pick, then notifies subscribers — durability first, so by the time anyone
+ * is notified via pub/sub, XRANGE/HGET against this pick already reflects it.
+ *
+ * REST events are authoritative and always win; a WS-derived event never overwrites whatever's
+ * already recorded for that pick_number (it can only fill an empty slot), since WS has no true
+ * overall pick number of its own — it's a locally-computed guess that a missed frame can throw
+ * off, and only REST's next reconciliation pass can actually correct that.
+ */
 async function publishPickEvent(redisClient, event, state) {
-  if (state.lastPickNumber != null && event.pick_number <= state.lastPickNumber) {
-    return; // Already published (or superseded) this pick — REST reconciliation re-sends old picks.
-  }
-  if (state.lastPickNumber != null && event.pick_number !== state.lastPickNumber + 1) {
+  const boardKey = `draft:${state.leagueId}:board`;
+  const existingRaw = await redisClient.hGet(boardKey, String(event.pick_number));
+
+  if (existingRaw) {
+    const existing = JSON.parse(existingRaw);
+    const alreadyCorrect = existing.player_id === event.player_id && existing.team_id === event.team_id;
+    if (event.source !== "rest" || alreadyCorrect) {
+      return;
+    }
     console.warn(
-      `[Draft Sync] Pick sequence gap: last published ${state.lastPickNumber}, got ${event.pick_number}.`
+      `[Draft Sync] Correcting pick #${event.pick_number} from REST (was ${JSON.stringify(existing)}, now ${JSON.stringify(event)})`
     );
   }
-  state.lastPickNumber = event.pick_number;
 
   const payload = JSON.stringify(event);
-
+  await redisClient
+    .multi()
+    .xAdd(`draft_picks:${state.leagueId}`, "*", { payload })
+    .hSet(boardKey, String(event.pick_number), payload)
+    .exec();
   await redisClient.publish("draft_picks", payload);
-  await redisClient.xAdd(`draft_picks:${state.leagueId}`, "*", { payload });
-  await redisClient.hSet(`draft:${state.leagueId}:board`, String(event.pick_number), payload);
+
+  // Only advance in-memory state once the durable writes above have actually succeeded — if they
+  // threw, this line never runs, so a retry (WS re-delivery or the next REST poll) naturally
+  // reattempts instead of the pick being silently treated as already handled.
+  if (state.lastPickNumber == null || event.pick_number > state.lastPickNumber) {
+    state.lastPickNumber = event.pick_number;
+  }
 
   console.log(
     `[Draft Sync] Published pick #${event.pick_number} (${event.source}): player ${event.player_id} -> team ${event.team_id}`
@@ -120,7 +143,33 @@ async function reconcileFromRest(context, redisClient, state) {
   }
 }
 
-/** Attaches WS + a dead-session watchdog to the page. Returns a handle exposing isDead(). */
+async function handleSelectedFrame(parsed, redisClient, state) {
+  state.pickCounter += 1;
+  const event = {
+    league_id: state.leagueId,
+    player_id: parsed.player_id,
+    pick_number: state.pickCounter,
+    team_id: parsed.team_id,
+    round: parsed.round,
+    source: "ws",
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await publishPickEvent(redisClient, event, state);
+  } catch (err) {
+    console.error(`[Draft Sync] Failed to publish WS pick event: ${err.message}`);
+  }
+}
+
+/**
+ * Attaches WS + a dead-session watchdog to the page. Returns a handle exposing isDead().
+ *
+ * Listeners are attached before navigation (so we don't race the page's own WebSocket connect),
+ * but league context and pickCounter aren't seeded until after the initial REST reconciliation
+ * completes. Any SELECTED frame arriving before that point gets buffered (state.ready stays
+ * false) and drained in order once connectAndStream flips it — otherwise an early pick would be
+ * numbered from 1 against a null league ID and corrupt the board.
+ */
 function attachDraftListeners(page, redisClient, state) {
   let openSockets = 0;
   let lastActivityAt = Date.now();
@@ -135,21 +184,11 @@ function attachDraftListeners(page, redisClient, state) {
       const parsed = parseSelectedFrame(frame.payload);
       if (!parsed) return;
 
-      state.pickCounter += 1;
-      const event = {
-        league_id: state.leagueId,
-        player_id: parsed.player_id,
-        pick_number: state.pickCounter,
-        team_id: parsed.team_id,
-        round: parsed.round,
-        source: "ws",
-        timestamp: new Date().toISOString(),
-      };
-      try {
-        await publishPickEvent(redisClient, event, state);
-      } catch (err) {
-        console.error(`[Draft Sync] Failed to publish WS pick event: ${err.message}`);
+      if (!state.ready) {
+        state.pendingFrames.push(parsed);
+        return;
       }
+      await handleSelectedFrame(parsed, redisClient, state);
     });
 
     ws.on("close", () => {
@@ -187,11 +226,24 @@ async function enterDraftRoom(session) {
 async function connectAndStream(redisClient, state) {
   const session = await createAuthenticatedSession();
   let reconcileInterval;
+  state.ready = false;
+  state.pendingFrames = [];
+
   try {
     // Attach listeners before navigating so we don't race the page's own WebSocket connect.
     const handle = attachDraftListeners(session.page, redisClient, state);
 
     const draftContext = await enterDraftRoom(session);
+
+    // DRAFT_MODE=mock joins a brand-new ephemeral league on every reconnect — carrying over the
+    // previous draft's counters would misnumber (or skip) every pick in the new one.
+    if (state.leagueId && state.leagueId !== draftContext.leagueId) {
+      console.log(
+        `[Draft Sync] League changed (${state.leagueId} -> ${draftContext.leagueId}), resetting pick counters.`
+      );
+      state.lastPickNumber = null;
+      state.pickCounter = 0;
+    }
     state.leagueId = draftContext.leagueId;
     state.seasonId = draftContext.seasonId;
     state.teamId = draftContext.teamId;
@@ -200,6 +252,15 @@ async function connectAndStream(redisClient, state) {
     // report a bogus pick counter or miss earlier picks.
     await reconcileFromRest(session.context, redisClient, state);
     state.pickCounter = state.lastPickNumber ?? 0;
+
+    // Drain anything that arrived while we were still initializing, in order. New frames pushed
+    // onto pendingFrames while this loop runs (state.ready is still false) get drained too, since
+    // we keep re-checking the array's length rather than snapshotting it up front.
+    while (state.pendingFrames.length > 0) {
+      const parsed = state.pendingFrames.shift();
+      await handleSelectedFrame(parsed, redisClient, state);
+    }
+    state.ready = true;
 
     reconcileInterval = setInterval(() => {
       reconcileFromRest(session.context, redisClient, state);
@@ -220,9 +281,21 @@ async function connectAndStream(redisClient, state) {
 async function streamLiveDraftRoom() {
   console.log(`[Draft Sync] Booting live channel listener client. Connecting to Redis node at ${REDIS_HOST}...`);
   const redisClient = redis.createClient({ url: `redis://${REDIS_HOST}:${REDIS_PORT}` });
+  // Without this, an unhandled 'error' event (Node Redis emits connection errors through the
+  // EventEmitter) would crash the process outright instead of letting the client's own
+  // reconnect strategy recover.
+  redisClient.on("error", (err) => console.error(`[Draft Sync] Redis client error: ${err.message}`));
   await redisClient.connect();
 
-  const state = { lastPickNumber: null, pickCounter: 0, leagueId: null, seasonId: null, teamId: null };
+  const state = {
+    lastPickNumber: null,
+    pickCounter: 0,
+    leagueId: null,
+    seasonId: null,
+    teamId: null,
+    ready: false,
+    pendingFrames: [],
+  };
   let attempt = 0;
 
   try {
