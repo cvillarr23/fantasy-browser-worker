@@ -1,6 +1,37 @@
 {
-  "roster_table": ".roster-table",
+  "_comment": [
+    "DOM selectors for the ESPN fantasy UI. Kept FLAT on purpose — test_login.js,",
+    "check_espn_session.js, draft_clicker.js and waiver_sniper.js all read these keys directly.",
+    "",
+    "Recon on 2026-08-11 (src/bots/lineup_recon.js, league 1248158344) found that ESPN's roster",
+    "table exposes NO per-player identifier in the DOM: `tr[data-player-id]`, `tr[data-playerid]`",
+    "and any attribute matching /player.?id/i all return ZERO matches. Rows carry only `data-idx`,",
+    "a positional index. That is why lineup_bot.js drives ESPN's REST API instead of clicking",
+    "(see src/bots/espn_api.js).",
+    "",
+    "Consequence for other bots: waiver_sniper.js:29 and draft_clicker.js:27 both build",
+    "`tr[data-player-id=...]` locators, which cannot ever match. Both are known-broken and are",
+    "tracked in their own issues — not fixed here.",
+    "",
+    "`roster_table` was `.roster-table`, which matched nothing; it is now the verified `.Table`."
+  ],
+
+  "_verified": {
+    "source": "lineup_recon.js against league 1248158344 team 8, 2026-08-11",
+    "keys": ["roster_table", "roster_row", "player_column"]
+  },
+  "_unverified": {
+    "warning": "Never matched against a real page. Do not assume these work.",
+    "keys": ["move_button", "here_button", "save_button", "search_input", "draft_button", "waiver_confirm_button"]
+  },
+
+  "roster_table": ".Table",
+  "roster_row": ".Table__TR",
+  "player_column": "[class*=\"player-column\"]",
+
   "move_button": "button:has-text(\"Move\")",
+  "here_button": "button:has-text(\"Here\")",
+  "save_button": "button:has-text(\"Save\")",
   "search_input": "input[placeholder*=\"Search\"]",
   "draft_button": "button.draft-player-action",
   "waiver_confirm_button": "button:has-text(\"Continue\")"

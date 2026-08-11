@@ -51,7 +51,7 @@ function resolveEspnCookies() {
  * Headless Browser Sandbox Initializer
  * Establishes optimized browser context pools while keeping container RAM under 1200MiB.
  */
-async function createAuthenticatedSession() {
+async function createAuthenticatedSession({ headless = true } = {}) {
   // Resolve credentials before launching anything — if this throws, there's no browser process
   // left dangling with nothing left to close it.
   const cookies = resolveEspnCookies();
@@ -85,9 +85,11 @@ async function createAuthenticatedSession() {
     );
   }
 
-  // 1. Launch a sandboxed browser process explicitly optimized for containerized Linux engines
+  // 1. Launch a sandboxed browser process explicitly optimized for containerized Linux engines.
+  // `headless` is overridable only so the recon tools (lineup_recon.js --watch-save) can open a
+  // window you interact with by hand; every production bot leaves it at the default.
   const browser = await chromium.launch({
-    headless: true,
+    headless,
     args: launchArgs
   });
 
