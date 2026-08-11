@@ -13,3 +13,6 @@ Make sure your system layout supports local browser binaries before launching:
 npm install
 npx playwright install chromium
 ```
+
+## Project Tracking
+Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
