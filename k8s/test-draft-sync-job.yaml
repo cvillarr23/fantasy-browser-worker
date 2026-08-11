@@ -8,8 +8,16 @@
 # One-time setup, once for the whole cluster (not per test run):
 #   bao kv put secret/fantasy/ghcr username=<your-github-username> token=<PAT with read:packages scope>
 #
+# DRAFT_ROOM_URL: join or create a mock draft yourself in a real, logged-in browser first
+# (https://fantasy.espn.com/football/mockdraftlobby), then paste that room's URL below.
+# DRAFT_MODE=mock (auto-join a fresh practice draft) does NOT currently work — ESPN's mock lobby
+# has no anonymous instant-start option, and the closest thing to one ("League Specific Practice
+# Draft") is gated by the same invisible reCAPTCHA Enterprise that blocks automated login.
+# Confirmed via live debugging 2026-08-10 — see draft_sync.js's header comment.
+#
 # Usage:
 #   git push origin main                                        # triggers the build+publish workflow
+#   # edit DRAFT_ROOM_URL below to a room you joined yourself
 #   kubectl delete job draft-sync-test --ignore-not-found -n default
 #   kubectl apply -f k8s/test-draft-sync-job.yaml
 #   kubectl logs -f job/draft-sync-test -n default
@@ -50,8 +58,8 @@ spec:
             - containerPort: 9222
               name: cdp-debug
           env:
-            - name: DRAFT_MODE
-              value: "mock"
+            - name: DRAFT_ROOM_URL
+              value: "https://fantasy.espn.com/football/draft?leagueId=REPLACE_ME&seasonId=2026&teamId=REPLACE_ME&memberId=REPLACE_ME"
             - name: CDP_DEBUG_PORT
               value: "9222"
             - name: REDIS_HOST
