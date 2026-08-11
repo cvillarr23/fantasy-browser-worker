@@ -36,10 +36,17 @@ const REST_RECONCILE_INTERVAL_MS = 15000;
  *    mid-draft) and periodically thereafter to reconcile/correct anything the WebSocket missed.
  *    REST always wins on conflict — it's authoritative; WS is just the low-latency nudge.
  *
- * DRAFT_MODE=mock (for local/k8s test runs only — never set this against the real draft): instead
- * of navigating straight to ESPN_LEAGUE_ID, joins a fresh ESPN practice draft from the mock draft
- * lobby (see mock_draft.js) and derives leagueId/seasonId/teamId from wherever that lands, since
- * practice draft league IDs are ephemeral and can't be known ahead of time.
+ * DRAFT_ROOM_URL (for local/k8s test runs only — never set this against the real draft): navigates
+ * directly to a specific, already-open draft room URL instead of building one or joining fresh.
+ * Needed because DRAFT_MODE=mock's auto-join doesn't work headlessly — ESPN's mock lobby has no
+ * anonymous "instant start": the "League Specific Practice Draft" button (the closest thing to
+ * one) triggers a DisneyID identity-verification flow gated by the same invisible reCAPTCHA
+ * Enterprise that blocks automated login, confirmed via live debugging on 2026-08-10. So for
+ * testing, join/create a mock draft yourself in a real browser and pass its URL here. Takes
+ * priority over DRAFT_MODE=mock if both are set.
+ *
+ * DRAFT_MODE=mock is left in place (mock_draft.js) in case a future recon finds an unrestricted
+ * join path (e.g. one of the pre-scheduled public room links, untested), but don't rely on it now.
  */
 function buildDraftUrl(leagueId, seasonId, teamId, memberId) {
   return `https://fantasy.espn.com/football/draft?leagueId=${leagueId}&seasonId=${seasonId}&teamId=${teamId}&memberId=${memberId}`;
@@ -204,7 +211,10 @@ function attachDraftListeners(page, redisClient, state) {
 
 /** Gets us into a draft room and returns { leagueId, seasonId, teamId }, however DRAFT_MODE dictates. */
 async function enterDraftRoom(session) {
-  if (process.env.DRAFT_MODE === "mock") {
+  if (process.env.DRAFT_ROOM_URL) {
+    console.log(`[Draft Sync] DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`);
+    await session.page.goto(process.env.DRAFT_ROOM_URL, { waitUntil: "load", timeout: 60000 });
+  } else if (process.env.DRAFT_MODE === "mock") {
     console.log("[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...");
     await startFreshPracticeDraft(session.page);
   } else {
