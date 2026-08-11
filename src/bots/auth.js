@@ -93,45 +93,55 @@ async function createAuthenticatedSession({ headless = true } = {}) {
     args: launchArgs
   });
 
-  // 2. Initialize a blank workspace container context
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 720 },
-    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-  });
+  // Everything past launch is wrapped: the browser process exists from this point on, but callers
+  // only ever receive it via the returned session. If any setup step below throws, the caller's
+  // `finally { session.browser.close() }` never sees a session to close, so the Chromium process
+  // would be orphaned — and in the long-lived queue worker that leaks one per failed message until
+  // the 1200MiB pod limit OOM-kills it.
+  try {
+    // 2. Initialize a blank workspace container context
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 720 },
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    });
 
-  console.log("[Auth Engine] Injecting authentication state storage tokens into browser context pool...");
+    console.log("[Auth Engine] Injecting authentication state storage tokens into browser context pool...");
 
-  // 3. Force inject active cookies into the browser memory layer to trick ESPN into bypassing MFA challenges
-  await context.addCookies([
-    {
-      name: "espn_s2",
-      value: espnS2,
-      domain: ".espn.com",
-      path: "/",
-      httpOnly: true,
-      secure: true
-    },
-    {
-      name: "SWID",
-      value: swid,
-      domain: ".espn.com",
-      path: "/",
-      httpOnly: false,
-      secure: true
-    }
-  ]);
+    // 3. Force inject active cookies into the browser memory layer to trick ESPN into bypassing MFA challenges
+    await context.addCookies([
+      {
+        name: "espn_s2",
+        value: espnS2,
+        domain: ".espn.com",
+        path: "/",
+        httpOnly: true,
+        secure: true
+      },
+      {
+        name: "SWID",
+        value: swid,
+        domain: ".espn.com",
+        path: "/",
+        httpOnly: false,
+        secure: true
+      }
+    ]);
 
-  // 4. Optimize network overhead by blocking media and tracking script downloads on demand
-  const page = await context.newPage();
-  await page.route("**/*.{png,jpg,jpeg,gif,png,svg,css,woff,woff2,eot,ttf}", (route) => {
-    // Blocks heavy structural css/images during instant waiver sniping windows to save network cycles
-    if (process.env.NODE_ENV === "production") {
-      return route.abort();
-    }
-    return route.continue();
-  });
+    // 4. Optimize network overhead by blocking media and tracking script downloads on demand
+    const page = await context.newPage();
+    await page.route("**/*.{png,jpg,jpeg,gif,png,svg,css,woff,woff2,eot,ttf}", (route) => {
+      // Blocks heavy structural css/images during instant waiver sniping windows to save network cycles
+      if (process.env.NODE_ENV === "production") {
+        return route.abort();
+      }
+      return route.continue();
+    });
 
-  return { browser, context, page, swid };
+    return { browser, context, page, swid };
+  } catch (setupError) {
+    await browser.close().catch(() => {}); // Never let a close failure mask the real error.
+    throw setupError;
+  }
 }
 
 module.exports = {

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitLineup } = require("./espn_api");
+const { PermanentError } = require("../errors");
 const slotConfig = require("../selectors/lineup_slots.json");
 
 /**
@@ -21,8 +22,8 @@ const slotConfig = require("../selectors/lineup_slots.json");
  * espn_api.js's header for why: the roster DOM carries no per-player identifier whatsoever, only a
  * positional `data-idx`, which WORKER-03 explicitly forbids depending on.
  *
- * Safety rails, all on by default except DRY_RUN:
- *   - DRY_RUN=true   — do every read, validation and plan step, log the exact items, submit nothing.
+ * Safety rails, all on by default:
+ *   - DRY_RUN        — defaults to TRUE; only an explicit DRY_RUN=false submits anything.
  *   - idempotency    — swaps already satisfied are dropped; a requeued message can't double-apply.
  *   - verification   — after submitting, re-read the roster and assert every player actually landed.
  *   - failure capture — dump roster state + a screenshot to DEBUG_OUTPUT_DIR before rethrowing.
@@ -80,66 +81,144 @@ function describeSlot(slotId) {
   return `${slotConfig.slot_names[String(slotId)] || "?"}(${slotId})`;
 }
 
+/** ESPN player ids are numeric; anything else would serialize to a null playerId in the request. */
+function requirePlayerId(raw, label, index) {
+  const id = String(raw ?? "").trim();
+  if (!/^\d+$/.test(id)) {
+    throw new PermanentError(
+      `Swap #${index + 1}: ${label} "${raw}" is not a valid numeric ESPN player id.`
+    );
+  }
+  return id;
+}
+
 /**
- * Turns the payload's swaps into a flat list of LINEUP items, dropping anything already satisfied.
- * Throws on a swap that references a player who isn't rostered — submitting that would produce a
- * meaningless transaction, and it almost certainly signals producer/consumer drift worth requeuing.
+ * Turns the payload's swaps into a flat list of LINEUP items.
+ *
+ * Three things here are subtler than they look:
+ *
+ * 1. Moves are planned against a *working copy* of the roster that is mutated as each item is
+ *    added, not against the original snapshot. Otherwise a payload whose second swap touches a
+ *    player the first swap already moved emits a stale fromLineupSlotId, and the second swap
+ *    silently undoes the first.
+ * 2. Filtering is per-player, not per-swap. Checking only "add is in the target AND drop is on the
+ *    bench" leaves the half-satisfied case emitting a from==to self-move, which is the exact state
+ *    a partially-applied transaction redelivers in.
+ * 3. Slot capacity is enforced. Because `drop` goes to the bench rather than into the vacated slot,
+ *    every swap where drop isn't already in the target slot is a net +1 into it — two swaps into a
+ *    1-deep FLEX would otherwise be submitted and rejected (or half-applied) by ESPN.
+ *
+ * Everything rejected here is a PermanentError: none of it can come good on redelivery.
  */
 function planSwaps(swaps, roster, log) {
+  if (!Array.isArray(swaps)) {
+    throw new PermanentError(`optimized_swaps must be an array, got ${typeof swaps}.`);
+  }
+
   const benchSlotId = slotConfig.bench_slot_id;
   const items = [];
   const intended = new Map(); // playerId -> expected lineupSlotId, used by verification
+  const seen = new Map(); // playerId -> swap index, to reject a player appearing in two swaps
+  const current = new Map(roster.slotByPlayerId); // working copy, mutated as moves are planned
   let skipped = 0;
 
   for (const [index, swap] of swaps.entries()) {
-    const dropId = String(swap.drop_player_id);
-    const addId = String(swap.add_player_id);
+    const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
+    const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
     const targetSlotId = resolveSlotId(swap.slot);
 
-    // lineup_slots.json is a documented reference; the league's live settings are the truth. A slot
-    // the league doesn't actually field (count 0 or absent) would otherwise be submitted anyway and
-    // come back as an opaque API rejection that requeues forever — catch it here as a clear,
-    // permanent configuration error instead.
+    if (dropId === addId) {
+      throw new PermanentError(
+        `Swap #${index + 1}: drop_player_id and add_player_id are both ${addId} — a player cannot ` +
+          "be benched and promoted in the same swap."
+      );
+    }
+    for (const [id, label] of [[dropId, "drop"], [addId, "add"]]) {
+      if (seen.has(id)) {
+        throw new PermanentError(
+          `Swap #${index + 1}: player ${id} (${label}) already appears in swap #${seen.get(id) + 1}. ` +
+            "Chained swaps over the same player are ambiguous; the producer should collapse them."
+        );
+      }
+      seen.set(id, index);
+    }
+
+    // lineup_slots.json is a documented reference; the league's live settings are the truth.
     const liveCount = roster.slotCounts[String(targetSlotId)];
     if (!liveCount) {
-      throw new Error(
+      throw new PermanentError(
         `Swap #${index + 1}: slot "${swap.slot}" resolves to ${describeSlot(targetSlotId)}, which ` +
           `this league does not field (lineupSlotCounts has ${liveCount === 0 ? "0" : "no entry"} ` +
           "for it). Producer and league settings disagree."
       );
     }
 
-    const dropFrom = roster.slotByPlayerId.get(dropId);
-    const addFrom = roster.slotByPlayerId.get(addId);
-
+    const dropFrom = current.get(dropId);
+    const addFrom = current.get(addId);
     if (dropFrom === undefined) {
-      throw new Error(`Swap #${index + 1}: player ${dropId} (drop) is not on team's roster.`);
+      throw new PermanentError(`Swap #${index + 1}: player ${dropId} (drop) is not on team's roster.`);
     }
     if (addFrom === undefined) {
-      throw new Error(`Swap #${index + 1}: player ${addId} (add) is not on team's roster.`);
+      throw new PermanentError(`Swap #${index + 1}: player ${addId} (add) is not on team's roster.`);
     }
 
-    // Already-satisfied: the promoted player sits in the target slot and the demoted one is benched.
-    if (addFrom === targetSlotId && dropFrom === benchSlotId) {
+    // Demote before promoting, so the target slot is free by the time the promotion lands.
+    const moves = [];
+    if (dropFrom !== benchSlotId) moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
+    if (addFrom !== targetSlotId) moves.push({ id: addId, from: addFrom, to: targetSlotId });
+
+    // Both halves already hold — nothing to do. This is what makes a redelivered message a no-op.
+    if (moves.length === 0) {
       log(`Swap #${index + 1} already satisfied (${addId} in ${describeSlot(targetSlotId)}), skipping.`);
       skipped += 1;
       continue;
     }
 
-    log(
-      `Swap #${index + 1}: ${addId} ${describeSlot(addFrom)} -> ${describeSlot(targetSlotId)}, ` +
-        `${dropId} ${describeSlot(dropFrom)} -> ${describeSlot(benchSlotId)}`
-    );
+    for (const move of moves) {
+      log(`Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`);
+      items.push({
+        playerId: Number(move.id),
+        type: "LINEUP",
+        fromLineupSlotId: move.from,
+        toLineupSlotId: move.to,
+      });
+      current.set(move.id, move.to);
+    }
 
-    items.push(
-      { playerId: Number(addId), type: "LINEUP", fromLineupSlotId: addFrom, toLineupSlotId: targetSlotId },
-      { playerId: Number(dropId), type: "LINEUP", fromLineupSlotId: dropFrom, toLineupSlotId: benchSlotId }
-    );
+    // Record the full intended end state for both players, including any half that was already
+    // correct, so verification confirms the whole swap rather than only the part that moved.
     intended.set(addId, targetSlotId);
     intended.set(dropId, benchSlotId);
   }
 
+  assertSlotCapacity(items, current, roster.slotCounts);
+
   return { items, intended, skipped };
+}
+
+/** Rejects a plan that would overfill any slot it moves into. */
+function assertSlotCapacity(items, finalRoster, slotCounts) {
+  const targetSlots = new Set(items.map((item) => item.toLineupSlotId));
+  const occupancy = new Map();
+  for (const slotId of finalRoster.values()) {
+    occupancy.set(slotId, (occupancy.get(slotId) || 0) + 1);
+  }
+
+  const overfilled = [];
+  for (const slotId of targetSlots) {
+    const capacity = slotCounts[String(slotId)] || 0;
+    const used = occupancy.get(slotId) || 0;
+    if (used > capacity) {
+      overfilled.push(`${describeSlot(slotId)}: ${used} players for ${capacity} spot(s)`);
+    }
+  }
+
+  if (overfilled.length > 0) {
+    throw new PermanentError(
+      `Planned lineup overfills ${overfilled.length} slot(s) — ${overfilled.join("; ")}. ` +
+        "ESPN would reject or half-apply this transaction."
+    );
+  }
 }
 
 /** Re-reads the authoritative roster and asserts every intended move actually landed. */
@@ -176,23 +255,21 @@ async function verifyLineup(context, target, intended, log) {
   );
 }
 
-/** Best-effort forensics before rethrowing; never allowed to mask the original error. */
-async function captureFailure(session, tracking, details) {
+/**
+ * Best-effort forensics before rethrowing; never allowed to mask the original error.
+ *
+ * Deliberately no screenshot: this bot drives the REST API and never navigates, so session.page is
+ * always about:blank — an image of it would be pure noise. What actually helps when diagnosing a
+ * failed transaction is the roster as read and the items that were planned from it.
+ */
+function captureFailure(tracking, details) {
   try {
     fs.mkdirSync(DEBUG_DIR, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const base = path.join(DEBUG_DIR, `lineup-fail-${tracking}-${stamp}`);
+    const file = path.join(DEBUG_DIR, `lineup-fail-${tracking}-${stamp}.json`);
 
-    const written = [`${base}.json`];
-    fs.writeFileSync(`${base}.json`, JSON.stringify(details, null, 2));
-
-    // No page when the failure happened before/while the browser was coming up (bad cookies, for
-    // instance) — report only what was actually captured rather than pointing at a missing file.
-    if (session?.page) {
-      await session.page.screenshot({ path: `${base}.png`, fullPage: true });
-      written.push(`${base}.png`);
-    }
-    console.error(`[Lineup Bot][${tracking}] Failure context written to: ${written.join(", ")}`);
+    fs.writeFileSync(file, JSON.stringify(details, null, 2));
+    console.error(`[Lineup Bot][${tracking}] Failure context written to: ${file}`);
   } catch (captureError) {
     console.error(`[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
   }
@@ -205,15 +282,23 @@ async function executeLineupAdjustments(payload) {
   const teamId = payload.team_id;
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const seasonId = process.env.CURRENT_YEAR || "2026";
-  const swaps = payload.optimized_swaps || [];
+  const swaps = payload.optimized_swaps ?? [];
+  let roster = null;
+  let planned = null;
 
+  // All three are permanent: redelivering the same message against the same config cannot help.
   if (!leagueId) {
-    throw new Error(
+    throw new PermanentError(
       `[Lineup Bot][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify which league to act on.`
     );
   }
   if (teamId === undefined || teamId === null || teamId === "") {
-    throw new Error(`[Lineup Bot][${tracking}] Payload is missing team_id.`);
+    throw new PermanentError(`[Lineup Bot][${tracking}] Payload is missing team_id.`);
+  }
+  if (!Array.isArray(swaps)) {
+    throw new PermanentError(
+      `[Lineup Bot][${tracking}] optimized_swaps must be an array, got ${typeof swaps}.`
+    );
   }
   if (swaps.length === 0) {
     log(`No transaction swaps specified for team ${teamId}. Nothing to do.`);
@@ -236,16 +321,20 @@ async function executeLineupAdjustments(payload) {
   try {
     session = await createAuthenticatedSession();
 
-    const roster = await readRoster(session.context, target);
+    roster = await readRoster(session.context, target);
     log(`Roster read: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`);
 
+    // Permanent rather than retriable: a draft is days or weeks away, and hot-looping until then
+    // would pin the queue. The producer can republish once there's a roster to realign.
     if (roster.entryCount === 0) {
-      throw new Error(
+      throw new PermanentError(
         `[Lineup Bot][${tracking}] Team ${teamId} has an empty roster — the draft likely hasn't ` +
           "happened yet, so there is nothing to realign."
       );
     }
-    const { items, intended, skipped } = planSwaps(swaps, roster, log);
+
+    planned = planSwaps(swaps, roster, log);
+    const { items, intended, skipped } = planned;
 
     // Plan BEFORE checking the lock. If a submit succeeded but verification failed transiently, the
     // message gets requeued; should the lineup lock before redelivery, a lock-check-first ordering
@@ -257,8 +346,9 @@ async function executeLineupAdjustments(payload) {
       return;
     }
 
+    // Permanent: once games kick off the lock holds for hours and this week's optimization is moot.
     if (roster.lineupLocked || roster.rosterLocked) {
-      throw new Error(
+      throw new PermanentError(
         `[Lineup Bot][${tracking}] ESPN reports this lineup as locked ` +
           `(lineupLocked=${roster.lineupLocked}, rosterLocked=${roster.rosterLocked}) — games have ` +
           `started and the ${items.length} remaining change(s) will not be accepted.`
@@ -282,17 +372,26 @@ async function executeLineupAdjustments(payload) {
     await verifyLineup(session.context, target, intended, log);
     log("Lineup realignment complete and verified.");
   } catch (error) {
-    console.error(`[Lineup Bot][${tracking}] Transaction failed: ${error.message}`);
-    await captureFailure(session, tracking, {
+    console.error(
+      `[Lineup Bot][${tracking}] Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`
+    );
+    captureFailure(tracking, {
       tracking_id: tracking,
       league_id: leagueId,
       team_id: teamId,
       season_id: seasonId,
       dry_run: dryRun,
+      permanent: error.permanent === true,
       swaps,
+      // The roster as read and the items planned from it — the two things needed to reconstruct
+      // what the bot believed when it failed.
+      roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
+      slot_counts: roster ? roster.slotCounts : null,
+      planned_items: planned ? planned.items : null,
       error: error.message,
     });
-    throw error; // Bubble up so connection.js nacks and RabbitMQ requeues.
+    // Bubble up: connection.js requeues an ordinary Error, and discards a PermanentError.
+    throw error;
   } finally {
     if (session && session.browser) {
       await session.browser.close();
