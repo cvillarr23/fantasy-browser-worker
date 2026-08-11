@@ -14,8 +14,10 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-# Explicitly install only the Chromium browser binary required for the engine
-RUN npx playwright install chromium
+# --with-deps also apt-get installs Chromium's OS-level shared library dependencies (glib, nss,
+# etc.) for the detected distro — without it, the binary downloads fine but fails to launch at
+# runtime with "error while loading shared libraries: libglib-2.0.so.0: ...".
+RUN npx playwright install --with-deps chromium
 
 COPY . .
 
