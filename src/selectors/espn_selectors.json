@@ -2,5 +2,6 @@
   "roster_table": ".roster-table",
   "move_button": "button:has-text(\"Move\")",
   "search_input": "input[placeholder*=\"Search\"]",
-  "draft_button": "button.draft-player-action"
+  "draft_button": "button.draft-player-action",
+  "waiver_confirm_button": "button:has-text(\"Continue\")"
 }
