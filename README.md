@@ -14,5 +14,18 @@ npm install
 npx playwright install chromium
 ```
 
+## Architecture
+Cross-repo architecture and reference docs for the whole platform live in [`fantasy-core-pipeline`'s `ARCHITECTURE.md`](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/ARCHITECTURE.md).
+
+This service's own internals:
+
+```mermaid
+flowchart TD
+    mq["RabbitMQ\nlineup_updates / waiver_actions"] --> listener["src/queue\nconnection listeners"]
+    listener --> bots["src/bots\nlineup adjustments, draft sync, sniping"]
+    bots --> selectors["src/selectors\nESPN DOM query paths"]
+    selectors --> espn["ESPN fantasy site\n(Playwright/Chromium)"]
+```
+
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
