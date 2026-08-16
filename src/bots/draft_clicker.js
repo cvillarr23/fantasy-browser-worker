@@ -1,37 +1,242 @@
-const { createAuthenticatedSession } = require("./auth");
-const selectors = require("../selectors/espn_selectors.json");
+const fs = require("fs");
+const path = require("path");
+const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
+const { readDraftPicks } = require("./espn_api");
+const { connectToDraftRoom } = require("./draft_room_socket");
+const { PermanentError } = require("../errors");
 
 /**
- * 1-Click Automated Draft Execution Bot
- * Executes high-speed player selections inside active draft frames.
+ * 1-Click Automated Draft Execution Bot (WORKER-06)
+ *
+ * Consumes `draft_targets` messages published by fantasy-core-pipeline's
+ * `POST /v1/trigger/draft-pick` gateway (per CORE-08's update on issue #6):
+ *
+ *   { "tracking_id": "...", "team_id": "8", "player_id": "4360438", "name": "Breece Hall" }
+ *
+ * Does NOT click the draft room DOM (issue #6's original spec) — issue #14 found that pattern
+ * (`tr[data-player-id]`) already dead on the roster page, and very likely dead here too. Also does
+ * NOT submit via REST as the primary path, despite that being WORKER-03's fix for the same DOM
+ * problem: picks go out as a `SELECT <playerId>` frame over the same raw WebSocket draft_sync.js
+ * already reads `SELECTED` broadcasts from — confirmed end-to-end 2026-08-16 by running this exact
+ * WS path (draft_room_socket.js) against a real practice draft (scripts/practice-draft-test.js),
+ * not just observed in a browser. See draft_room_socket.js's header for the full protocol writeup.
+ *
+ * KNOWN GAP, not fixed here: `player_id` in the payload is Sleeper-namespaced (players.player_id
+ * per core-pipeline's crosswalk), but every ESPN draft API — and this bot's own idempotency check
+ * — is keyed on ESPN's native playerId. This code assumes payload.player_id is already an ESPN id
+ * (matching draft_sync.js's own existing assumption for its picks), which will misfire until
+ * core-pipeline exposes a Sleeper->ESPN lookup. Flagged for follow-up: request `position`/
+ * `pro_team` be added to the draft_targets payload (CORE-08) so a name+position+team stopgap match
+ * against ESPN's player pool is possible without a full crosswalk.
+ *
+ * Safety rails, mirroring lineup_bot.js:
+ *   - DRY_RUN      — defaults to TRUE; only an explicit DRY_RUN=false attempts a live submission.
+ *   - idempotency  — a player already drafted by our own team is treated as already satisfied.
+ *   - conflict     — a player drafted by someone else is a PermanentError (retrying can't help).
+ *   - failure capture — dump payload + last-known draft board to DEBUG_OUTPUT_DIR before rethrowing.
  */
-async function executeAutomatedDraftSelection(payload) {
-  const targetId = payload.player_id;
-  const targetName = payload.name;
-  console.log(`[Draft Clicker] TARGET ASSIGNED: Locking in pick selection for: "${targetName}" (ID: ${targetId})`);
 
-  // Share active context properties with the live tracking frame to prevent dual login conflicts
+const DEBUG_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
+
+// The real capture showed a SELECTED confirmation land ~0.2s after its SELECT — generous
+// headroom over that before treating a live submission as unconfirmed.
+const CONFIRM_TIMEOUT_MS = 5000;
+
+/**
+ * Small randomized delay applied only to setup steps (the draft-board read, opening the socket) —
+ * never between deciding to pick and calling sendPick(), which stays immediate. A fixed-latency
+ * bot firing every request at an identical cadence is its own signal; jittering the parts that
+ * aren't racing the draft clock costs nothing against the 60-90s window.
+ */
+function jitter(minMs, maxMs) {
+  const delay = minMs + Math.random() * (maxMs - minMs);
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
+/**
+ * Live writes are OPT-IN, not opt-out — same reasoning as lineup_bot.js's resolveDryRun: the
+ * production queue path sets no env var of its own, and an unset DRY_RUN must not mean "submit to
+ * the live draft."
+ */
+function resolveDryRun() {
+  const raw = (process.env.DRY_RUN || "").trim();
+  if (raw === "") return { dryRun: true, defaulted: true };
+  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
+}
+
+function requirePlayerId(raw, tracking) {
+  const id = String(raw ?? "").trim();
+  if (!/^\d+$/.test(id)) {
+    throw new PermanentError(
+      `[Draft Clicker][${tracking}] payload.player_id "${raw}" is not a valid numeric id.`,
+    );
+  }
+  return id;
+}
+
+/**
+ * Checks the current draft board for this target: already ours (no-op, safe on redelivery),
+ * taken by someone else (PermanentError, retrying can't help), or still open (proceed).
+ */
+function checkTarget(picks, playerId, teamId, tracking, log) {
+  const existing = picks.find((pick) => String(pick.player_id) === playerId);
+  if (!existing) return { alreadyDrafted: false };
+
+  if (String(existing.team_id) === String(teamId)) {
+    log(
+      `Player ${playerId} already drafted by our team (pick #${existing.pick_number}) — no-op.`,
+    );
+    return { alreadyDrafted: true };
+  }
+
+  throw new PermanentError(
+    `[Draft Clicker][${tracking}] Player ${playerId} was already drafted by team ${existing.team_id} ` +
+      `(pick #${existing.pick_number}), not us (team ${teamId}). Target is gone; retrying can't help.`,
+  );
+}
+
+/** Resolves with the matching SELECTED event, or null if none arrives within timeoutMs. */
+function waitForConfirmation(socket, playerId, teamId, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    socket.onSelected((event) => {
+      if (String(event.player_id) === String(playerId) && String(event.team_id) === String(teamId)) {
+        clearTimeout(timer);
+        resolve(event);
+      }
+    });
+  });
+}
+
+function captureFailure(tracking, details) {
+  try {
+    fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = path.join(
+      DEBUG_DIR,
+      `draft-pick-fail-${tracking}-${stamp}.json`,
+    );
+    fs.writeFileSync(file, JSON.stringify(details, null, 2));
+    console.error(
+      `[Draft Clicker][${tracking}] Failure context written to: ${file}`,
+    );
+  } catch (captureError) {
+    console.error(
+      `[Draft Clicker][${tracking}] Could not capture failure context: ${captureError.message}`,
+    );
+  }
+}
+
+async function executeAutomatedDraftSelection(payload) {
+  const tracking = payload.tracking_id || "no-tracking-id";
+  const log = (message) =>
+    console.log(`[Draft Clicker][${tracking}] ${message}`);
+
+  const teamId = payload.team_id;
+  const targetName = payload.name;
+  const leagueId = process.env.ESPN_LEAGUE_ID;
+  const seasonId = process.env.CURRENT_YEAR || "2026";
+
+  if (!leagueId) {
+    throw new PermanentError(
+      `[Draft Clicker][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify the league.`,
+    );
+  }
+  if (teamId === undefined || teamId === null || teamId === "") {
+    throw new PermanentError(
+      `[Draft Clicker][${tracking}] Payload is missing team_id.`,
+    );
+  }
+  const playerId = requirePlayerId(payload.player_id, tracking);
+  if (!targetName) {
+    throw new PermanentError(
+      `[Draft Clicker][${tracking}] Payload is missing name.`,
+    );
+  }
+
+  const { dryRun, defaulted } = resolveDryRun();
+  log(
+    `Target assigned: "${targetName}" (id ${playerId}) for team ${teamId} in league ${leagueId} ` +
+      `(${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
+  );
+  if (defaulted) {
+    log(
+      "DRY_RUN is unset, defaulting to TRUE — no submission will be attempted. Set DRY_RUN=false to " +
+        "submit for real.",
+    );
+  }
+
   let session = null;
+  let picks = null;
   try {
     session = await createAuthenticatedSession();
-    const leagueId = process.env.ESPN_LEAGUE_ID;
-    await session.page.goto(`https://fantasy.espn.com/football/draft?leagueId=${leagueId}`, { waitUntil: "networkidle" });
 
-    // 1. Locate search component, clear inputs, and fill name target properties
-    await session.page.waitForSelector(selectors.search_input, { timeout: 5000 });
-    await session.page.locator(selectors.search_input).fill(targetName);
-    
-    // 2. Isolate the target player row directly using their custom attribute signature
-    const targetPlayerRow = session.page.locator(`tr[data-player-id="${targetId}"]`);
-    await session.page.waitForSelector(`tr[data-player-id="${targetId}"]`, { timeout: 5000 });
+    await jitter(150, 600);
+    picks = await readDraftPicks(session.context, { leagueId, seasonId });
+    log(`Draft board read: ${picks.length} pick(s) recorded so far.`);
 
-    // 3. Fire the automated selection click on the active draft button selector
-    const draftButtonElement = targetPlayerRow.locator(selectors.draft_button);
-    await draftButtonElement.click();
-    
-    console.log(`[Draft Clicker] SUCCESS: Automated selection committed cleanly. Welcome to the team, ${targetName}.`);
+    const { alreadyDrafted } = checkTarget(
+      picks,
+      playerId,
+      teamId,
+      tracking,
+      log,
+    );
+    if (alreadyDrafted) return;
+
+    if (dryRun) {
+      log(
+        `DRY_RUN set — would submit pick: player ${playerId} ("${targetName}") for team ${teamId}.`,
+      );
+      return;
+    }
+
+    log("Connecting to draft room socket to submit pick...");
+    await jitter(100, 400);
+    const cookies = resolveEspnCookies();
+    const socket = await connectToDraftRoom({
+      leagueId,
+      teamId,
+      espnS2: cookies.espnS2,
+      swid: cookies.swid,
+    });
+    try {
+      // Registered before sending — the real capture showed a SELECTED confirmation land
+      // ~0.2s after SELECT, so the listener must already be attached when the frame goes out.
+      // No jitter between here and sendPick(): this is the one step that's actually racing the
+      // draft clock, so it fires the instant the socket is ready.
+      const confirmation = waitForConfirmation(socket, playerId, teamId, CONFIRM_TIMEOUT_MS);
+      socket.sendPick(playerId);
+      const result = await confirmation;
+      if (!result) {
+        // Transient, not PermanentError: unclear whether the pick actually landed, so let
+        // connection.js requeue — the idempotency check above will no-op it if it did.
+        throw new Error(
+          `No SELECTED confirmation for player ${playerId}/team ${teamId} within ${CONFIRM_TIMEOUT_MS}ms.`,
+        );
+      }
+      log(`SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`);
+    } finally {
+      socket.close();
+    }
   } catch (error) {
-    console.error(`[Draft Clicker] Selection bot failed to input or commit transaction element: ${error.message}`);
+    console.error(
+      `[Draft Clicker][${tracking}] Selection failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+    );
+    captureFailure(tracking, {
+      tracking_id: tracking,
+      league_id: leagueId,
+      team_id: teamId,
+      season_id: seasonId,
+      player_id: playerId,
+      name: targetName,
+      dry_run: dryRun,
+      permanent: error.permanent === true,
+      draft_board: picks,
+      error: error.message,
+    });
     throw error;
   } finally {
     if (session && session.browser) {
@@ -40,5 +245,22 @@ async function executeAutomatedDraftSelection(payload) {
   }
 }
 
-module.exports = { executeAutomatedDraftSelection };
+// Local/manual runs: node src/bots/draft_clicker.js '{"team_id":"8","player_id":"4360438","name":"Breece Hall"}'
+if (require.main === module) {
+  const raw = process.argv[2];
+  if (!raw) {
+    console.error(
+      "Usage: node src/bots/draft_clicker.js '<draft_targets JSON payload>'\n" +
+        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/draft_clicker.js \\\n" +
+        `  '{"team_id":"8","player_id":"4360438","name":"Breece Hall"}'`,
+    );
+    process.exit(1);
+  }
 
+  executeAutomatedDraftSelection(JSON.parse(raw)).catch((error) => {
+    console.error(`[Draft Clicker] Run failed: ${error.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { executeAutomatedDraftSelection };

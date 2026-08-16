@@ -33,12 +33,16 @@ function buildTransactionsUrl(leagueId, seasonId) {
  * league settings change can't silently invalidate the bot.
  */
 async function readRoster(context, { leagueId, seasonId, teamId }) {
-  const url = buildLeagueReadUrl(leagueId, seasonId, ["mRoster", "mSettings", "mTeam"]);
+  const url = buildLeagueReadUrl(leagueId, seasonId, [
+    "mRoster",
+    "mSettings",
+    "mTeam",
+  ]);
   const response = await context.request.get(url);
 
   if (!response.ok()) {
     throw new Error(
-      `[ESPN API] Roster read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`
+      `[ESPN API] Roster read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
     );
   }
 
@@ -46,9 +50,9 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
   const team = (body.teams || []).find((t) => String(t.id) === String(teamId));
   if (!team) {
     throw new Error(
-      `[ESPN API] Team ${teamId} not found in league ${leagueId}. Available: ${(body.teams || [])
-        .map((t) => t.id)
-        .join(", ") || "none"}`
+      `[ESPN API] Team ${teamId} not found in league ${leagueId}. Available: ${
+        (body.teams || []).map((t) => t.id).join(", ") || "none"
+      }`,
     );
   }
 
@@ -80,7 +84,10 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
  * drafted as of 2026-08-11 (mRoster returned entries: []). Re-verify post-draft by running
  * `node src/bots/lineup_recon.js --watch-save` and diffing the captured body against this one.
  */
-async function submitLineup(context, { leagueId, seasonId, teamId, memberId, scoringPeriodId, items }) {
+async function submitLineup(
+  context,
+  { leagueId, seasonId, teamId, memberId, scoringPeriodId, items },
+) {
   const url = buildTransactionsUrl(leagueId, seasonId);
   const payload = {
     isLeagueManager: false,
@@ -104,7 +111,122 @@ async function submitLineup(context, { leagueId, seasonId, teamId, memberId, sco
 
   const text = await response.text();
   if (!response.ok()) {
-    throw new Error(`[ESPN API] Lineup submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`);
+    throw new Error(
+      `[ESPN API] Lineup submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
+    );
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
+/**
+ * Fetches the draft-room player pool — the same `view=draftInit` call ESPN's own draft room loads
+ * on entry (confirmed via draft_recon.js capture, HTTP 200, 2026-08-10/2026-08-16), including each
+ * player's `defaultPositionId` (16 = D/ST, 5 = K, among the standard ESPN position ids) and
+ * `draftRanksByRankType.STANDARD.rank`. Used by scripts/practice-draft-test.js to pick guaranteed
+ * -available low-priority test targets (kickers/D-ST rank far below any position bots draft
+ * early) without depending on the draft-pick REST board, which is unreliable for ephemeral
+ * practice drafts (see readDraftPicks's header below).
+ *
+ * Unlike readDraftPicks, this is NOT draft-instance state — it's the current-season player
+ * catalog/rankings, which is why it kept working against these same ephemeral leagues when the
+ * pick-history endpoint didn't.
+ */
+async function fetchDraftPlayerPool(context, { leagueId, seasonId }) {
+  const filter = JSON.stringify({ players: { filterStatsForContainerIds: { value: ["002025", "102026"] } } });
+  const url =
+    `${READS_HOST}/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}` +
+    `?filter=${encodeURIComponent(filter)}&view=draftInit&view=mSettings`;
+
+  const response = await context.request.get(url);
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] Draft player pool fetch failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
+    );
+  }
+
+  const body = await response.json();
+  return (body.players || []).map((entry) => {
+    const p = entry.player;
+    return {
+      id: p.id,
+      name: p.fullName,
+      positionId: p.defaultPositionId,
+      rank: p.draftRanksByRankType?.STANDARD?.rank ?? null,
+      percentOwned: p.ownership?.percentOwned ?? null,
+    };
+  });
+}
+
+/**
+ * Reads the current draft board for a league — thin wrapper around draft_sync.js's
+ * fetchDraftDetail so draft_clicker.js's idempotency/conflict check and post-submit verification
+ * reuse the same mDraftDetail parsing, instead of re-implementing it here.
+ *
+ * KNOWN GAP, confirmed 2026-08-16 against a real practice draft (league 284946361): this REST
+ * endpoint returned ZERO picks throughout the entire draft despite multiple confirmed real picks
+ * landing (verified via the WS SELECTED broadcast, which reflected every pick correctly and
+ * immediately) — and after the draft completed, returned a completely empty draftDetail (0 pick
+ * slots, no inProgress/drafted flags), not even a final snapshot. Ephemeral mock/practice-draft
+ * rooms appear not to be backed by the same persisted-league data this endpoint reads from.
+ *
+ * This means draft_clicker.js's pre-submit idempotency/conflict check (built on this function)
+ * cannot be trusted against a practice draft — it will read as "nothing drafted yet" even when
+ * picks have landed. Whether it's reliable against a REAL, persisted league draft (not
+ * ephemeral/torn-down the way mock rooms are) is UNVERIFIED — untestable until an actual league
+ * draft is available. Left as-is rather than speculatively replaced with a WS-based check: WS has
+ * no history query (a freshly-connecting client only sees broadcasts after it joins), so it can't
+ * backfill "what's already been picked" the way this is supposed to, and swapping to it on data
+ * from ephemeral test rooms alone would trade a possibly-fine mechanism for a more complex one on
+ * a guess. Re-verify this against a real league draft before trusting it in production.
+ */
+async function readDraftPicks(context, { leagueId, seasonId }) {
+  // Required at call time, not at module load, to avoid a circular require: draft_sync.js doesn't
+  // depend on espn_api.js today, but keeping the edge one-directional (draft_clicker -> espn_api,
+  // draft_clicker -> draft_sync) avoids introducing one later by accident.
+  const { fetchDraftDetail } = require("./draft_sync");
+  return fetchDraftDetail(context, { leagueId, seasonId });
+}
+
+/**
+ * REST fallback for submitting a draft pick — NOT the primary mechanism and NOT currently called
+ * by draft_clicker.js.
+ *
+ * draft_sync.js's own recon (2026-08-10), confirmed by a 2026-08-15/16 capture of a real submitted
+ * pick, found picks go out as a `SELECT <playerId>` frame over the same raw WebSocket
+ * draft_sync.js reads `SELECTED` broadcasts from — not REST. WORKER-06's primary path is
+ * therefore that WebSocket send (src/bots/draft_room_socket.js's sendPick, now implemented and
+ * verified). This function is kept as a documented, unverified fallback only — the body below is
+ * a guess mirroring submitLineup's ROSTER shape, never confirmed against a real capture, and
+ * should not be wired in unless the WS path is somehow found to stop working.
+ */
+async function submitDraftPick(
+  context,
+  { leagueId, seasonId, teamId, memberId, playerId },
+) {
+  const url = buildTransactionsUrl(leagueId, seasonId);
+  const payload = {
+    isLeagueManager: false,
+    teamId: Number(teamId),
+    type: "DRAFT",
+    memberId,
+    items: [{ playerId: Number(playerId), type: "DRAFT" }],
+  };
+
+  const response = await context.request.post(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "x-fantasy-source": "kona",
+      "x-fantasy-platform": "kona-PROD",
+    },
+    data: payload,
+  });
+
+  const text = await response.text();
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] Draft pick submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
+    );
   }
 
   return text ? JSON.parse(text) : {};
@@ -113,6 +235,9 @@ async function submitLineup(context, { leagueId, seasonId, teamId, memberId, sco
 module.exports = {
   readRoster,
   submitLineup,
+  readDraftPicks,
+  submitDraftPick,
+  fetchDraftPlayerPool,
   buildLeagueReadUrl,
   buildTransactionsUrl,
 };

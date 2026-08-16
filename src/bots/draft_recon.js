@@ -40,12 +40,15 @@ function ensureOutputDir() {
 function appendJsonLine(filename, record) {
   fs.appendFileSync(
     path.join(OUTPUT_DIR, filename),
-    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n"
+    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n",
   );
 }
 
 function waitForEnter(prompt) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
   return new Promise((resolve) => {
     rl.question(prompt, () => {
       rl.close();
@@ -58,27 +61,43 @@ function waitForEnter(prompt) {
 async function launchWithManualLogin() {
   console.log(
     "[Recon] No ESPN_S2/SWID in env or OpenBao. Opening a visible browser — log into ESPN there, " +
-      "then come back to this terminal."
+      "then come back to this terminal.",
   );
   const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 720 },
+  });
   const page = await context.newPage();
-  await page.goto("https://www.espn.com/login", { waitUntil: "load", timeout: 60000 });
-  await waitForEnter("[Recon] Press Enter once you're logged in to continue... ");
+  await page.goto("https://www.espn.com/login", {
+    waitUntil: "load",
+    timeout: 60000,
+  });
+  await waitForEnter(
+    "[Recon] Press Enter once you're logged in to continue... ",
+  );
   return { browser, context, page };
 }
 
 async function runRecon() {
   // Any argument other than the (now-default) fresh-start behavior is treated as an explicit
   // room URL to resume/observe directly instead of starting a new practice draft.
-  const explicitUrl = process.argv[2] && process.argv[2] !== "--fresh" ? process.argv[2] : null;
+  const explicitUrl =
+    process.argv[2] && process.argv[2] !== "--fresh" ? process.argv[2] : null;
 
   ensureOutputDir();
   console.log(`[Recon] Output directory: ${OUTPUT_DIR}`);
 
   let session = null;
   try {
-    session = resolveEspnCookies() ? await createAuthenticatedSession() : await launchWithManualLogin();
+    // Always headed: this tool exists for a human to watch traffic AND manually interact (join
+    // the lobby, click into a practice draft, actually draft a player) — createAuthenticatedSession()
+    // defaults to headless, which is fine for every other bot but silently makes this one
+    // unusable whenever cookies are available (env or OpenBao), since there's then no window to
+    // click into and mock_draft.js's auto-start can't be relied on (ESPN's lobby doesn't always
+    // let it navigate straight into a room).
+    session = resolveEspnCookies()
+      ? await createAuthenticatedSession({ headless: false })
+      : await launchWithManualLogin();
     const { page } = session;
 
     page.on("websocket", (ws) => {
@@ -109,6 +128,24 @@ async function runRecon() {
       });
     });
 
+    // Capture outgoing request bodies too — the response logger below only shows what ESPN sent
+    // back, never what the page's own client sent to submit a pick. WORKER-06 needs that send-side
+    // shape (POST body or query) to know how a draft pick is actually transmitted over HTTP, same
+    // as ws framesent already captures the send side for the WebSocket.
+    page.on("request", (request) => {
+      const url = request.url();
+      if (!/espn\.com/i.test(url)) return;
+      if (!/draft|mDraftDetail|pick/i.test(url)) return;
+
+      console.log(`[Recon] Relevant HTTP request: ${request.method()} ${url}`);
+      appendJsonLine("http-requests.jsonl", {
+        event: "request",
+        method: request.method(),
+        url,
+        postData: request.postData(),
+      });
+    });
+
     // Capture background HTTP polling in case ESPN uses request/response instead of (or alongside) a
     // WebSocket for draft state — filter to same-origin API-shaped calls to keep the log readable.
     page.on("response", async (response) => {
@@ -123,7 +160,9 @@ async function runRecon() {
         // Non-text/binary response, skip body capture.
       }
 
-      console.log(`[Recon] Relevant HTTP response: ${response.status()} ${url}`);
+      console.log(
+        `[Recon] Relevant HTTP response: ${response.status()} ${url}`,
+      );
       appendJsonLine("http-responses.jsonl", {
         event: "response",
         status: response.status(),
@@ -141,8 +180,12 @@ async function runRecon() {
 
     console.log(
       "[Recon] Page loaded. Leaving the browser open for 10 minutes — join/observe the draft " +
-        "manually now. Every WS frame and matching HTTP response is being logged to " +
-        `${OUTPUT_DIR}. Press Ctrl+C once you've captured a few picks.`
+        "manually now. Every WS frame and matching HTTP request/response is being logged to " +
+        `${OUTPUT_DIR}. IMPORTANT for WORKER-06: make sure you actually DRAFT at least one player ` +
+        "yourself during this window (not just watch autodraft picks land) — that's the only " +
+        "action that produces a submission-side sample (a WS framesent or an outgoing HTTP " +
+        "request) instead of just the broadcast/reconciliation traffic every other bot already " +
+        "has captures of. Press Ctrl+C once you've captured a few picks including your own.",
     );
 
     // Snapshot the DOM periodically in case the network layer alone isn't enough and a fallback
@@ -154,12 +197,14 @@ async function runRecon() {
         const html = await page.content();
         fs.writeFileSync(
           path.join(OUTPUT_DIR, `dom-snapshot-${snapshotCount}.html`),
-          html
+          html,
         );
         await page.screenshot({
           path: path.join(OUTPUT_DIR, `screenshot-${snapshotCount}.png`),
         });
-        console.log(`[Recon] Captured DOM + screenshot snapshot #${snapshotCount}`);
+        console.log(
+          `[Recon] Captured DOM + screenshot snapshot #${snapshotCount}`,
+        );
       } catch (err) {
         console.error(`[Recon] Snapshot failed: ${err.message}`);
       }

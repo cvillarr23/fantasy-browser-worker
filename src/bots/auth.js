@@ -1,6 +1,22 @@
 const { chromium } = require("playwright");
 const { execFileSync } = require("child_process");
 
+// A small pool of realistic, current desktop Chrome UAs, rotated per session rather than sending
+// the exact same fingerprint on every request across every bot — a single fixed UA repeated
+// across thousands of requests is itself a signal, on top of anything Chromium already leaks via
+// --disable-blink-features=AutomationControlled below.
+const USER_AGENT_POOL = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+];
+
+function pickUserAgent() {
+  return USER_AGENT_POOL[Math.floor(Math.random() * USER_AGENT_POOL.length)];
+}
+
 /**
  * Falls back to OpenBao when ESPN_S2/SWID aren't in the environment. Matches the storage
  * convention from the cookie-refresh ticket (`bao kv put secret/fantasy/espn espn_s2=... swid=...`),
@@ -102,7 +118,7 @@ async function createAuthenticatedSession({ headless = true } = {}) {
     // 2. Initialize a blank workspace container context
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+      userAgent: pickUserAgent()
     });
 
     console.log("[Auth Engine] Injecting authentication state storage tokens into browser context pool...");
