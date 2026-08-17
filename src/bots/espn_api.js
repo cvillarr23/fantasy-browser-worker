@@ -120,6 +120,72 @@ async function submitLineup(
 }
 
 /**
+ * Submits a free-agent/waiver claim (add, optionally paired with a drop) to ESPN.
+ *
+ * UNVERIFIED REQUEST SHAPE — same caveat as submitLineup() above, and for the same reason: this
+ * body has not been confirmed against a real captured save. It's modeled on submitLineup's
+ * verified-working `transactions/` shape (same host, same URL, same isLeagueManager/teamId/
+ * memberId/scoringPeriodId/executionType envelope) plus the ADD/DROP item `type` values and
+ * top-level `type: "FREEAGENT"` documented by prior community reverse-engineering of this same
+ * endpoint family — but neither has been checked against this league's actual traffic.
+ *
+ * Two things this does NOT attempt to distinguish, both open until a real capture exists:
+ *   1. An immediate free-agent pickup (outside the waiver period, processed instantly — what
+ *      `executionType: "EXECUTE"` implies) vs an actual waiver claim (inside the waiver period,
+ *      queued and processed later, e.g. overnight, possibly needing a `type: "WAIVER"` and a FAAB
+ *      `bidAmount` instead). This always sends "FREEAGENT"/"EXECUTE"; if the league is mid-waiver
+ *      period, ESPN's real behavior here is unknown — it may reject this outright, or silently
+ *      queue it under a shape this function didn't send.
+ *   2. Why a claim was rejected. A non-2xx response is surfaced as a generic Error (transient, so
+ *      connection.js requeues it) — but "player already claimed by someone else" is a permanent,
+ *      unwinnable-on-retry condition indistinguishable here from an actual transient failure,
+ *      same open gap draft_clicker.js's ERROR-frame handling closed for the WS draft path but this
+ *      REST path hasn't. Requeuing a doomed claim forever is the failure mode to watch for.
+ *
+ * Re-verify by running `node src/bots/waiver_recon.js --watch-save` against a real free-agent add
+ * (or an actual waiver claim, to observe whether the shape differs) and diffing the captured body
+ * against this one — same recon workflow lineup_recon.js established for submitLineup.
+ */
+async function submitWaiverClaim(
+  context,
+  { leagueId, seasonId, teamId, memberId, scoringPeriodId, addPlayerId, dropPlayerId },
+) {
+  const url = buildTransactionsUrl(leagueId, seasonId);
+  const items = [{ playerId: Number(addPlayerId), type: "ADD" }];
+  if (dropPlayerId) {
+    items.push({ playerId: Number(dropPlayerId), type: "DROP" });
+  }
+
+  const payload = {
+    isLeagueManager: false,
+    teamId: Number(teamId),
+    type: "FREEAGENT",
+    memberId,
+    scoringPeriodId,
+    executionType: "EXECUTE",
+    items,
+  };
+
+  const response = await context.request.post(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "x-fantasy-source": "kona",
+      "x-fantasy-platform": "kona-PROD",
+    },
+    data: payload,
+  });
+
+  const text = await response.text();
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] Waiver claim submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
+    );
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
+/**
  * Fetches the draft-room player pool — the same `view=draftInit` call ESPN's own draft room loads
  * on entry (confirmed via draft_recon.js capture, HTTP 200, 2026-08-10/2026-08-16), including each
  * player's `defaultPositionId` (16 = D/ST, 5 = K, among the standard ESPN position ids) and
@@ -235,6 +301,7 @@ async function submitDraftPick(
 module.exports = {
   readRoster,
   submitLineup,
+  submitWaiverClaim,
   readDraftPicks,
   submitDraftPick,
   fetchDraftPlayerPool,
