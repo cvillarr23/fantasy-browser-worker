@@ -2,6 +2,7 @@ const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
+const { recordExecution } = require("./db/execution_log");
 
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
@@ -9,6 +10,7 @@ async function handleIncomingMessage(queueName, payload) {
     `[Worker Engine] Routing task parameters for queue event: "${queueName}"`,
   );
 
+  const startedAt = Date.now();
   try {
     switch (queueName) {
       case "lineup_updates":
@@ -31,11 +33,22 @@ async function handleIncomingMessage(queueName, payload) {
           `[Worker Engine] Intercepted unsupported message format signature: ${queueName}`,
         );
     }
+    await recordExecution({
+      transactionType: queueName,
+      status: "success",
+      durationMs: Date.now() - startedAt,
+    });
     return true; // Return true on successful completion code run
   } catch (error) {
     console.error(
       `[Worker Engine] Critical failure processing automation routine: ${error.message}`,
     );
+    await recordExecution({
+      transactionType: queueName,
+      status: "failure",
+      durationMs: Date.now() - startedAt,
+      errorMessage: error.message,
+    });
     throw error; // Bubble up errors to handle message re-queuing safely
   }
 }
