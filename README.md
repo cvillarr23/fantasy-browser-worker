@@ -6,6 +6,10 @@ The headless execution worker layer of your automated fantasy football platform.
 *   `src/queue/`: RabbitMQ connection listeners that capture inbound activation payloads from the FastAPI gateway.
 *   `src/bots/`: Automated scripts handling physical transaction flows (Lineup adjustments, live draft sync, and fast sniping).
 *   `src/selectors/`: Static element layout definitions tracking ESPN DOM query paths.
+*   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
+
+## Documentation
+[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end). Also see [`CLAUDE.md`](CLAUDE.md) for a shorter, ticket-oriented summary of the same and other project-specific gotchas.
 
 ## Local Configuration
 Make sure your system layout supports local browser binaries before launching:

@@ -225,6 +225,11 @@ function attachDraftListeners(page, redisClient, state) {
 
 /** Gets us into a draft room and returns { leagueId, seasonId, teamId }, however DRAFT_MODE dictates. */
 async function enterDraftRoom(session) {
+  // DRAFT_MODE=mock can end up with the draft room open in a brand-new tab rather than the
+  // current page navigating in place (see mock_draft.js's startFreshPracticeDraft header) — the
+  // other two paths always navigate session.page itself, so this only ever differs for that mode.
+  let activePage = session.page;
+
   if (process.env.DRAFT_ROOM_URL) {
     console.log(
       `[Draft Sync] DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`,
@@ -237,7 +242,7 @@ async function enterDraftRoom(session) {
     console.log(
       "[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...",
     );
-    await startFreshPracticeDraft(session.page);
+    ({ page: activePage } = await startFreshPracticeDraft(session.page));
   } else {
     const leagueId = process.env.ESPN_LEAGUE_ID;
     const seasonId = process.env.CURRENT_YEAR || "2026";
@@ -247,13 +252,13 @@ async function enterDraftRoom(session) {
     await session.page.goto(draftUrl, { waitUntil: "load", timeout: 60000 });
   }
 
-  const { leagueId, seasonId, teamId } = parseDraftRoomUrl(session.page.url());
+  const { leagueId, seasonId, teamId } = parseDraftRoomUrl(activePage.url());
   if (!leagueId || !seasonId) {
     throw new Error(
-      `Could not determine league/season from draft room URL: ${session.page.url()}`,
+      `Could not determine league/season from draft room URL: ${activePage.url()}`,
     );
   }
-  return { leagueId, seasonId, teamId };
+  return { leagueId, seasonId, teamId, page: activePage };
 }
 
 async function connectAndStream(redisClient, state) {
@@ -264,9 +269,18 @@ async function connectAndStream(redisClient, state) {
 
   try {
     // Attach listeners before navigating so we don't race the page's own WebSocket connect.
-    const handle = attachDraftListeners(session.page, redisClient, state);
+    let handle = attachDraftListeners(session.page, redisClient, state);
 
     const draftContext = await enterDraftRoom(session);
+
+    // enterDraftRoom's page can differ from session.page (DRAFT_MODE=mock opening a new tab, see
+    // mock_draft.js) — if so, the listeners above are attached to the wrong page (one that never
+    // sees the real draft socket) and need to move to the one that's actually showing the room.
+    if (draftContext.page && draftContext.page !== session.page) {
+      console.log("[Draft Sync] Draft room opened in a new tab — re-attaching listeners to it.");
+      session.page = draftContext.page;
+      handle = attachDraftListeners(session.page, redisClient, state);
+    }
 
     // DRAFT_MODE=mock joins a brand-new ephemeral league on every reconnect — carrying over the
     // previous draft's counters would misnumber (or skip) every pick in the new one.

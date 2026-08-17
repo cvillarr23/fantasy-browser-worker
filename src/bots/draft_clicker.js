@@ -3,6 +3,7 @@ const path = require("path");
 const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
 const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
+const { clickPickViaDom } = require("./draft_room_dom");
 const { PermanentError } = require("../errors");
 
 /**
@@ -97,15 +98,30 @@ function checkTarget(picks, playerId, teamId, tracking, log) {
   );
 }
 
-/** Resolves with the matching SELECTED event, or null if none arrives within timeoutMs. */
+/**
+ * Resolves with the matching SELECTED event, or null if none arrives within timeoutMs. Rejects
+ * with a PermanentError if the server sends an explicit ERROR frame first (confirmed 2026-08-17:
+ * a rejected SELECT — e.g. targeting an already-drafted player — gets `ERROR <code> <message>`,
+ * not silence). That's a definitive "this can never succeed," unlike a plain timeout, which is
+ * ambiguous (could be a network blip) — the PermanentError distinction matters because
+ * connection.js requeues an ordinary Error forever with no backoff.
+ */
 function waitForConfirmation(socket, playerId, teamId, timeoutMs) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve(null), timeoutMs);
     socket.onSelected((event) => {
       if (String(event.player_id) === String(playerId) && String(event.team_id) === String(teamId)) {
         clearTimeout(timer);
         resolve(event);
       }
+    });
+    socket.onError((err) => {
+      clearTimeout(timer);
+      reject(
+        new PermanentError(
+          `[Draft Clicker] Pick for player ${playerId} rejected by server: ERROR ${err.code} ${err.message}`,
+        ),
+      );
     });
   });
 }
@@ -196,30 +212,53 @@ async function executeAutomatedDraftSelection(payload) {
     log("Connecting to draft room socket to submit pick...");
     await jitter(100, 400);
     const cookies = resolveEspnCookies();
-    const socket = await connectToDraftRoom({
-      leagueId,
-      teamId,
-      espnS2: cookies.espnS2,
-      swid: cookies.swid,
-    });
+
     try {
-      // Registered before sending — the real capture showed a SELECTED confirmation land
-      // ~0.2s after SELECT, so the listener must already be attached when the frame goes out.
-      // No jitter between here and sendPick(): this is the one step that's actually racing the
-      // draft clock, so it fires the instant the socket is ready.
-      const confirmation = waitForConfirmation(socket, playerId, teamId, CONFIRM_TIMEOUT_MS);
-      socket.sendPick(playerId);
-      const result = await confirmation;
-      if (!result) {
-        // Transient, not PermanentError: unclear whether the pick actually landed, so let
-        // connection.js requeue — the idempotency check above will no-op it if it did.
-        throw new Error(
-          `No SELECTED confirmation for player ${playerId}/team ${teamId} within ${CONFIRM_TIMEOUT_MS}ms.`,
-        );
+      const socket = await connectToDraftRoom({
+        leagueId,
+        teamId,
+        espnS2: cookies.espnS2,
+        swid: cookies.swid,
+      });
+      try {
+        // Registered before sending — the real capture showed a SELECTED confirmation land
+        // ~0.2s after SELECT, so the listener must already be attached when the frame goes out.
+        // No jitter between here and sendPick(): this is the one step that's actually racing the
+        // draft clock, so it fires the instant the socket is ready.
+        const confirmation = waitForConfirmation(socket, playerId, teamId, CONFIRM_TIMEOUT_MS);
+        socket.sendPick(playerId);
+        const result = await confirmation;
+        if (!result) {
+          throw new Error(
+            `No SELECTED confirmation for player ${playerId}/team ${teamId} within ${CONFIRM_TIMEOUT_MS}ms.`,
+          );
+        }
+        log(`SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`);
+      } finally {
+        socket.close();
       }
-      log(`SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`);
-    } finally {
-      socket.close();
+    } catch (wsError) {
+      // A PermanentError here means the server explicitly rejected the pick (ERROR frame) — a
+      // definitive "this can never succeed," not an ambiguous timeout/connection failure. The DOM
+      // fallback can't change that outcome (clicking a pick ESPN just rejected won't succeed
+      // either), so skip straight to reporting it rather than wasting a fallback attempt.
+      if (wsError.permanent) {
+        throw wsError;
+      }
+
+      // Fallback tier only — never raced in parallel with the WS attempt above. sendPick's
+      // selector is still unverified (draft_room_dom.js's header), so this is a last resort, not
+      // an equal alternative; if it also throws, the original wsError is what gets reported (it's
+      // the primary path and the more informative failure).
+      log(`WS submission failed (${wsError.message}) — attempting DOM-click fallback...`);
+      try {
+        await clickPickViaDom({ leagueId, seasonId, teamId }, playerId);
+        log(`SUCCESS (DOM fallback): pick submitted for ${targetName}. Unconfirmed by a SELECTED ` +
+          "broadcast — this path doesn't listen for one; verify manually.");
+      } catch (domError) {
+        log(`DOM fallback also failed: ${domError.message}`);
+        throw wsError;
+      }
     }
   } catch (error) {
     console.error(

@@ -22,8 +22,15 @@ const { connectToDraftRoom, parseSelectedFrame } = require("../src/bots/draft_ro
  * be inspected afterward without needing to have watched it live.
  *
  * Usage:
- *   node scripts/practice-draft-test.js
+ *   node scripts/practice-draft-test.js [--also-test-taken]
  *   (prompts for the room URL; requires OpenBao connected or ESPN_S2/SWID set)
+ *
+ * --also-test-taken: before working through the normal candidate list, first SELECT the single
+ * highest-ranked (rank 1) player in the pool — something virtually certain to already be gone by
+ * the time we're on the clock — and logs whatever happens. Exists because the REST idempotency
+ * pre-check (espn_api.js's readDraftPicks) is known-unreliable for practice drafts, so a race
+ * where two consumers target the same player is a real scenario the WS layer itself needs to fail
+ * safely against, and that failure mode had never actually been observed before this flag existed.
  */
 
 const OUTPUT_DIR = path.join(__dirname, "..", "recon-output");
@@ -76,6 +83,29 @@ function waitForConfirmation(socket, playerId, teamId, timeoutMs) {
   });
 }
 
+/**
+ * Resolves with `{ type: "selected", event }` (regardless of which team the SELECTED is
+ * attributed to — unlike waitForConfirmation, which only matches our own team),
+ * `{ type: "error", error }` if the server sends an explicit ERROR frame (confirmed 2026-08-17:
+ * a rejected SELECT is NOT silent), or null on timeout. Used to observe what actually happens
+ * when we target a player someone else already has.
+ */
+function waitForAnySelectedOrError(socket, playerId, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs);
+    socket.onSelected((event) => {
+      if (String(event.player_id) === String(playerId)) {
+        clearTimeout(timer);
+        resolve({ type: "selected", event });
+      }
+    });
+    socket.onError((error) => {
+      clearTimeout(timer);
+      resolve({ type: "error", error });
+    });
+  });
+}
+
 /** Resolves once a SELECTING broadcast names our team as on the clock. */
 function waitForOurTurn(socket, teamId, timeoutMs, log) {
   return new Promise((resolve, reject) => {
@@ -107,6 +137,7 @@ function waitForOurTurn(socket, teamId, timeoutMs, log) {
 
 async function main() {
   const log = openLog();
+  const testTaken = process.argv.includes("--also-test-taken");
   const rawUrl = await promptForUrl();
 
   let leagueId, seasonId, teamId;
@@ -147,6 +178,40 @@ async function main() {
   try {
     log(`Waiting for team ${teamId}'s turn (up to ${TURN_WAIT_TIMEOUT_MS / 1000}s)...`);
     await waitForOurTurn(socket, teamId, TURN_WAIT_TIMEOUT_MS, log);
+
+    if (testTaken) {
+      const rank1 = [...players].sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity))[0];
+      log(
+        `--also-test-taken: attempting a deliberately-already-taken pick first: ` +
+          `${rank1.name} (${rank1.id}, rank ${rank1.rank})`,
+      );
+      const anyResult = waitForAnySelectedOrError(socket, rank1.id, PICK_CONFIRM_TIMEOUT_MS);
+      socket.sendPick(rank1.id);
+      const outcome = await anyResult;
+      if (!outcome) {
+        log(
+          `Failure mode: TIMEOUT — no SELECTED or ERROR frame at all for player ${rank1.id} ` +
+            `within ${PICK_CONFIRM_TIMEOUT_MS}ms. Safe: never attributed to us, and our existing ` +
+            `confirmation-timeout logic already treats this as "try the next candidate."`,
+        );
+      } else if (outcome.type === "error") {
+        log(
+          `Failure mode: REJECTED — server sent ERROR ${outcome.error.code} ` +
+            `${outcome.error.message} for player ${rank1.id}. This is the expected, safe outcome ` +
+            `(draft_clicker.js now treats this as a PermanentError, not a retryable one).`,
+        );
+      } else if (String(outcome.event.team_id) !== String(teamId)) {
+        log(
+          `Failure mode: OBSERVED — player ${rank1.id} is owned by team ${outcome.event.team_id} ` +
+            `(round ${outcome.event.round}), not us. Safe: our SELECT produced no attribution to us.`,
+        );
+      } else {
+        log(
+          `UNEXPECTED: our SELECT for an already-taken player was confirmed as OURS (team ` +
+            `${teamId})! This would be a real bug in the idempotency assumptions — investigate.`,
+        );
+      }
+    }
 
     let landed = null;
     for (const candidate of candidates) {

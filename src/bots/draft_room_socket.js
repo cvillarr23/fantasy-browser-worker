@@ -35,6 +35,38 @@ const WebSocket = require("ws");
  * matching SELECTED confirmation back in ~250ms. Not a guess anymore; this is the real mechanism,
  * verified against ESPN's live servers from this exact code path, not just observed in a browser.
  *
+ * CONFIRMED 2026-08-17: a rejected SELECT (practice-draft-test.js's --also-test-taken, targeting
+ * an already-drafted player) is NOT silent — the server replies with an explicit
+ * `ERROR <code> <message>` frame (observed: `ERROR 1 Invalid+Selection.`, spaces sent as literal
+ * `+`) rather than just withholding a SELECTED broadcast. draft_clicker.js listens for this via
+ * onError and treats it as a PermanentError (the target is definitively gone; redelivery of the
+ * same message can never succeed), instead of the ambiguous "no confirmation" timeout case, which
+ * — per connection.js's requeue-on-transient-Error, no-backoff behavior — would otherwise retry a
+ * doomed pick forever.
+ *
+ * CONFIRMED 2026-08-17: the draft room is SINGLE-SESSION per league/team/member — a new JOIN for
+ * the same identity evicts any existing connection for it. Verified directly: running
+ * scripts/draft-watch.js while the same user's own browser tab was already connected to the same
+ * room evicted the browser tab (shown ESPN's own reconnect/exit prompt), not the newly-connecting
+ * script. Good news for draft_clicker.js specifically — its connection always wins, so it's never
+ * the one that fails to join — but it means a brief, deliberate side effect: submitting a pick
+ * will momentarily boot the user's own browser tab if they have the draft room open at that
+ * moment (recoverable — they just reconnect). It also means a long-lived observer (draft-watch.js)
+ * is NOT safe to assume stays connected indefinitely: the user's own browser reconnecting, or
+ * draft_clicker.js briefly connecting to submit a pick, will silently evict it too. See this
+ * file's onClose handle for detecting that.
+ *
+ * IMPORTANT distinction confirmed 2026-08-17: cookie-only auth (auth.js's espn_s2/SWID injection,
+ * no real interactive login) is sufficient for everything this module does — REST calls AND this
+ * WS protocol both keep working fine on cookies alone, proven repeatedly above. The RENDERED
+ * BROWSER PAGE is a separate story: it additionally gates on a full Disney/MyDisney identity SDK
+ * session (the BAM SDK traffic to espn.connections.edge.bamgrid.com, a JWT-based session obtained
+ * only via a real interactive login), which cookie injection never establishes — so a
+ * Playwright-rendered draft room page shows "Log in Required" even while this module's raw socket
+ * keeps working perfectly against the exact same league/cookies. This is why draft_clicker.js's
+ * primary path (this file) is unaffected by that gate — it never renders a page — while anything
+ * that DOES render one (draft_recon.js's DOM captures, draft_room_dom.js's fallback tier) hits it.
+ *
  * This is a standalone `ws` client rather than reusing Playwright's page-observed socket
  * (draft_sync.js's approach) because Playwright's WebSocket handle is observation-only —
  * framesent/framereceived events exist, but there's no .send(). Sending would require
@@ -93,6 +125,23 @@ function parseSelectedFrame(raw) {
 }
 
 /**
+ * Parses a rejection frame — `ERROR <code> <message>`, message space-encoded as literal `+`
+ * (observed: `ERROR 1 Invalid+Selection.`). Has no player/team reference of its own; correlating
+ * it to a specific SELECT is the caller's responsibility (safe for this module's single-pick-then
+ * -close usage — see draft_clicker.js).
+ */
+function parseErrorFrame(raw) {
+  const line = raw.toString().trim();
+  if (!line.startsWith("ERROR ")) return null;
+
+  const rest = line.slice("ERROR ".length);
+  const spaceIdx = rest.indexOf(" ");
+  const code = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
+  const message = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).replace(/\+/g, " ");
+  return { code: Number(code), message };
+}
+
+/**
  * Opens the sidecar socket and resolves once it's connected. Caller owns the returned handle's
  * lifecycle (call close() when done — this does not auto-close on idle).
  */
@@ -140,6 +189,14 @@ function handleFor(ws) {
       });
     },
 
+    /** See parseErrorFrame — fires on any ERROR frame from the server. */
+    onError(handler) {
+      ws.on("message", (data) => {
+        const parsed = parseErrorFrame(data);
+        if (parsed) handler(parsed);
+      });
+    },
+
     /**
      * Raw frame passthrough — for frame types production draft_clicker.js has no need to parse
      * (e.g. `SELECTING <teamId> <clockMs>`, the turn-notification broadcast; `DRAFT_LIST`;
@@ -149,6 +206,19 @@ function handleFor(ws) {
      */
     onMessage(handler) {
       ws.on("message", (data) => handler(data.toString()));
+    },
+
+    /**
+     * Fires when the socket closes for ANY reason, including eviction: confirmed 2026-08-17 that
+     * ESPN's draft room is single-session — a new JOIN for the same league/team/member evicts any
+     * existing connection, which sees its socket simply close (own browser tab shown a
+     * reconnect/exit prompt; this raw ws client just gets a close event, no distinguishing close
+     * code observed). Matters for any long-lived listener (scripts/draft-watch.js) — a second
+     * connection to the same room (your own browser reconnecting, or draft_clicker.js briefly
+     * connecting to submit a pick) will silently kill it without this.
+     */
+    onClose(handler) {
+      ws.on("close", handler);
     },
 
     /** Submits a pick — confirmed format, see this file's header comment. */
@@ -162,4 +232,10 @@ function handleFor(ws) {
   };
 }
 
-module.exports = { connectToDraftRoom, parseSelectedFrame, buildDraftSocketUrl, normalizeSwid };
+module.exports = {
+  connectToDraftRoom,
+  parseSelectedFrame,
+  parseErrorFrame,
+  buildDraftSocketUrl,
+  normalizeSwid,
+};
