@@ -1,56 +1,194 @@
+const fs = require("fs");
+const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
-const selectors = require("../selectors/espn_selectors.json");
+const { readRoster, submitWaiverClaim } = require("./espn_api");
+const { PermanentError } = require("../errors");
 
 /**
- * High-Speed Waiver Sniper Bot
- * Executes fast transaction pickups directly inside ESPN free-agent pools.
+ * High-Speed Waiver Sniper Bot (fix for #14)
+ *
+ * Was clicking a `tr[data-player-id="..."]` locator that can never match — ESPN's roster/free
+ * -agent DOM exposes no per-player identifier at all (see espn_selectors.json's header and
+ * src/bots/lineup_recon.js). Rewritten the same way WORKER-03/WORKER-06 fixed this exact problem
+ * for lineup_bot.js/draft_clicker.js: drive ESPN's authenticated REST API via espn_api.js instead
+ * of clicking anything. See submitWaiverClaim()'s own header for what is and isn't verified about
+ * the request shape it sends.
+ *
+ * Safety rails, mirroring lineup_bot.js for the same reason (an unverified write shape must not
+ * default to live):
+ *   - DRY_RUN      — defaults to TRUE; only an explicit DRY_RUN=false submits anything.
+ *   - idempotency  — a redelivered message that already landed (add already rostered, drop
+ *                    already gone) is a no-op, not a duplicate claim.
  */
+
+const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
+
+function resolveDryRun() {
+  const raw = (process.env.DRY_RUN || "").trim();
+  if (raw === "") return { dryRun: true, defaulted: true };
+  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
+}
+
+/** ESPN player ids are numeric; anything else would serialize to a null playerId in the request. */
+function requirePlayerId(raw, label) {
+  const id = String(raw ?? "").trim();
+  if (!/^\d+$/.test(id)) {
+    throw new PermanentError(`${label} "${raw}" is not a valid numeric ESPN player id.`);
+  }
+  return id;
+}
+
+function captureFailure(tracking, details) {
+  try {
+    fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = path.join(DEBUG_DIR, `waiver-fail-${tracking}-${stamp}.json`);
+    fs.writeFileSync(file, JSON.stringify(details, null, 2));
+    console.error(`[Sniper Bot][${tracking}] Failure context written to: ${file}`);
+  } catch (captureError) {
+    console.error(`[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
+  }
+}
+
 async function executeInstantWaiverClaim(payload) {
-  const playerTargetId = payload.player_id;
-  const nameTarget = payload.name;
+  // A syntactically valid queue message can still be `null`, an array, or a bare scalar — none of
+  // those are throwable as an ordinary Error here without the whole payload.xxx dereference below
+  // throwing a plain TypeError instead, which connection.js requeues forever (only PermanentError
+  // and the JSON-parse-failure case are treated as unretryable).
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new PermanentError(
+      `[Sniper Bot] Payload must be a JSON object, got ${
+        payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
+      }.`
+    );
+  }
+
+  const tracking = payload.tracking_id || payload.player_id || "no-tracking-id";
+  const log = (message) => console.log(`[Sniper Bot][${tracking}] ${message}`);
+
   const leagueId = process.env.ESPN_LEAGUE_ID;
-  const currentYear = process.env.CURRENT_YEAR || "2026";
-  
-  // Direct portal endpoint for tracking individual player free-agent files
-  const freeAgentUrl = `https://fantasy.espn.com/football/players/add?leagueId=${leagueId}&seasonId=${currentYear}`;
-  console.log(`[Sniper Bot] CRITICAL STATUS ALERT: Securing ${nameTarget} (${payload.team}). Navigating to transaction hub...`);
-  
+  const teamId = process.env.ESPN_TEAM_ID;
+  const seasonId = process.env.CURRENT_YEAR || "2026";
+  const nameTarget = payload.name;
+  const nflTeam = payload.team;
+
+  // Permanent: none of these can come good on redelivery without a config/payload change.
+  if (!leagueId) {
+    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_LEAGUE_ID is not set.`);
+  }
+  if (!teamId) {
+    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`);
+  }
+  const addPlayerId = requirePlayerId(payload.player_id, "player_id");
+  const dropPlayerId = payload.drop_player_id ? requirePlayerId(payload.drop_player_id, "drop_player_id") : null;
+  if (dropPlayerId && dropPlayerId === addPlayerId) {
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] player_id and drop_player_id are both ${addPlayerId} — a player ` +
+        "cannot be added and dropped in the same claim."
+    );
+  }
+
+  const target = { leagueId, seasonId, teamId };
+  const { dryRun, defaulted } = resolveDryRun();
+  log(
+    `Evaluating claim for ${nameTarget || addPlayerId} (${nflTeam || "?"}) on team ${teamId}` +
+      `${dryRun ? " [DRY_RUN]" : ""}.`
+  );
+  if (defaulted) {
+    log(
+      "DRY_RUN is unset, defaulting to TRUE — no changes will be written. Set DRY_RUN=false to " +
+        "submit for real (only once submitWaiverClaim's write shape is verified, see espn_api.js)."
+    );
+  }
+
   let session = null;
+  let roster = null;
   try {
     session = await createAuthenticatedSession();
-    await session.page.goto(freeAgentUrl, { waitUntil: "commit", timeout: 15000 }); // Fast commit load
 
-    // 1. Search for the target player ID directly inside the filter text element
-    await session.page.waitForSelector(selectors.search_input, { timeout: 5000 });
-    await session.page.locator(selectors.search_input).fill(nameTarget);
-    await session.page.keyboard.press("Enter");
-    
-    // 2. Isolate the explicit player row matching the data signature attributes
-    const targetPlayerRow = session.page.locator(`tr[data-player-id="${playerTargetId}"]`);
-    await session.page.waitForSelector(`tr[data-player-id="${playerTargetId}"]`, { timeout: 5000 });
+    roster = await readRoster(session.context, target);
 
-    // 3. Fire a click on the action add button
-    const claimBtn = targetPlayerRow.locator("button.theme-add");
-    await claimBtn.click();
-    console.log(`[Sniper Bot] Claim button engaged for ${nameTarget}. Interfacing with verification modals...`);
+    // Idempotency: figure out which half(ves) of the claim still need submitting, rather than an
+    // all-or-nothing check. A redelivered message can land between the two halves being satisfied
+    // (e.g. the add already landed but the drop hasn't) — treating that as "needs everything" would
+    // resubmit an ADD for a player already on the roster, which ESPN would reject or, worse, pair
+    // with a DROP that then goes out alone against a since-changed roster. Only ever ask for the
+    // piece that's still missing.
+    //
+    // KNOWN GAP: this only catches redelivery *after* the roster reflects a change. A genuine
+    // in-window waiver claim (as opposed to an immediate pickup) is queued and doesn't land on the
+    // roster until processed later — so a redelivery in that gap still looks unsatisfied here and
+    // will resubmit. Closing that requires durable per-request tracking (a pending-transactions
+    // table keyed by tracking_id), which doesn't exist yet; left as a follow-up rather than
+    // guessed at here.
+    const needsAdd = !roster.slotByPlayerId.has(addPlayerId);
+    const needsDrop = Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
 
-    // TODO: Require drop player configurations if rosters are currently full — this only handles
-    // the add-only path (an open roster spot). waiver_confirm_button's selector is unverified,
-    // same as everything else in espn_selectors.json that hasn't gone through a recon pass yet.
-    await session.page.waitForSelector(selectors.waiver_confirm_button, { timeout: 5000 });
-    await session.page.locator(selectors.waiver_confirm_button).click();
+    if (!needsAdd && !needsDrop) {
+      log(`${addPlayerId} already on roster${dropPlayerId ? " and drop already applied" : ""}. No-op.`);
+      return;
+    }
 
-    console.log(`[Sniper Bot] SUCCESS: Transaction locked onto ESPN servers cleanly for ${nameTarget}.`);
+    // Only a problem when the add hasn't landed either — i.e. this looks like a fresh claim, not a
+    // redelivery that already applied the drop. If the add already landed, a missing drop target is
+    // just treated as already-satisfied above rather than as an error.
+    if (dropPlayerId && needsAdd && !roster.slotByPlayerId.has(dropPlayerId)) {
+      throw new PermanentError(
+        `[Sniper Bot][${tracking}] drop_player_id ${dropPlayerId} is not on team ${teamId}'s roster.`
+      );
+    }
+
+    const describeItems = () =>
+      `${needsAdd ? ` add=${addPlayerId}` : ""}${needsDrop ? ` drop=${dropPlayerId}` : ""}`;
+
+    if (dryRun) {
+      log(`DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`);
+      return;
+    }
+
+    log(`Submitting claim:${describeItems()}...`);
+    await submitWaiverClaim(session.context, {
+      ...target,
+      memberId: session.swid,
+      scoringPeriodId: roster.scoringPeriodId,
+      addPlayerId: needsAdd ? addPlayerId : null,
+      dropPlayerId: needsDrop ? dropPlayerId : null,
+    });
+
+    // Best-effort only: if this league is mid-waiver-period, a genuine waiver claim (as opposed to
+    // an immediate free-agent pickup) is queued and processed later — the roster read right after
+    // submit legitimately won't show it yet. So this only confirms the fast path; it does not fail
+    // the run when it can't.
+    const confirmed = (await readRoster(session.context, target)).slotByPlayerId.has(addPlayerId);
+    log(
+      confirmed
+        ? `Confirmed: ${addPlayerId} now on roster.`
+        : `Submitted, but roster doesn't show ${addPlayerId} yet — likely a queued waiver claim ` +
+            "rather than an immediate pickup; this does not mean it failed."
+    );
   } catch (error) {
-    console.error(`[Sniper Bot] Sniper timeline dropped or blocked by backend infrastructure: ${error.message}`);
+    console.error(
+      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`
+    );
+    captureFailure(tracking, {
+      tracking_id: tracking,
+      league_id: leagueId,
+      team_id: teamId,
+      season_id: seasonId,
+      dry_run: dryRun,
+      permanent: error.permanent === true,
+      add_player_id: addPlayerId,
+      drop_player_id: dropPlayerId,
+      roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
+      error: error.message,
+    });
     throw error;
   } finally {
     if (session && session.browser) {
       await session.browser.close();
-      console.log("[Sniper Bot] Cleaned up browser context footprints.");
+      log("Headless Chromium instance terminated.");
     }
   }
 }
 
 module.exports = { executeInstantWaiverClaim };
-

@@ -13,6 +13,8 @@
  * requirement, while this API is keyed on real playerId/lineupSlotId values.
  */
 
+const { PermanentError } = require("../errors");
+
 const READS_HOST = "https://lm-api-reads.fantasy.espn.com";
 const WRITES_HOST = "https://lm-api-writes.fantasy.espn.com";
 
@@ -114,6 +116,81 @@ async function submitLineup(
     throw new Error(
       `[ESPN API] Lineup submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
     );
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
+/**
+ * Submits a free-agent/waiver claim (add, optionally paired with a drop) to ESPN.
+ *
+ * UNVERIFIED REQUEST SHAPE — same caveat as submitLineup() above, and for the same reason: this
+ * body has not been confirmed against a real captured save. It's modeled on submitLineup's
+ * verified-working `transactions/` shape (same host, same URL, same isLeagueManager/teamId/
+ * memberId/scoringPeriodId/executionType envelope) plus the ADD/DROP item `type` values and
+ * top-level `type: "FREEAGENT"` documented by prior community reverse-engineering of this same
+ * endpoint family — but neither has been checked against this league's actual traffic.
+ *
+ * One thing this does NOT attempt to distinguish, open until a real capture exists: an immediate
+ * free-agent pickup (outside the waiver period, processed instantly — what `executionType:
+ * "EXECUTE"` implies) vs an actual waiver claim (inside the waiver period, queued and processed
+ * later, e.g. overnight, possibly needing a `type: "WAIVER"` and a FAAB `bidAmount` instead). This
+ * always sends "FREEAGENT"/"EXECUTE"; if the league is mid-waiver period, ESPN's real behavior
+ * here is unknown — it may reject this outright, or silently queue it under a shape this function
+ * didn't send.
+ *
+ * `addPlayerId`/`dropPlayerId` are each independently optional (though at least one must be set) —
+ * a caller that already knows one half of a claim landed (e.g. re-processing a redelivered queue
+ * message) can submit just the remaining item instead of resending a half that's already applied.
+ *
+ * Failure classification: a non-2xx response in the 4xx range (except 429, a rate limit) is
+ * treated as a PermanentError — a rejected claim (player already taken, claim window closed,
+ * malformed request) will keep failing identically on retry, and requeuing it forever under
+ * connection.js's channel-wide prefetch(1) would starve every other queue. 429/5xx/network
+ * failures stay ordinary Errors so connection.js retries them. This is a coarse HTTP-status-only
+ * heuristic, not a parse of ESPN's actual rejection reason (its exact error body shape is still
+ * unconfirmed) — re-verify against a real rejection once one's been captured.
+ *
+ * Re-verify by running `node src/bots/waiver_recon.js --watch-save` against a real free-agent add
+ * (or an actual waiver claim, to observe whether the shape differs) and diffing the captured body
+ * against this one — same recon workflow lineup_recon.js established for submitLineup.
+ */
+async function submitWaiverClaim(
+  context,
+  { leagueId, seasonId, teamId, memberId, scoringPeriodId, addPlayerId, dropPlayerId },
+) {
+  const url = buildTransactionsUrl(leagueId, seasonId);
+  const items = [];
+  if (addPlayerId) items.push({ playerId: Number(addPlayerId), type: "ADD" });
+  if (dropPlayerId) items.push({ playerId: Number(dropPlayerId), type: "DROP" });
+
+  const payload = {
+    isLeagueManager: false,
+    teamId: Number(teamId),
+    type: "FREEAGENT",
+    memberId,
+    scoringPeriodId,
+    executionType: "EXECUTE",
+    items,
+  };
+
+  const response = await context.request.post(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "x-fantasy-source": "kona",
+      "x-fantasy-platform": "kona-PROD",
+    },
+    data: payload,
+  });
+
+  const text = await response.text();
+  if (!response.ok()) {
+    const status = response.status();
+    const message = `[ESPN API] Waiver claim submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
+    if (status >= 400 && status < 500 && status !== 429) {
+      throw new PermanentError(message);
+    }
+    throw new Error(message);
   }
 
   return text ? JSON.parse(text) : {};
@@ -235,6 +312,7 @@ async function submitDraftPick(
 module.exports = {
   readRoster,
   submitLineup,
+  submitWaiverClaim,
   readDraftPicks,
   submitDraftPick,
   fetchDraftPlayerPool,
