@@ -51,6 +51,18 @@ function captureFailure(tracking, details) {
 }
 
 async function executeInstantWaiverClaim(payload) {
+  // A syntactically valid queue message can still be `null`, an array, or a bare scalar — none of
+  // those are throwable as an ordinary Error here without the whole payload.xxx dereference below
+  // throwing a plain TypeError instead, which connection.js requeues forever (only PermanentError
+  // and the JSON-parse-failure case are treated as unretryable).
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new PermanentError(
+      `[Sniper Bot] Payload must be a JSON object, got ${
+        payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
+      }.`
+    );
+  }
+
   const tracking = payload.tracking_id || payload.player_id || "no-tracking-id";
   const log = (message) => console.log(`[Sniper Bot][${tracking}] ${message}`);
 
@@ -69,6 +81,12 @@ async function executeInstantWaiverClaim(payload) {
   }
   const addPlayerId = requirePlayerId(payload.player_id, "player_id");
   const dropPlayerId = payload.drop_player_id ? requirePlayerId(payload.drop_player_id, "drop_player_id") : null;
+  if (dropPlayerId && dropPlayerId === addPlayerId) {
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] player_id and drop_player_id are both ${addPlayerId} — a player ` +
+        "cannot be added and dropped in the same claim."
+    );
+  }
 
   const target = { leagueId, seasonId, teamId };
   const { dryRun, defaulted } = resolveDryRun();
@@ -90,37 +108,51 @@ async function executeInstantWaiverClaim(payload) {
 
     roster = await readRoster(session.context, target);
 
-    // Idempotency: a redelivered claim whose add already landed (and whose drop, if any, already
-    // left the roster) is fully satisfied already — resubmitting would be a duplicate transaction,
-    // not a retry.
-    const addSatisfied = roster.slotByPlayerId.has(addPlayerId);
-    const dropSatisfied = !dropPlayerId || !roster.slotByPlayerId.has(dropPlayerId);
-    if (addSatisfied && dropSatisfied) {
+    // Idempotency: figure out which half(ves) of the claim still need submitting, rather than an
+    // all-or-nothing check. A redelivered message can land between the two halves being satisfied
+    // (e.g. the add already landed but the drop hasn't) — treating that as "needs everything" would
+    // resubmit an ADD for a player already on the roster, which ESPN would reject or, worse, pair
+    // with a DROP that then goes out alone against a since-changed roster. Only ever ask for the
+    // piece that's still missing.
+    //
+    // KNOWN GAP: this only catches redelivery *after* the roster reflects a change. A genuine
+    // in-window waiver claim (as opposed to an immediate pickup) is queued and doesn't land on the
+    // roster until processed later — so a redelivery in that gap still looks unsatisfied here and
+    // will resubmit. Closing that requires durable per-request tracking (a pending-transactions
+    // table keyed by tracking_id), which doesn't exist yet; left as a follow-up rather than
+    // guessed at here.
+    const needsAdd = !roster.slotByPlayerId.has(addPlayerId);
+    const needsDrop = Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
+
+    if (!needsAdd && !needsDrop) {
       log(`${addPlayerId} already on roster${dropPlayerId ? " and drop already applied" : ""}. No-op.`);
       return;
     }
 
-    if (dropPlayerId && !roster.slotByPlayerId.has(dropPlayerId)) {
+    // Only a problem when the add hasn't landed either — i.e. this looks like a fresh claim, not a
+    // redelivery that already applied the drop. If the add already landed, a missing drop target is
+    // just treated as already-satisfied above rather than as an error.
+    if (dropPlayerId && needsAdd && !roster.slotByPlayerId.has(dropPlayerId)) {
       throw new PermanentError(
         `[Sniper Bot][${tracking}] drop_player_id ${dropPlayerId} is not on team ${teamId}'s roster.`
       );
     }
 
+    const describeItems = () =>
+      `${needsAdd ? ` add=${addPlayerId}` : ""}${needsDrop ? ` drop=${dropPlayerId}` : ""}`;
+
     if (dryRun) {
-      log(
-        `DRY_RUN set — would submit add=${addPlayerId}${dropPlayerId ? ` drop=${dropPlayerId}` : ""} ` +
-          `(scoringPeriodId ${roster.scoringPeriodId}).`
-      );
+      log(`DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`);
       return;
     }
 
-    log(`Submitting claim: add=${addPlayerId}${dropPlayerId ? ` drop=${dropPlayerId}` : ""}...`);
+    log(`Submitting claim:${describeItems()}...`);
     await submitWaiverClaim(session.context, {
       ...target,
       memberId: session.swid,
       scoringPeriodId: roster.scoringPeriodId,
-      addPlayerId,
-      dropPlayerId,
+      addPlayerId: needsAdd ? addPlayerId : null,
+      dropPlayerId: needsDrop ? dropPlayerId : null,
     });
 
     // Best-effort only: if this league is mid-waiver-period, a genuine waiver claim (as opposed to
