@@ -145,14 +145,19 @@ function parseErrorFrame(raw) {
  * Opens the sidecar socket and resolves once it's connected. Caller owns the returned handle's
  * lifecycle (call close() when done — this does not auto-close on idle).
  */
-// A bare Cookie header alone got a 403 on the WS upgrade (2026-08-16, real attempt) — before any
-// app-level response, so almost certainly an edge/WAF check. Two likely causes, both addressed
-// below: no Origin header (every real browser sends one automatically on a cross-origin WS
-// connection; Node's `ws` client doesn't by default), and Node's self-identifying default
-// User-Agent giving away a non-browser client. Unconfirmed which one (or both) the 403 was
-// actually about — this is the fix attempt, not yet verified against a live retry.
+// A bare Cookie header alone got a 403 on the WS upgrade (2026-08-16) — before any app-level
+// response, so almost certainly an edge/WAF check. CONFIRMED FIXED by adding the two headers
+// below (Origin, a browser User-Agent): the same request shape then connected successfully and
+// submitted real, confirmed picks (see this file's header for the full verification writeup).
+// Still unconfirmed which of the two headers the 403 was actually about — both are sent
+// regardless, so it's moot for correctness, just noted for anyone trying to strip one down later.
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
+
+// Bounded so a stalled upgrade can't hang connectToDraftRoom() for the OS's full default network
+// timeout — this worker's channel-wide prefetch(1) means a hung draft-pick connection would also
+// block lineup/waiver processing behind it, on top of blowing the draft clock itself.
+const HANDSHAKE_TIMEOUT_MS = 10000;
 
 function connectToDraftRoom({ leagueId, teamId, espnS2, swid }) {
   return new Promise((resolve, reject) => {
@@ -164,19 +169,34 @@ function connectToDraftRoom({ leagueId, teamId, espnS2, swid }) {
         Origin: "https://fantasy.espn.com",
         "User-Agent": BROWSER_USER_AGENT,
       },
+      handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
     });
 
     const onOpen = () => {
-      ws.off("error", onError);
+      ws.off("error", onConnectError);
+      // Replace the connect-phase handler with a persistent one: Node's EventEmitter treats an
+      // 'error' emission with zero listeners as fatal and crashes the whole process, which a
+      // later transport error (post-handshake) would otherwise do the instant onConnectError was
+      // removed and nothing replaced it.
+      ws.on("error", (err) => {
+        console.error(`[Draft Room Socket] Transport error after connect (league ${leagueId}, team ${teamId}): ${err.message}`);
+      });
       resolve(handleFor(ws));
     };
-    const onError = (err) => {
+    const onConnectError = (err) => {
       ws.off("open", onOpen);
-      reject(new Error(`[Draft Room Socket] Failed to connect to ${url}: ${err.message}`));
+      // Deliberately omits `url` from the message: it embeds the caller's SWID (an account
+      // identifier), and this error gets logged and persisted to draft-pick-fail-*.json via
+      // draft_clicker.js's captureFailure.
+      reject(
+        new Error(
+          `[Draft Room Socket] Failed to connect to draft room (league ${leagueId}, team ${teamId}): ${err.message}`,
+        ),
+      );
     };
 
     ws.once("open", onOpen);
-    ws.once("error", onError);
+    ws.once("error", onConnectError);
   });
 }
 

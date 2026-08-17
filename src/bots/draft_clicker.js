@@ -78,6 +78,22 @@ function requirePlayerId(raw, tracking) {
 }
 
 /**
+ * team_id gets interpolated directly into the hand-built JOIN query string
+ * (draft_room_socket.js's buildDraftSocketUrl) — an unvalidated value could both alter that query
+ * (e.g. an embedded `&`) and, being non-numeric, can never match anything ESPN accepts, so this is
+ * a permanent payload error the same way an invalid player_id is, not a runtime failure to retry.
+ */
+function requireTeamId(raw, tracking) {
+  const id = String(raw ?? "").trim();
+  if (!/^\d+$/.test(id)) {
+    throw new PermanentError(
+      `[Draft Clicker][${tracking}] payload.team_id "${raw}" is not a valid numeric id.`,
+    );
+  }
+  return id;
+}
+
+/**
  * Checks the current draft board for this target: already ours (no-op, safe on redelivery),
  * taken by someone else (PermanentError, retrying can't help), or still open (proceed).
  */
@@ -146,11 +162,21 @@ function captureFailure(tracking, details) {
 }
 
 async function executeAutomatedDraftSelection(payload) {
+  // Valid JSON can still parse to null/a non-object (e.g. the literal message body `null`, or an
+  // array). Dereferencing payload.tracking_id below would then throw a plain TypeError — before
+  // any PermanentError classification exists — which connection.js treats as transient and
+  // requeues forever under its channel-wide prefetch(1), starving every consumer. Must be the
+  // very first thing checked.
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    throw new PermanentError(
+      `[Draft Clicker] draft_targets payload is not an object: ${JSON.stringify(payload)}`,
+    );
+  }
+
   const tracking = payload.tracking_id || "no-tracking-id";
   const log = (message) =>
     console.log(`[Draft Clicker][${tracking}] ${message}`);
 
-  const teamId = payload.team_id;
   const targetName = payload.name;
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const seasonId = process.env.CURRENT_YEAR || "2026";
@@ -160,11 +186,7 @@ async function executeAutomatedDraftSelection(payload) {
       `[Draft Clicker][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify the league.`,
     );
   }
-  if (teamId === undefined || teamId === null || teamId === "") {
-    throw new PermanentError(
-      `[Draft Clicker][${tracking}] Payload is missing team_id.`,
-    );
-  }
+  const teamId = requireTeamId(payload.team_id, tracking);
   const playerId = requirePlayerId(payload.player_id, tracking);
   if (!targetName) {
     throw new PermanentError(
@@ -251,10 +273,18 @@ async function executeAutomatedDraftSelection(payload) {
       // an equal alternative; if it also throws, the original wsError is what gets reported (it's
       // the primary path and the more informative failure).
       log(`WS submission failed (${wsError.message}) — attempting DOM-click fallback...`);
+
+      // clickPickViaDom launches its own separate Chromium instance — close this one first rather
+      // than running two at once. Under the 1200MiB pod limit that's real OOM risk, and this
+      // session (opened only to read the draft board) has nothing left to do anyway.
+      if (session && session.browser) {
+        await session.browser.close();
+        session.browser = null;
+      }
+
       try {
         await clickPickViaDom({ leagueId, seasonId, teamId }, playerId);
-        log(`SUCCESS (DOM fallback): pick submitted for ${targetName}. Unconfirmed by a SELECTED ` +
-          "broadcast — this path doesn't listen for one; verify manually.");
+        log(`SUCCESS (DOM fallback): pick submitted and confirmed for ${targetName}.`);
       } catch (domError) {
         log(`DOM fallback also failed: ${domError.message}`);
         throw wsError;

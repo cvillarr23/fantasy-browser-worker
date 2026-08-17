@@ -268,18 +268,29 @@ async function connectAndStream(redisClient, state) {
   state.pendingFrames = [];
 
   try {
-    // Attach listeners before navigating so we don't race the page's own WebSocket connect.
+    // Attach to the original page immediately, AND register a context-level listener that
+    // attaches to any brand-new page/tab the INSTANT it's created (not after enterDraftRoom
+    // returns): DRAFT_MODE=mock's lobby-click flow can open the real draft room in a new tab (see
+    // mock_draft.js's header), and that new page can open and finish connecting its own
+    // WebSocket during its own navigation — attaching reactively only after enterDraftRoom
+    // resolves is too late, since Playwright's page.on("websocket") never replays a socket that
+    // already opened before the listener was registered, causing this to silently miss every
+    // pick in the new tab.
     let handle = attachDraftListeners(session.page, redisClient, state);
+    session.context.on("page", (newPage) => {
+      if (newPage !== session.page) {
+        handle = attachDraftListeners(newPage, redisClient, state);
+      }
+    });
 
     const draftContext = await enterDraftRoom(session);
 
-    // enterDraftRoom's page can differ from session.page (DRAFT_MODE=mock opening a new tab, see
-    // mock_draft.js) — if so, the listeners above are attached to the wrong page (one that never
-    // sees the real draft socket) and need to move to the one that's actually showing the room.
+    // enterDraftRoom's page can differ from session.page (DRAFT_MODE=mock opening a new tab) —
+    // listeners for it are already attached above; just point session.page at it so the rest of
+    // this function (the isDead() poll loop below) watches the actually-active page.
     if (draftContext.page && draftContext.page !== session.page) {
-      console.log("[Draft Sync] Draft room opened in a new tab — re-attaching listeners to it.");
+      console.log("[Draft Sync] Draft room opened in a new tab — listeners were already attached to it.");
       session.page = draftContext.page;
-      handle = attachDraftListeners(session.page, redisClient, state);
     }
 
     // DRAFT_MODE=mock joins a brand-new ephemeral league on every reconnect — carrying over the

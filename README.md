@@ -9,7 +9,7 @@ The headless execution worker layer of your automated fantasy football platform.
 *   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
 
 ## Documentation
-[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end). Also see [`CLAUDE.md`](CLAUDE.md) for a shorter, ticket-oriented summary of the same and other project-specific gotchas.
+[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end). A `CLAUDE.md` with a shorter, ticket-oriented summary of the same and other project-specific gotchas exists locally for AI-assisted development but isn't tracked in this repo (gitignored, matching the other `fantasy-*` repos' convention) — not linked here since the path wouldn't resolve on GitHub.
 
 ## Local Configuration
 Make sure your system layout supports local browser binaries before launching:

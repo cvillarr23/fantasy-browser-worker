@@ -147,16 +147,21 @@ async function runRecon() {
   let session = null;
   try {
     // Always headed: this tool exists for a human to watch traffic AND manually interact. Auth
-    // priority: saved session (reuse a prior real login, avoids logging in every run) -> manual
-    // login (FORCE_MANUAL_LOGIN=1, or no saved session and no cookies) -> cookie injection. See
-    // this file's header for why cookie injection alone can't render the draft room UI (it's
-    // sufficient for REST/WS, not for the page itself — a separate Disney/MyDisney identity SDK
-    // gate, confirmed 2026-08-17).
-    session =
-      (await tryLoadStoredSession()) ||
-      (resolveEspnCookies() && !process.env.FORCE_MANUAL_LOGIN
-        ? await createAuthenticatedSession({ headless: false })
-        : await launchWithManualLogin());
+    // priority: FORCE_MANUAL_LOGIN=1 always forces a fresh interactive login (checked first, so
+    // it can't be short-circuited by a stale-but-present saved session — the whole point of the
+    // flag is to force past exactly that) -> saved session (reuse a prior real login) -> manual
+    // login (no saved session and no cookies) -> cookie injection. See this file's header for why
+    // cookie injection alone can't render the draft room UI (it's sufficient for REST/WS, not for
+    // the page itself — a separate Disney/MyDisney identity SDK gate, confirmed 2026-08-17).
+    if (process.env.FORCE_MANUAL_LOGIN) {
+      session = await launchWithManualLogin();
+    } else {
+      session =
+        (await tryLoadStoredSession()) ||
+        (resolveEspnCookies()
+          ? await createAuthenticatedSession({ headless: false })
+          : await launchWithManualLogin());
+    }
 
     // Reassigned if startFreshPracticeDraft ends up navigating a brand-new tab instead of the
     // original page (confirmed 2026-08-17 — see mock_draft.js's header). Every closure below

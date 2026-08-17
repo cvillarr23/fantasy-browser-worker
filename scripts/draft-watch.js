@@ -72,15 +72,21 @@ async function watchOnce({ leagueId, teamId }) {
 
   await new Promise((resolve) => {
     let stopping = false;
-    socket.onClose(() => {
-      if (!stopping) resolve();
-    });
-    process.once("SIGINT", () => {
+    const onSigint = () => {
       stopping = true;
       console.log("\nStopping watcher.");
       socket.close();
       process.exit(0);
+    };
+    socket.onClose(() => {
+      // Reconnect loop is expected here (single-session room — see this file's header), so every
+      // call to watchOnce() would otherwise register another SIGINT listener that never gets
+      // cleaned up on a normal (non-Ctrl+C) close, eventually tripping Node's
+      // MaxListenersExceededWarning across a long watch session with many evictions.
+      process.off("SIGINT", onSigint);
+      if (!stopping) resolve();
     });
+    process.once("SIGINT", onSigint);
   });
 }
 

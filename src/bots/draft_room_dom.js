@@ -34,6 +34,13 @@ const { captureDebugSnapshot } = require("./debug_capture");
  * page's DOM/screenshot on load and on any failure here, which would show this gate directly if
  * it's the cause of a failure.
  */
+// Bounded wait for the Draft button to disappear/detach after clicking — the only DOM-observable
+// signal that the click actually landed (ESPN removes/updates a drafted player's row). Without
+// this, clickPickViaDom returning normally only proves Playwright dispatched a DOM click event,
+// not that ESPN accepted the pick — and draft_clicker.js's caller treats a normal return as
+// success, which acks and permanently removes the queue message either way.
+const CLICK_CONFIRM_TIMEOUT_MS = 8000;
+
 async function clickPickViaDom({ leagueId, seasonId, teamId }, playerId) {
   const session = await createAuthenticatedSession();
   try {
@@ -46,6 +53,11 @@ async function clickPickViaDom({ leagueId, seasonId, teamId }, playerId) {
     const draftButton = session.page.locator(`button.Button--draft[data-player-id="${playerId}"]`);
     await draftButton.waitFor({ state: "visible", timeout: 15000 });
     await draftButton.click({ timeout: 10000 });
+
+    // Confirmation, not just a dispatched click: "hidden" covers both detached-from-DOM and
+    // still-present-but-invisible, the observable signal that the row actually updated. If it's
+    // still sitting there visible and clickable, we don't actually know the pick landed.
+    await draftButton.waitFor({ state: "hidden", timeout: CLICK_CONFIRM_TIMEOUT_MS });
 
     return { method: "dom", playerId };
   } catch (err) {
