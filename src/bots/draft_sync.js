@@ -2,7 +2,8 @@ const { createAuthenticatedSession } = require("./auth");
 const { startFreshPracticeDraft, parseDraftRoomUrl } = require("./mock_draft");
 const redis = require("redis");
 
-const REDIS_HOST = process.env.REDIS_HOST || "fantasy-cache.default.svc.cluster.local";
+const REDIS_HOST =
+  process.env.REDIS_HOST || "fantasy-cache.default.svc.cluster.local";
 const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -82,16 +83,21 @@ function parseSelectedFrame(raw) {
  */
 async function publishPickEvent(redisClient, event, state) {
   const boardKey = `draft:${state.leagueId}:board`;
-  const existingRaw = await redisClient.hGet(boardKey, String(event.pick_number));
+  const existingRaw = await redisClient.hGet(
+    boardKey,
+    String(event.pick_number),
+  );
 
   if (existingRaw) {
     const existing = JSON.parse(existingRaw);
-    const alreadyCorrect = existing.player_id === event.player_id && existing.team_id === event.team_id;
+    const alreadyCorrect =
+      existing.player_id === event.player_id &&
+      existing.team_id === event.team_id;
     if (event.source !== "rest" || alreadyCorrect) {
       return;
     }
     console.warn(
-      `[Draft Sync] Correcting pick #${event.pick_number} from REST (was ${JSON.stringify(existing)}, now ${JSON.stringify(event)})`
+      `[Draft Sync] Correcting pick #${event.pick_number} from REST (was ${JSON.stringify(existing)}, now ${JSON.stringify(event)})`,
     );
   }
 
@@ -106,18 +112,23 @@ async function publishPickEvent(redisClient, event, state) {
   // Only advance in-memory state once the durable writes above have actually succeeded — if they
   // threw, this line never runs, so a retry (WS re-delivery or the next REST poll) naturally
   // reattempts instead of the pick being silently treated as already handled.
-  if (state.lastPickNumber == null || event.pick_number > state.lastPickNumber) {
+  if (
+    state.lastPickNumber == null ||
+    event.pick_number > state.lastPickNumber
+  ) {
     state.lastPickNumber = event.pick_number;
   }
 
   console.log(
-    `[Draft Sync] Published pick #${event.pick_number} (${event.source}): player ${event.player_id} -> team ${event.team_id}`
+    `[Draft Sync] Published pick #${event.pick_number} (${event.source}): player ${event.player_id} -> team ${event.team_id}`,
   );
 }
 
 /** One-time/periodic authoritative fetch — returns the sorted list of already-made picks. */
 async function fetchDraftDetail(context, state) {
-  const response = await context.request.get(buildDraftDetailUrl(state.leagueId, state.seasonId));
+  const response = await context.request.get(
+    buildDraftDetailUrl(state.leagueId, state.seasonId),
+  );
   if (!response.ok()) {
     throw new Error(`mDraftDetail fetch failed: HTTP ${response.status()}`);
   }
@@ -164,7 +175,9 @@ async function handleSelectedFrame(parsed, redisClient, state) {
   try {
     await publishPickEvent(redisClient, event, state);
   } catch (err) {
-    console.error(`[Draft Sync] Failed to publish WS pick event: ${err.message}`);
+    console.error(
+      `[Draft Sync] Failed to publish WS pick event: ${err.message}`,
+    );
   }
 }
 
@@ -205,18 +218,31 @@ function attachDraftListeners(page, redisClient, state) {
   });
 
   return {
-    isDead: () => openSockets === 0 && Date.now() - lastActivityAt > WS_DEAD_GRACE_MS,
+    isDead: () =>
+      openSockets === 0 && Date.now() - lastActivityAt > WS_DEAD_GRACE_MS,
   };
 }
 
 /** Gets us into a draft room and returns { leagueId, seasonId, teamId }, however DRAFT_MODE dictates. */
 async function enterDraftRoom(session) {
+  // DRAFT_MODE=mock can end up with the draft room open in a brand-new tab rather than the
+  // current page navigating in place (see mock_draft.js's startFreshPracticeDraft header) — the
+  // other two paths always navigate session.page itself, so this only ever differs for that mode.
+  let activePage = session.page;
+
   if (process.env.DRAFT_ROOM_URL) {
-    console.log(`[Draft Sync] DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`);
-    await session.page.goto(process.env.DRAFT_ROOM_URL, { waitUntil: "load", timeout: 60000 });
+    console.log(
+      `[Draft Sync] DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`,
+    );
+    await session.page.goto(process.env.DRAFT_ROOM_URL, {
+      waitUntil: "load",
+      timeout: 60000,
+    });
   } else if (process.env.DRAFT_MODE === "mock") {
-    console.log("[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...");
-    await startFreshPracticeDraft(session.page);
+    console.log(
+      "[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...",
+    );
+    ({ page: activePage } = await startFreshPracticeDraft(session.page));
   } else {
     const leagueId = process.env.ESPN_LEAGUE_ID;
     const seasonId = process.env.CURRENT_YEAR || "2026";
@@ -226,11 +252,13 @@ async function enterDraftRoom(session) {
     await session.page.goto(draftUrl, { waitUntil: "load", timeout: 60000 });
   }
 
-  const { leagueId, seasonId, teamId } = parseDraftRoomUrl(session.page.url());
+  const { leagueId, seasonId, teamId } = parseDraftRoomUrl(activePage.url());
   if (!leagueId || !seasonId) {
-    throw new Error(`Could not determine league/season from draft room URL: ${session.page.url()}`);
+    throw new Error(
+      `Could not determine league/season from draft room URL: ${activePage.url()}`,
+    );
   }
-  return { leagueId, seasonId, teamId };
+  return { leagueId, seasonId, teamId, page: activePage };
 }
 
 async function connectAndStream(redisClient, state) {
@@ -240,16 +268,36 @@ async function connectAndStream(redisClient, state) {
   state.pendingFrames = [];
 
   try {
-    // Attach listeners before navigating so we don't race the page's own WebSocket connect.
-    const handle = attachDraftListeners(session.page, redisClient, state);
+    // Attach to the original page immediately, AND register a context-level listener that
+    // attaches to any brand-new page/tab the INSTANT it's created (not after enterDraftRoom
+    // returns): DRAFT_MODE=mock's lobby-click flow can open the real draft room in a new tab (see
+    // mock_draft.js's header), and that new page can open and finish connecting its own
+    // WebSocket during its own navigation — attaching reactively only after enterDraftRoom
+    // resolves is too late, since Playwright's page.on("websocket") never replays a socket that
+    // already opened before the listener was registered, causing this to silently miss every
+    // pick in the new tab.
+    let handle = attachDraftListeners(session.page, redisClient, state);
+    session.context.on("page", (newPage) => {
+      if (newPage !== session.page) {
+        handle = attachDraftListeners(newPage, redisClient, state);
+      }
+    });
 
     const draftContext = await enterDraftRoom(session);
+
+    // enterDraftRoom's page can differ from session.page (DRAFT_MODE=mock opening a new tab) —
+    // listeners for it are already attached above; just point session.page at it so the rest of
+    // this function (the isDead() poll loop below) watches the actually-active page.
+    if (draftContext.page && draftContext.page !== session.page) {
+      console.log("[Draft Sync] Draft room opened in a new tab — listeners were already attached to it.");
+      session.page = draftContext.page;
+    }
 
     // DRAFT_MODE=mock joins a brand-new ephemeral league on every reconnect — carrying over the
     // previous draft's counters would misnumber (or skip) every pick in the new one.
     if (state.leagueId && state.leagueId !== draftContext.leagueId) {
       console.log(
-        `[Draft Sync] League changed (${state.leagueId} -> ${draftContext.leagueId}), resetting pick counters.`
+        `[Draft Sync] League changed (${state.leagueId} -> ${draftContext.leagueId}), resetting pick counters.`,
       );
       state.lastPickNumber = null;
       state.pickCounter = 0;
@@ -279,7 +327,9 @@ async function connectAndStream(redisClient, state) {
     while (!handle.isDead()) {
       await session.page.waitForTimeout(5000);
     }
-    console.warn("[Draft Sync] Connection appears dead, will attempt to reconnect.");
+    console.warn(
+      "[Draft Sync] Connection appears dead, will attempt to reconnect.",
+    );
   } finally {
     if (reconcileInterval) clearInterval(reconcileInterval);
     if (session.browser) {
@@ -289,12 +339,18 @@ async function connectAndStream(redisClient, state) {
 }
 
 async function streamLiveDraftRoom() {
-  console.log(`[Draft Sync] Booting live channel listener client. Connecting to Redis node at ${REDIS_HOST}...`);
-  const redisClient = redis.createClient({ url: `redis://${REDIS_HOST}:${REDIS_PORT}` });
+  console.log(
+    `[Draft Sync] Booting live channel listener client. Connecting to Redis node at ${REDIS_HOST}...`,
+  );
+  const redisClient = redis.createClient({
+    url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
+  });
   // Without this, an unhandled 'error' event (Node Redis emits connection errors through the
   // EventEmitter) would crash the process outright instead of letting the client's own
   // reconnect strategy recover.
-  redisClient.on("error", (err) => console.error(`[Draft Sync] Redis client error: ${err.message}`));
+  redisClient.on("error", (err) =>
+    console.error(`[Draft Sync] Redis client error: ${err.message}`),
+  );
   await redisClient.connect();
 
   const state = {
@@ -315,17 +371,22 @@ async function streamLiveDraftRoom() {
         attempt = 0; // Clean disconnect/reconnect cycle, not a failure — reset backoff.
       } catch (error) {
         attempt += 1;
-        const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1), RECONNECT_MAX_DELAY_MS);
+        const delay = Math.min(
+          RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
+          RECONNECT_MAX_DELAY_MS,
+        );
         console.error(
           `[Draft Sync] Session crashed (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}): ` +
-            `${error.message}. Reconnecting in ${delay}ms...`
+            `${error.message}. Reconnecting in ${delay}ms...`,
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
     throw new Error("Exceeded max reconnect attempts for live draft stream.");
   } catch (error) {
-    console.error(`[Draft Sync] Live data sync loop crashed permanently: ${error.message}`);
+    console.error(
+      `[Draft Sync] Live data sync loop crashed permanently: ${error.message}`,
+    );
     process.exit(1);
   } finally {
     await redisClient.quit();
@@ -341,4 +402,5 @@ module.exports = {
   parseSelectedFrame,
   buildDraftUrl,
   buildDraftDetailUrl,
+  fetchDraftDetail,
 };

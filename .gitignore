@@ -3,3 +3,4 @@ recon-output/
 auth_failure_diagnostics.png
 .env
 .idea/
+.espn-storage-state.json

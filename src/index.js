@@ -1,11 +1,14 @@
 const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
+const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
 const { recordExecution } = require("./db/execution_log");
 
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
-  console.log(`[Worker Engine] Routing task parameters for queue event: "${queueName}"`);
+  console.log(
+    `[Worker Engine] Routing task parameters for queue event: "${queueName}"`,
+  );
 
   const startedAt = Date.now();
   try {
@@ -20,8 +23,15 @@ async function handleIncomingMessage(queueName, payload) {
         await executeInstantWaiverClaim(payload);
         break;
 
+      case "draft_targets":
+        console.log("[Worker Engine] Invoking Draft Selection Engine...");
+        await executeAutomatedDraftSelection(payload);
+        break;
+
       default:
-        console.warn(`[Worker Engine] Intercepted unsupported message format signature: ${queueName}`);
+        console.warn(
+          `[Worker Engine] Intercepted unsupported message format signature: ${queueName}`,
+        );
     }
     await recordExecution({
       transactionType: queueName,
@@ -30,7 +40,9 @@ async function handleIncomingMessage(queueName, payload) {
     });
     return true; // Return true on successful completion code run
   } catch (error) {
-    console.error(`[Worker Engine] Critical failure processing automation routine: ${error.message}`);
+    console.error(
+      `[Worker Engine] Critical failure processing automation routine: ${error.message}`,
+    );
     await recordExecution({
       transactionType: queueName,
       status: "failure",
@@ -42,27 +54,39 @@ async function handleIncomingMessage(queueName, payload) {
 }
 
 async function bootDaemon() {
-  console.log("[Worker Engine] Launching browser worker orchestrator background daemon...");
-  
+  console.log(
+    "[Worker Engine] Launching browser worker orchestrator background daemon...",
+  );
+
   try {
     // Initialize our managed RabbitMQ connection framework loops
     await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage);
-    console.log("[Worker Engine] Background listener threads fully initialized. Standing by...");
+    console.log(
+      "[Worker Engine] Background listener threads fully initialized. Standing by...",
+    );
   } catch (error) {
-    console.error(`[Worker Engine] Critical cluster initialization failure: ${error.message}`);
+    console.error(
+      `[Worker Engine] Critical cluster initialization failure: ${error.message}`,
+    );
     process.exit(1);
   }
 }
 
 // Global process monitoring to prevent memory-leak crashes from corrupting cluster states
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("[Fatal Worker Event] Unhandled rejection intercepted at:", promise, "reason:", reason);
+  console.error(
+    "[Fatal Worker Event] Unhandled rejection intercepted at:",
+    promise,
+    "reason:",
+    reason,
+  );
 });
 
 process.on("uncaughtException", (error) => {
-  console.error(`[Fatal Worker Event] Uncaught system execution exception: ${error.message}`);
+  console.error(
+    `[Fatal Worker Event] Uncaught system execution exception: ${error.message}`,
+  );
   process.exit(1);
 });
 
 bootDaemon();
-

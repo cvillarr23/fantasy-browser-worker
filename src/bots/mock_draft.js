@@ -11,28 +11,51 @@ const DRAFT_ROOM_URL_PATTERN = /\/football\/draft/i;
  * useful when `page` is on a visible/headed browser, so headless test runs should treat that
  * timeout as a real failure rather than something a person will resolve.
  */
-async function startFreshPracticeDraft(page) {
-  console.log("[MockDraft] Navigating to mock draft lobby to start a fresh practice draft...");
+/**
+ * Returns `{ url, page }` — NOT just a URL string (changed 2026-08-17). ESPN sometimes opens the
+ * actual draft room in a brand-new tab/window rather than navigating the current page in place
+ * (confirmed via draft_recon.js diagnostics: a new page appeared carrying the draft URL while the
+ * original page stayed on the lobby; the old code only ever watched the original page for a URL
+ * change that could never come there, which eventually timed out and tore down the whole
+ * session). Callers MUST use the returned `page`, not whatever page they originally passed in —
+ * it may be a different object.
+ */
+async function startFreshPracticeDraft(page, logger = console) {
+  logger.log("[MockDraft] Navigating to mock draft lobby to start a fresh practice draft...");
   await page.goto(MOCK_LOBBY_URL, { waitUntil: "load", timeout: 60000 });
+
+  const context = page.context();
+
+  // Race both possibilities — the original page navigating in place, or a new page opening and
+  // navigating there — set up BEFORE attempting the click, so it's already listening no matter
+  // who ends up clicking "Practice Draft" (our auto-click, or a human, in a headed session).
+  const activePagePromise = Promise.race([
+    page.waitForURL(DRAFT_ROOM_URL_PATTERN, { timeout: 150000 }).then(() => page),
+    new Promise((resolve, reject) => {
+      context.once("page", (newPage) => {
+        newPage
+          .waitForURL(DRAFT_ROOM_URL_PATTERN, { timeout: 150000 })
+          .then(() => resolve(newPage))
+          .catch(reject);
+      });
+    }),
+  ]);
 
   try {
     const practiceLink = page.getByText(PRACTICE_DRAFT_LINK_TEXT).first();
     await practiceLink.waitFor({ timeout: 15000 });
-    await Promise.all([
-      page.waitForURL(DRAFT_ROOM_URL_PATTERN, { timeout: 30000 }),
-      practiceLink.click(),
-    ]);
+    await practiceLink.click();
   } catch (err) {
-    console.warn(
-      `[MockDraft] Couldn't auto-start a practice draft (${err.message}). If this is a headed ` +
-        "session, click \"Practice Draft\" yourself now — waiting up to 2 minutes for the draft " +
-        "room to load..."
+    logger.warn(
+      `[MockDraft] Couldn't auto-click "Practice Draft" (${err.message}). If this is a headed ` +
+        "session, click it yourself now — waiting up to 2.5 minutes for the draft room to load " +
+        "(either the current tab or a new one)..."
     );
-    await page.waitForURL(DRAFT_ROOM_URL_PATTERN, { timeout: 120000 });
   }
 
-  console.log(`[MockDraft] In a fresh practice draft room: ${page.url()}`);
-  return page.url();
+  const activePage = await activePagePromise;
+  logger.log(`[MockDraft] In a fresh practice draft room: ${activePage.url()}`);
+  return { url: activePage.url(), page: activePage };
 }
 
 /** Pulls leagueId/seasonId/teamId/memberId back out of a draft room URL. */
