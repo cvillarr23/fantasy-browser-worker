@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { logger } = require("../telemetry/logger");
 
 /**
  * Cross-cutting debug capture (DOM + screenshot) for any bot that holds a Playwright `page`.
@@ -32,9 +33,11 @@ async function captureDebugSnapshot(page, label) {
     const html = await page.content();
     fs.writeFileSync(path.join(OUTPUT_DIR, `debug-${label}-latest.html`), html);
     await page.screenshot({ path: path.join(OUTPUT_DIR, `debug-${label}-latest.png`) });
-    console.log(`[Debug Capture] Saved "${label}" DOM/screenshot to ${OUTPUT_DIR}`);
+    logger.info(`[Debug Capture] Saved "${label}" DOM/screenshot to ${OUTPUT_DIR}`);
   } catch (err) {
-    console.error(`[Debug Capture] Failed to capture "${label}": ${err.message}`);
+    logger.error(`[Debug Capture] Failed to capture "${label}": ${err.message}`, {
+      error: err.message,
+    });
   }
 }
 

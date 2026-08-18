@@ -4,6 +4,7 @@ const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitLineup } = require("./espn_api");
 const { PermanentError } = require("../errors");
 const slotConfig = require("../selectors/lineup_slots.json");
+const { logger } = require("../telemetry/logger");
 
 /**
  * Lineup Realignment Automation Bot (WORKER-03)
@@ -269,15 +270,17 @@ function captureFailure(tracking, details) {
     const file = path.join(DEBUG_DIR, `lineup-fail-${tracking}-${stamp}.json`);
 
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    console.error(`[Lineup Bot][${tracking}] Failure context written to: ${file}`);
+    logger.error(`[Lineup Bot][${tracking}] Failure context written to: ${file}`);
   } catch (captureError) {
-    console.error(`[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
+    logger.error(`[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`, {
+      error: captureError.message,
+    });
   }
 }
 
 async function executeLineupAdjustments(payload) {
   const tracking = payload.tracking_id || "no-tracking-id";
-  const log = (message) => console.log(`[Lineup Bot][${tracking}] ${message}`);
+  const log = logger.info;
 
   const teamId = payload.team_id;
   const leagueId = process.env.ESPN_LEAGUE_ID;
@@ -372,8 +375,9 @@ async function executeLineupAdjustments(payload) {
     await verifyLineup(session.context, target, intended, log);
     log("Lineup realignment complete and verified.");
   } catch (error) {
-    console.error(
-      `[Lineup Bot][${tracking}] Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`
+    logger.error(
+      `[Lineup Bot][${tracking}] Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      { error: error.message, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,
@@ -404,7 +408,7 @@ async function executeLineupAdjustments(payload) {
 if (require.main === module) {
   const raw = process.argv[2];
   if (!raw) {
-    console.error(
+    logger.error(
       "Usage: node src/bots/lineup_bot.js '<lineup_updates JSON payload>'\n" +
         "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/lineup_bot.js \\\n" +
         `  '{"team_id":"8","optimized_swaps":[{"drop_player_id":"3139477","add_player_id":"4259545","slot":"FLEX"}]}'`
@@ -413,7 +417,7 @@ if (require.main === module) {
   }
 
   executeLineupAdjustments(JSON.parse(raw)).catch((error) => {
-    console.error(`[Lineup Bot] Run failed: ${error.message}`);
+    logger.error(`[Lineup Bot] Run failed: ${error.message}`, { error: error.message });
     process.exit(1);
   });
 }

@@ -3,6 +3,7 @@ const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitWaiverClaim } = require("./espn_api");
 const { PermanentError } = require("../errors");
+const { logger } = require("../telemetry/logger");
 
 /**
  * High-Speed Waiver Sniper Bot (fix for #14)
@@ -44,9 +45,11 @@ function captureFailure(tracking, details) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = path.join(DEBUG_DIR, `waiver-fail-${tracking}-${stamp}.json`);
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    console.error(`[Sniper Bot][${tracking}] Failure context written to: ${file}`);
+    logger.error(`[Sniper Bot][${tracking}] Failure context written to: ${file}`);
   } catch (captureError) {
-    console.error(`[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
+    logger.error(`[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`, {
+      error: captureError.message,
+    });
   }
 }
 
@@ -64,7 +67,7 @@ async function executeInstantWaiverClaim(payload) {
   }
 
   const tracking = payload.tracking_id || payload.player_id || "no-tracking-id";
-  const log = (message) => console.log(`[Sniper Bot][${tracking}] ${message}`);
+  const log = logger.info;
 
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const teamId = process.env.ESPN_TEAM_ID;
@@ -167,8 +170,9 @@ async function executeInstantWaiverClaim(payload) {
             "rather than an immediate pickup; this does not mean it failed."
     );
   } catch (error) {
-    console.error(
-      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`
+    logger.error(
+      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      { error: error.message, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,

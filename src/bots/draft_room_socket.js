@@ -1,4 +1,5 @@
 const WebSocket = require("ws");
+const { logger } = require("../telemetry/logger");
 
 /**
  * Sidecar WebSocket client for ESPN's live draft room (WORKER-06).
@@ -179,7 +180,10 @@ function connectToDraftRoom({ leagueId, teamId, espnS2, swid }) {
       // later transport error (post-handshake) would otherwise do the instant onConnectError was
       // removed and nothing replaced it.
       ws.on("error", (err) => {
-        console.error(`[Draft Room Socket] Transport error after connect (league ${leagueId}, team ${teamId}): ${err.message}`);
+        logger.error(
+          `[Draft Room Socket] Transport error after connect (league ${leagueId}, team ${teamId}): ${err.message}`,
+          { error: err.message, leagueId, teamId },
+        );
       });
       resolve(handleFor(ws));
     };

@@ -2,6 +2,7 @@
 // The page.evaluate() callback below runs inside the browser page, not Node — document/window
 // are real globals there, hence the browser env for this file.
 const { createAuthenticatedSession } = require("./auth");
+const { logger } = require("../telemetry/logger");
 
 /**
  * Automated Trade Proposal Scraper
@@ -12,7 +13,7 @@ async function scrapePendingTradeProposals() {
   const currentYear = process.env.CURRENT_YEAR || "2026";
   const tradeUrl = `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${currentYear}`;
   
-  console.log(`[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`);
+  logger.info(`[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`);
   
   let session = null;
   try {
@@ -30,11 +31,13 @@ async function scrapePendingTradeProposals() {
       return Array.from(tradeCards).map(card => card.innerText.replace(/\s+/g, " ").trim()).join(" | ");
     });
 
-    console.log(`[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`);
+    logger.info(`[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`);
     return proposalContentText;
-    
+
   } catch (error) {
-    console.error(`[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`);
+    logger.error(`[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`, {
+      error: error.message,
+    });
     return null;
   } finally {
     if (session && session.browser) {

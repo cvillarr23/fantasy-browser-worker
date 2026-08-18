@@ -1,5 +1,7 @@
 const { createAuthenticatedSession } = require("./auth");
 const selectors = require("../selectors/espn_selectors.json");
+const { logger } = require("../telemetry/logger");
+const { withInstrumentation } = require("../telemetry/instrument");
 
 /**
  * Scheduled health check (issue #7's "at minimum" fallback — now the primary approach, see PR
@@ -47,9 +49,9 @@ async function checkEspnSession() {
       );
     });
 
-    console.log("[Session Check] ESPN session is healthy — roster table rendered for", targetUrl);
+    logger.info(`[Session Check] ESPN session is healthy — roster table rendered for ${targetUrl}`);
   } catch (error) {
-    console.error(error.message);
+    logger.error(error.message, { error: error.message });
     if (session?.page) {
       await session.page.screenshot({ path: "auth_failure_diagnostics.png" }).catch(() => {});
     }
@@ -62,7 +64,11 @@ async function checkEspnSession() {
 }
 
 if (require.main === module) {
-  checkEspnSession();
+  withInstrumentation(
+    "check_espn_session",
+    { trackingId: require("crypto").randomUUID() },
+    checkEspnSession,
+  );
 }
 
 module.exports = { checkEspnSession };

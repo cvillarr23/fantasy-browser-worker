@@ -5,6 +5,7 @@ const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
 const { PermanentError } = require("../errors");
+const { logger } = require("../telemetry/logger");
 
 /**
  * 1-Click Automated Draft Execution Bot (WORKER-06)
@@ -151,12 +152,13 @@ function captureFailure(tracking, details) {
       `draft-pick-fail-${tracking}-${stamp}.json`,
     );
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    console.error(
+    logger.error(
       `[Draft Clicker][${tracking}] Failure context written to: ${file}`,
     );
   } catch (captureError) {
-    console.error(
+    logger.error(
       `[Draft Clicker][${tracking}] Could not capture failure context: ${captureError.message}`,
+      { error: captureError.message },
     );
   }
 }
@@ -174,8 +176,7 @@ async function executeAutomatedDraftSelection(payload) {
   }
 
   const tracking = payload.tracking_id || "no-tracking-id";
-  const log = (message) =>
-    console.log(`[Draft Clicker][${tracking}] ${message}`);
+  const log = logger.info;
 
   const targetName = payload.name;
   const leagueId = process.env.ESPN_LEAGUE_ID;
@@ -291,8 +292,9 @@ async function executeAutomatedDraftSelection(payload) {
       }
     }
   } catch (error) {
-    console.error(
+    logger.error(
       `[Draft Clicker][${tracking}] Selection failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      { error: error.message, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,
@@ -318,7 +320,7 @@ async function executeAutomatedDraftSelection(payload) {
 if (require.main === module) {
   const raw = process.argv[2];
   if (!raw) {
-    console.error(
+    logger.error(
       "Usage: node src/bots/draft_clicker.js '<draft_targets JSON payload>'\n" +
         "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/draft_clicker.js \\\n" +
         `  '{"team_id":"8","player_id":"4360438","name":"Breece Hall"}'`,
@@ -327,7 +329,9 @@ if (require.main === module) {
   }
 
   executeAutomatedDraftSelection(JSON.parse(raw)).catch((error) => {
-    console.error(`[Draft Clicker] Run failed: ${error.message}`);
+    logger.error(`[Draft Clicker] Run failed: ${error.message}`, {
+      error: error.message,
+    });
     process.exit(1);
   });
 }
