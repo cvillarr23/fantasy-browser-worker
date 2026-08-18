@@ -5,6 +5,7 @@ const { readRoster, submitLineup } = require("./espn_api");
 const { PermanentError } = require("../errors");
 const slotConfig = require("../selectors/lineup_slots.json");
 const { logger } = require("../telemetry/logger");
+const { withInstrumentation } = require("../telemetry/instrument");
 
 /**
  * Lineup Realignment Automation Bot (WORKER-03)
@@ -460,9 +461,19 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  executeLineupAdjustments(JSON.parse(raw)).catch((error) => {
+  const payload = JSON.parse(raw);
+  withInstrumentation(
+    "lineup_bot",
+    { trackingId: payload.tracking_id || require("crypto").randomUUID() },
+    () => executeLineupAdjustments(payload),
+  ).catch(async (error) => {
     logger.error(`[Lineup Bot] Run failed: ${error.message}`, { err: error });
-    process.exit(1);
+    const { sdk } = require("../telemetry/init");
+    try {
+      await sdk.shutdown();
+    } finally {
+      process.exit(1);
+    }
   });
 }
 

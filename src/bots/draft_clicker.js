@@ -6,6 +6,7 @@ const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
 const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
+const { withInstrumentation } = require("../telemetry/instrument");
 
 /**
  * 1-Click Automated Draft Execution Bot (WORKER-06)
@@ -346,11 +347,21 @@ if (require.main === module) {
     process.exit(1);
   }
 
-  executeAutomatedDraftSelection(JSON.parse(raw)).catch((error) => {
+  const payload = JSON.parse(raw);
+  withInstrumentation(
+    "draft_clicker",
+    { trackingId: payload.tracking_id || require("crypto").randomUUID() },
+    () => executeAutomatedDraftSelection(payload),
+  ).catch(async (error) => {
     logger.error(`[Draft Clicker] Run failed: ${error.message}`, {
       err: error,
     });
-    process.exit(1);
+    const { sdk } = require("../telemetry/init");
+    try {
+      await sdk.shutdown();
+    } finally {
+      process.exit(1);
+    }
   });
 }
 

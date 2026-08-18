@@ -64,7 +64,11 @@ async function checkEspnSession() {
         .screenshot({ path: "auth_failure_diagnostics.png" })
         .catch(() => {});
     }
-    process.exitCode = 1;
+    // Rethrow instead of just setting process.exitCode -- this runs inside withInstrumentation's
+    // handler (see require.main below), so swallowing the error here would make the wrapper
+    // record a successful span/execution_log row for a failed auth check. Exit-code handling
+    // moves to a .catch() after the wrapper settles.
+    throw error;
   } finally {
     if (session?.browser) {
       await session.browser.close();
@@ -77,7 +81,19 @@ if (require.main === module) {
     "check_espn_session",
     { trackingId: require("crypto").randomUUID() },
     checkEspnSession,
-  );
+  )
+    .catch(() => {
+      // Non-zero exit is the alert this CronJob relies on (see header comment) -- set it here,
+      // after withInstrumentation's own catch has already recorded the failed span/execution_log
+      // row, rather than swallowing the error inside checkEspnSession itself.
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      // Flush any buffered spans before this short-lived CronJob pod's event loop drains --
+      // not guaranteed to happen on its own before exit.
+      const { sdk } = require("../telemetry/init");
+      await sdk.shutdown();
+    });
 }
 
 module.exports = { checkEspnSession };

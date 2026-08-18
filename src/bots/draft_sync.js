@@ -400,9 +400,11 @@ async function streamLiveDraftRoom() {
       `[Draft Sync] Live data sync loop crashed permanently: ${error.message}`,
       { err: error },
     );
-    const { sdk } = require("../telemetry/init");
-    await sdk.shutdown();
-    process.exit(1);
+    // Rethrow rather than shutting down/exiting here -- this runs inside withInstrumentation's
+    // handler (see require.main below), so exiting here would skip its own catch, which is what
+    // records the failed span and execution_log row. Shutdown/exit happens after that wrapper
+    // settles instead.
+    throw error;
   } finally {
     await redisClient.quit();
   }
@@ -413,7 +415,17 @@ if (require.main === module) {
     "draft_sync",
     { trackingId: require("crypto").randomUUID() },
     streamLiveDraftRoom,
-  );
+  ).catch(async () => {
+    // withInstrumentation's own catch has already recorded the span/execution_log failure by
+    // the time this runs -- only flushing and exiting is left to do. In a try/finally because
+    // shutdown() can itself reject.
+    const { sdk } = require("../telemetry/init");
+    try {
+      await sdk.shutdown();
+    } finally {
+      process.exit(1);
+    }
+  });
 }
 
 module.exports = {

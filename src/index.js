@@ -59,8 +59,13 @@ async function bootDaemon() {
     logger.error("[Worker Engine] Critical cluster initialization failure", {
       err: error,
     });
-    await sdk.shutdown();
-    process.exit(1);
+    try {
+      // In a `finally` because NodeSDK.shutdown() can reject; without it, a rejection here
+      // would skip process.exit(1) and leave a pod alive with no queue consumer running.
+      await sdk.shutdown();
+    } finally {
+      process.exit(1);
+    }
   }
 }
 
@@ -75,10 +80,15 @@ process.on("uncaughtException", async (error) => {
   logger.error("[Fatal Worker Event] Uncaught system execution exception", {
     err: error,
   });
-  // Flush any buffered spans before exiting -- this is exactly the crash-path trace you'd most
-  // want, and NodeSDK batches/flushes on an interval that a process.exit() would cut short.
-  await sdk.shutdown();
-  process.exit(1);
+  try {
+    // Flush any buffered spans before exiting -- this is exactly the crash-path trace you'd
+    // most want, and NodeSDK batches/flushes on an interval that a process.exit() would cut
+    // short. In a `finally` because shutdown() can itself reject; without it, a rejection here
+    // would skip process.exit(1) and leave a pod alive after an uncaught exception.
+    await sdk.shutdown();
+  } finally {
+    process.exit(1);
+  }
 });
 
 bootDaemon();

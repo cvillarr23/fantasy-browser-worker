@@ -39,10 +39,16 @@ async function connectWithRetry() {
         logger.error(
           "[Queue Bridge] Connection closed by remote broker server pool. Exiting for a clean restart...",
         );
-        // Flush any buffered spans before exiting -- see src/index.js's uncaughtException
-        // handler for the same reasoning.
-        await sdk.shutdown();
-        process.exit(1);
+        try {
+          // Flush any buffered spans before exiting -- see src/index.js's uncaughtException
+          // handler for the same reasoning. In a `finally` because NodeSDK.shutdown() can
+          // reject (an exporter/processor failing to flush); without the finally, a rejection
+          // here would skip process.exit(1) entirely and leave a pod alive with its channel and
+          // consumers gone -- silently processing nothing forever instead of restarting.
+          await sdk.shutdown();
+        } finally {
+          process.exit(1);
+        }
       });
 
       return connection;
@@ -112,7 +118,13 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               return;
             }
 
-            updateContext({ trackingId: parsedPayload.tracking_id });
+            // Optional chaining: a syntactically valid JSON body can still parse to `null` or a
+            // non-object (a bare scalar, an array). Dereferencing .tracking_id directly would
+            // throw here, before the try/catch below exists to classify/handle it -- and since
+            // amqplib doesn't await this consume callback, that throw would leave the message
+            // unacked forever under prefetch(1), stalling the whole queue. Let the invalid
+            // payload flow into messageProcessorCallback's own existing error handling instead.
+            updateContext({ trackingId: parsedPayload?.tracking_id });
 
             try {
               // Route data parameters to the application layer and wait for execution to complete
