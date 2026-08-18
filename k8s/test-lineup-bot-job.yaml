@@ -66,6 +66,11 @@ spec:
               value: "1248158344"
             - name: CURRENT_YEAR
               value: "2026"
+            # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
+            # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
+            # grpc://.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.default.svc.cluster.local:4317"
             - name: ESPN_S2
               valueFrom:
                 secretKeyRef:

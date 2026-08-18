@@ -1,8 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
-const { launchWithManualLogin, waitForEnter, OUTPUT_DIR } = require("./draft_recon");
+const {
+  launchWithManualLogin,
+  waitForEnter,
+  OUTPUT_DIR,
+} = require("./draft_recon");
 const { readRoster } = require("./espn_api");
+const { logger } = require("../telemetry/logger");
 
 /**
  * One-off recon tool for the free-agent/waiver add flow — NOT part of the production worker
@@ -35,13 +40,16 @@ function buildFreeAgentUrl() {
 }
 
 function writeJson(filename, data) {
-  fs.writeFileSync(path.join(OUTPUT_DIR, filename), JSON.stringify(data, null, 2));
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, filename),
+    JSON.stringify(data, null, 2),
+  );
 }
 
 function appendJsonLine(filename, record) {
   fs.appendFileSync(
     path.join(OUTPUT_DIR, filename),
-    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n"
+    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n",
   );
 }
 
@@ -60,15 +68,17 @@ function recordApiTraffic(page) {
       headers: request.headers(),
       body: request.postData(),
     });
-    console.log(`[Waiver Recon] Captured ${request.method()} ${url}`);
+    logger.info(`[Waiver Recon] Captured ${request.method()} ${url}`);
   });
 }
 
 async function runWaiverRecon() {
   const watchSave = process.argv.includes("--watch-save");
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  console.log(`[Waiver Recon] Output directory: ${OUTPUT_DIR}`);
-  console.log(`[Waiver Recon] Target: league ${LEAGUE_ID}, team ${TEAM_ID}, season ${SEASON_ID}`);
+  logger.info(`[Waiver Recon] Output directory: ${OUTPUT_DIR}`);
+  logger.info(
+    `[Waiver Recon] Target: league ${LEAGUE_ID}, team ${TEAM_ID}, season ${SEASON_ID}`,
+  );
 
   let session = null;
   try {
@@ -80,9 +90,18 @@ async function runWaiverRecon() {
 
     if (watchSave) recordApiTraffic(page);
 
-    await page.goto(buildFreeAgentUrl(), { waitUntil: "networkidle", timeout: 60000 });
-    fs.writeFileSync(path.join(OUTPUT_DIR, "waiver-dom.html"), await page.content());
-    await page.screenshot({ path: path.join(OUTPUT_DIR, "waiver-screenshot.png"), fullPage: true });
+    await page.goto(buildFreeAgentUrl(), {
+      waitUntil: "networkidle",
+      timeout: 60000,
+    });
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, "waiver-dom.html"),
+      await page.content(),
+    );
+    await page.screenshot({
+      path: path.join(OUTPUT_DIR, "waiver-screenshot.png"),
+      fullPage: true,
+    });
 
     const roster = await readRoster(session.context, {
       leagueId: LEAGUE_ID,
@@ -94,27 +113,31 @@ async function runWaiverRecon() {
       scoringPeriodId: roster.scoringPeriodId,
       slotByPlayerId: Object.fromEntries(roster.slotByPlayerId),
     });
-    console.log(
-      `[Waiver Recon] Roster: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`
+    logger.info(
+      `[Waiver Recon] Roster: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`,
     );
 
     if (watchSave) {
-      console.log(
+      logger.info(
         "\n[Waiver Recon] --watch-save active. In the browser window, add or claim a free agent " +
           "(and, separately if possible, submit an actual in-window waiver claim rather than an " +
           "immediate pickup, to see whether the shape differs).\n" +
-          "Every non-GET espn.com XHR is being written to recon-output/waiver-xhr.jsonl."
+          "Every non-GET espn.com XHR is being written to recon-output/waiver-xhr.jsonl.",
       );
-      await waitForEnter("[Waiver Recon] Press Enter once you've submitted a claim... ");
+      await waitForEnter(
+        "[Waiver Recon] Press Enter once you've submitted a claim... ",
+      );
     }
   } catch (error) {
-    console.error(`[Waiver Recon] Fatal error: ${error.message}`);
+    logger.error(`[Waiver Recon] Fatal error: ${error.message}`, {
+      err: error,
+    });
     process.exitCode = 1;
   } finally {
     if (session && session.browser) {
       await session.browser.close();
     }
-    console.log(`[Waiver Recon] Done. Review ${OUTPUT_DIR}.`);
+    logger.info(`[Waiver Recon] Done. Review ${OUTPUT_DIR}.`);
   }
 }
 

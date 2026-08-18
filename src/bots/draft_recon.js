@@ -4,6 +4,7 @@ const readline = require("readline");
 const { chromium } = require("playwright");
 const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
 const { startFreshPracticeDraft, parseDraftRoomUrl } = require("./mock_draft");
+const { logger } = require("../telemetry/logger");
 
 /**
  * One-off recon tool — NOT part of the production worker pipeline.
@@ -41,7 +42,12 @@ const { startFreshPracticeDraft, parseDraftRoomUrl } = require("./mock_draft");
  */
 
 const OUTPUT_DIR = path.join(__dirname, "..", "..", "recon-output");
-const STORAGE_STATE_PATH = path.join(__dirname, "..", "..", ".espn-storage-state.json");
+const STORAGE_STATE_PATH = path.join(
+  __dirname,
+  "..",
+  "..",
+  ".espn-storage-state.json",
+);
 
 function ensureOutputDir() {
   if (!fs.existsSync(OUTPUT_DIR)) {
@@ -96,7 +102,7 @@ function waitForEnter(prompt) {
  */
 async function tryLoadStoredSession() {
   if (!fs.existsSync(STORAGE_STATE_PATH)) return null;
-  console.log(`[Recon] Reusing saved session: ${STORAGE_STATE_PATH}`);
+  logger.info(`[Recon] Reusing saved session: ${STORAGE_STATE_PATH}`);
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
@@ -112,7 +118,7 @@ async function tryLoadStoredSession() {
  * runs reuse it via tryLoadStoredSession() instead of requiring a fresh login every time.
  */
 async function launchWithManualLogin() {
-  console.log(
+  logger.info(
     "[Recon] Opening a visible browser — log into ESPN there, then come back to this terminal.",
   );
   const browser = await chromium.launch({ headless: false });
@@ -128,7 +134,9 @@ async function launchWithManualLogin() {
     "[Recon] Press Enter once you're logged in to continue... ",
   );
   await context.storageState({ path: STORAGE_STATE_PATH });
-  console.log(`[Recon] Session saved to ${STORAGE_STATE_PATH} — future runs will reuse it automatically.`);
+  logger.info(
+    `[Recon] Session saved to ${STORAGE_STATE_PATH} — future runs will reuse it automatically.`,
+  );
   return { browser, context, page };
 }
 
@@ -169,7 +177,9 @@ async function runRecon() {
     // is enough to redirect all of them at once.
     let activePage = session.page;
 
-    session.browser.on("disconnected", () => log.log("[Recon] Browser disconnected."));
+    session.browser.on("disconnected", () =>
+      log.log("[Recon] Browser disconnected."),
+    );
 
     // Set once the room URL is known (after navigation, below) — attached before that so it
     // doesn't race the page's own WebSocket connect, so this has to be a closed-over mutable var
@@ -190,7 +200,9 @@ async function runRecon() {
       try {
         const html = await activePage.content();
         fs.writeFileSync(path.join(OUTPUT_DIR, `${tag}.html`), html);
-        await activePage.screenshot({ path: path.join(OUTPUT_DIR, `${tag}.png`) });
+        await activePage.screenshot({
+          path: path.join(OUTPUT_DIR, `${tag}.png`),
+        });
         log.log(`[Recon] Captured our-turn snapshot: ${tag}`);
       } catch (err) {
         log.error(`[Recon] Our-turn snapshot failed: ${err.message}`);
@@ -205,7 +217,9 @@ async function runRecon() {
      * would silently miss everything happening in that new one.
      */
     const attachPageListeners = (pageToWatch) => {
-      pageToWatch.on("close", () => log.log(`[Recon] Page closed. Last known URL: ${pageToWatch.url()}`));
+      pageToWatch.on("close", () =>
+        log.log(`[Recon] Page closed. Last known URL: ${pageToWatch.url()}`),
+      );
 
       pageToWatch.on("websocket", (ws) => {
         log.log(`[Recon] WebSocket opened: ${ws.url()}`);
@@ -224,7 +238,9 @@ async function runRecon() {
           if (ourTeamId && line.startsWith("SELECTING ")) {
             const [, selectingTeam] = line.split(/\s+/);
             if (selectingTeam === String(ourTeamId)) {
-              log.log(`[Recon] SELECTING matched our team (${ourTeamId}) — capturing DOM now.`);
+              log.log(
+                `[Recon] SELECTING matched our team (${ourTeamId}) — capturing DOM now.`,
+              );
               captureOurTurnSnapshot();
             }
           }
@@ -302,9 +318,13 @@ async function runRecon() {
 
     try {
       ourTeamId = parseDraftRoomUrl(activePage.url()).teamId;
-      log.log(`[Recon] Our team id: ${ourTeamId} — will capture DOM the instant it's our turn.`);
+      log.log(
+        `[Recon] Our team id: ${ourTeamId} — will capture DOM the instant it's our turn.`,
+      );
     } catch (err) {
-      log.error(`[Recon] Could not parse teamId from room URL (${activePage.url()}): ${err.message}`);
+      log.error(
+        `[Recon] Could not parse teamId from room URL (${activePage.url()}): ${err.message}`,
+      );
     }
 
     log.log(
@@ -331,9 +351,7 @@ async function runRecon() {
         await activePage.screenshot({
           path: path.join(OUTPUT_DIR, `screenshot-${snapshotCount}.png`),
         });
-        log.log(
-          `[Recon] Captured DOM + screenshot snapshot #${snapshotCount}`,
-        );
+        log.log(`[Recon] Captured DOM + screenshot snapshot #${snapshotCount}`);
       } catch (err) {
         log.error(`[Recon] Snapshot failed: ${err.message}`);
       }

@@ -1,5 +1,6 @@
 const { chromium } = require("playwright");
 const { execFileSync } = require("child_process");
+const { logger } = require("../telemetry/logger");
 
 // A small pool of realistic, current desktop Chrome UAs, rotated per session rather than sending
 // the exact same fingerprint on every request across every bot — a single fixed UA repeated
@@ -25,14 +26,21 @@ function pickUserAgent() {
  * authenticated (BAO_ADDR/BAO_TOKEN etc.), it does not perform its own OpenBao login.
  */
 function fetchEspnCookiesFromOpenBao() {
-  const secretPath = process.env.OPENBAO_ESPN_SECRET_PATH || "secret/fantasy/espn";
-  console.log(`[Auth Engine] ESPN_S2/SWID not set in environment, checking OpenBao at "${secretPath}"...`);
+  const secretPath =
+    process.env.OPENBAO_ESPN_SECRET_PATH || "secret/fantasy/espn";
+  logger.info(
+    `[Auth Engine] ESPN_S2/SWID not set in environment, checking OpenBao at "${secretPath}"...`,
+  );
 
   let raw;
   try {
-    raw = execFileSync("bao", ["kv", "get", "-format=json", secretPath], { encoding: "utf8" });
+    raw = execFileSync("bao", ["kv", "get", "-format=json", secretPath], {
+      encoding: "utf8",
+    });
   } catch (err) {
-    console.error(`[Auth Engine] OpenBao lookup failed: ${err.message}`);
+    logger.error(`[Auth Engine] OpenBao lookup failed: ${err.message}`, {
+      err,
+    });
     return null;
   }
 
@@ -40,18 +48,25 @@ function fetchEspnCookiesFromOpenBao() {
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    console.error(`[Auth Engine] Could not parse OpenBao response: ${err.message}`);
+    logger.error(
+      `[Auth Engine] Could not parse OpenBao response: ${err.message}`,
+      {
+        err,
+      },
+    );
     return null;
   }
 
   // KV v2 nests the secret under data.data; KV v1 puts it directly under data.
   const fields = parsed?.data?.data ?? parsed?.data;
   if (!fields?.espn_s2 || !fields?.swid) {
-    console.error(`[Auth Engine] OpenBao secret at "${secretPath}" is missing espn_s2/swid fields.`);
+    logger.error(
+      `[Auth Engine] OpenBao secret at "${secretPath}" is missing espn_s2/swid fields.`,
+    );
     return null;
   }
 
-  console.log("[Auth Engine] Loaded ESPN_S2/SWID from OpenBao.");
+  logger.info("[Auth Engine] Loaded ESPN_S2/SWID from OpenBao.");
   return { espnS2: fields.espn_s2, swid: fields.swid };
 }
 
@@ -73,12 +88,14 @@ async function createAuthenticatedSession({ headless = true } = {}) {
   const cookies = resolveEspnCookies();
   if (!cookies) {
     throw new Error(
-      "[Auth Engine] Critical Failure: Required session cookies (ESPN_S2/SWID) are missing — not found in environment variables or OpenBao."
+      "[Auth Engine] Critical Failure: Required session cookies (ESPN_S2/SWID) are missing — not found in environment variables or OpenBao.",
     );
   }
   const { espnS2, swid } = cookies;
 
-  console.log("[Auth Engine] Spawning optimized headless Chromium sandbox instance...");
+  logger.info(
+    "[Auth Engine] Spawning optimized headless Chromium sandbox instance...",
+  );
 
   // Opt-in live viewing: set CDP_DEBUG_PORT to expose a Chrome DevTools Protocol endpoint even
   // while fully headless. Locally, just open chrome://inspect and point it at localhost:<port>.
@@ -90,14 +107,17 @@ async function createAuthenticatedSession({ headless = true } = {}) {
     "--disable-setuid-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",
-    "--disable-blink-features=AutomationControlled" // Lowers bot detection footprint
+    "--disable-blink-features=AutomationControlled", // Lowers bot detection footprint
   ];
 
   if (debugPort) {
-    launchArgs.push(`--remote-debugging-port=${debugPort}`, "--remote-debugging-address=0.0.0.0");
-    console.log(
+    launchArgs.push(
+      `--remote-debugging-port=${debugPort}`,
+      "--remote-debugging-address=0.0.0.0",
+    );
+    logger.info(
       `[Auth Engine] CDP_DEBUG_PORT set — remote debugging enabled on port ${debugPort}. ` +
-        `Open chrome://inspect locally against localhost:${debugPort} (port-forward it first if running in the cluster).`
+        `Open chrome://inspect locally against localhost:${debugPort} (port-forward it first if running in the cluster).`,
     );
   }
 
@@ -106,7 +126,7 @@ async function createAuthenticatedSession({ headless = true } = {}) {
   // window you interact with by hand; every production bot leaves it at the default.
   const browser = await chromium.launch({
     headless,
-    args: launchArgs
+    args: launchArgs,
   });
 
   // Everything past launch is wrapped: the browser process exists from this point on, but callers
@@ -118,10 +138,12 @@ async function createAuthenticatedSession({ headless = true } = {}) {
     // 2. Initialize a blank workspace container context
     const context = await browser.newContext({
       viewport: { width: 1280, height: 720 },
-      userAgent: pickUserAgent()
+      userAgent: pickUserAgent(),
     });
 
-    console.log("[Auth Engine] Injecting authentication state storage tokens into browser context pool...");
+    logger.info(
+      "[Auth Engine] Injecting authentication state storage tokens into browser context pool...",
+    );
 
     // 3. Force inject active cookies into the browser memory layer to trick ESPN into bypassing MFA challenges
     await context.addCookies([
@@ -131,7 +153,7 @@ async function createAuthenticatedSession({ headless = true } = {}) {
         domain: ".espn.com",
         path: "/",
         httpOnly: true,
-        secure: true
+        secure: true,
       },
       {
         name: "SWID",
@@ -139,19 +161,22 @@ async function createAuthenticatedSession({ headless = true } = {}) {
         domain: ".espn.com",
         path: "/",
         httpOnly: false,
-        secure: true
-      }
+        secure: true,
+      },
     ]);
 
     // 4. Optimize network overhead by blocking media and tracking script downloads on demand
     const page = await context.newPage();
-    await page.route("**/*.{png,jpg,jpeg,gif,png,svg,css,woff,woff2,eot,ttf}", (route) => {
-      // Blocks heavy structural css/images during instant waiver sniping windows to save network cycles
-      if (process.env.NODE_ENV === "production") {
-        return route.abort();
-      }
-      return route.continue();
-    });
+    await page.route(
+      "**/*.{png,jpg,jpeg,gif,png,svg,css,woff,woff2,eot,ttf}",
+      (route) => {
+        // Blocks heavy structural css/images during instant waiver sniping windows to save network cycles
+        if (process.env.NODE_ENV === "production") {
+          return route.abort();
+        }
+        return route.continue();
+      },
+    );
 
     return { browser, context, page, swid };
   } catch (setupError) {
@@ -162,6 +187,5 @@ async function createAuthenticatedSession({ headless = true } = {}) {
 
 module.exports = {
   createAuthenticatedSession,
-  resolveEspnCookies
+  resolveEspnCookies,
 };
-

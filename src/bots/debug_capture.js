@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const { logger } = require("../telemetry/logger");
 
 /**
  * Cross-cutting debug capture (DOM + screenshot) for any bot that holds a Playwright `page`.
@@ -17,7 +18,9 @@ const path = require("path");
  * `label` namespaces the output files per call site (e.g. "draft-room-dom") so different bots'
  * captures don't collide with each other.
  */
-const OUTPUT_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
+const OUTPUT_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
 
 function isEnabled() {
   const raw = (process.env.DEBUG_CAPTURE || "").trim();
@@ -31,10 +34,19 @@ async function captureDebugSnapshot(page, label) {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     const html = await page.content();
     fs.writeFileSync(path.join(OUTPUT_DIR, `debug-${label}-latest.html`), html);
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `debug-${label}-latest.png`) });
-    console.log(`[Debug Capture] Saved "${label}" DOM/screenshot to ${OUTPUT_DIR}`);
+    await page.screenshot({
+      path: path.join(OUTPUT_DIR, `debug-${label}-latest.png`),
+    });
+    logger.info(
+      `[Debug Capture] Saved "${label}" DOM/screenshot to ${OUTPUT_DIR}`,
+    );
   } catch (err) {
-    console.error(`[Debug Capture] Failed to capture "${label}": ${err.message}`);
+    logger.error(
+      `[Debug Capture] Failed to capture "${label}": ${err.message}`,
+      {
+        err,
+      },
+    );
   }
 }
 

@@ -1,4 +1,5 @@
 const { Pool } = require("pg");
+const { logger } = require("../telemetry/logger");
 
 // Same env var names fantasy-core-pipeline's src/database.py already uses, so the
 // convention is consistent across languages against the same fantasy-db instance.
@@ -11,20 +12,40 @@ const pool = new Pool({
 });
 
 pool.on("error", (err) => {
-  console.error(`[Execution Log] Idle client error on connection pool: ${err.message}`);
+  logger.error("[Execution Log] Idle client error on connection pool", {
+    err,
+  });
 });
 
 // Best-effort write for Grafana's worker execution health panel (INFRA-06). Never throws --
 // a logging hiccup must not fail or requeue a real transaction (see src/index.js caller).
-async function recordExecution({ transactionType, status, durationMs, errorMessage }) {
+// trace_id/bot_name let a Grafana panel row jump straight into the matching Tempo trace and
+// give standalone (non-queue) entrypoints a real identity instead of a null transaction_type.
+async function recordExecution({
+  transactionType,
+  botName,
+  status,
+  durationMs,
+  errorMessage,
+  traceId,
+}) {
   try {
     await pool.query(
-      `INSERT INTO execution_log (transaction_type, status, duration_ms, error_message)
-       VALUES ($1, $2, $3, $4)`,
-      [transactionType, status, durationMs, errorMessage || null]
+      `INSERT INTO execution_log (transaction_type, bot_name, status, duration_ms, error_message, trace_id)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        transactionType,
+        botName || null,
+        status,
+        durationMs,
+        errorMessage || null,
+        traceId || null,
+      ],
     );
   } catch (err) {
-    console.error(`[Execution Log] Failed to record execution outcome: ${err.message}`);
+    logger.error("[Execution Log] Failed to record execution outcome", {
+      err,
+    });
   }
 }
 

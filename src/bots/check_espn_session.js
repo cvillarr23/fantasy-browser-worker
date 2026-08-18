@@ -1,5 +1,7 @@
 const { createAuthenticatedSession } = require("./auth");
 const selectors = require("../selectors/espn_selectors.json");
+const { logger } = require("../telemetry/logger");
+const { withInstrumentation } = require("../telemetry/instrument");
 
 /**
  * Scheduled health check (issue #7's "at minimum" fallback — now the primary approach, see PR
@@ -28,32 +30,45 @@ async function checkEspnSession() {
   let session = null;
   try {
     session = await createAuthenticatedSession();
-    await session.page.goto(targetUrl, { waitUntil: "networkidle", timeout: 30000 });
+    await session.page.goto(targetUrl, {
+      waitUntil: "networkidle",
+      timeout: 30000,
+    });
 
     const finalUrl = session.page.url();
     if (/\/login\b/i.test(finalUrl)) {
       throw new Error(
         `[ESPN Auth Failure] Redirected to a login page (${finalUrl}) — stored espn_s2/SWID ` +
           "cookies are no longer valid. Re-extract them from a logged-in browser and update " +
-          "OpenBao: bao kv put secret/fantasy/espn espn_s2=<new> swid=<new>"
+          "OpenBao: bao kv put secret/fantasy/espn espn_s2=<new> swid=<new>",
       );
     }
 
-    await session.page.waitForSelector(selectors.roster_table, { timeout: 10000 }).catch(() => {
-      throw new Error(
-        `[ESPN Auth Failure] Landed on ${finalUrl} but the roster table never rendered — ` +
-          "either the session is invalid in a way that didn't trigger a login redirect, or " +
-          "ESPN changed the page layout. Check auth_failure_diagnostics.png."
-      );
-    });
+    await session.page
+      .waitForSelector(selectors.roster_table, { timeout: 10000 })
+      .catch(() => {
+        throw new Error(
+          `[ESPN Auth Failure] Landed on ${finalUrl} but the roster table never rendered — ` +
+            "either the session is invalid in a way that didn't trigger a login redirect, or " +
+            "ESPN changed the page layout. Check auth_failure_diagnostics.png.",
+        );
+      });
 
-    console.log("[Session Check] ESPN session is healthy — roster table rendered for", targetUrl);
+    logger.info(
+      `[Session Check] ESPN session is healthy — roster table rendered for ${targetUrl}`,
+    );
   } catch (error) {
-    console.error(error.message);
+    logger.error(error.message, { err: error });
     if (session?.page) {
-      await session.page.screenshot({ path: "auth_failure_diagnostics.png" }).catch(() => {});
+      await session.page
+        .screenshot({ path: "auth_failure_diagnostics.png" })
+        .catch(() => {});
     }
-    process.exitCode = 1;
+    // Rethrow instead of just setting process.exitCode -- this runs inside withInstrumentation's
+    // handler (see require.main below), so swallowing the error here would make the wrapper
+    // record a successful span/execution_log row for a failed auth check. Exit-code handling
+    // moves to a .catch() after the wrapper settles.
+    throw error;
   } finally {
     if (session?.browser) {
       await session.browser.close();
@@ -62,7 +77,23 @@ async function checkEspnSession() {
 }
 
 if (require.main === module) {
-  checkEspnSession();
+  withInstrumentation(
+    "check_espn_session",
+    { trackingId: require("crypto").randomUUID() },
+    checkEspnSession,
+  )
+    .catch(() => {
+      // Non-zero exit is the alert this CronJob relies on (see header comment) -- set it here,
+      // after withInstrumentation's own catch has already recorded the failed span/execution_log
+      // row, rather than swallowing the error inside checkEspnSession itself.
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      // Flush any buffered spans before this short-lived CronJob pod's event loop drains --
+      // not guaranteed to happen on its own before exit.
+      const { sdk } = require("../telemetry/init");
+      await sdk.shutdown();
+    });
 }
 
 module.exports = { checkEspnSession };

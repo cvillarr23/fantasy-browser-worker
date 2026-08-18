@@ -2,91 +2,93 @@ const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
-const { recordExecution } = require("./db/execution_log");
+const { withInstrumentation } = require("./telemetry/instrument");
+const { logger } = require("./telemetry/logger");
+const { sdk } = require("./telemetry/init");
 
-// Centralized transaction dispatcher mapping queue events straight to automation targets
-async function handleIncomingMessage(queueName, payload) {
-  console.log(
-    `[Worker Engine] Routing task parameters for queue event: "${queueName}"`,
-  );
+// Routes a parsed queue payload to its automation target. Split out from handleIncomingMessage
+// so withInstrumentation wraps the whole dispatch (span + MDC context + execution_log write) in
+// one place instead of every bot needing its own try/catch + recordExecution call.
+async function dispatch(queueName, payload) {
+  switch (queueName) {
+    case "lineup_updates":
+      logger.info("[Worker Engine] Invoking Lineup Adjustment Engine...");
+      return executeLineupAdjustments(payload);
 
-  const startedAt = Date.now();
-  try {
-    switch (queueName) {
-      case "lineup_updates":
-        console.log("[Worker Engine] Invoking Lineup Adjustment Engine...");
-        await executeLineupAdjustments(payload);
-        break;
+    case "waiver_actions":
+      logger.info("[Worker Engine] Invoking Waiver Sniping Target Engine...");
+      return executeInstantWaiverClaim(payload);
 
-      case "waiver_actions":
-        console.log("[Worker Engine] Invoking Waiver Sniping Target Engine...");
-        await executeInstantWaiverClaim(payload);
-        break;
+    case "draft_targets":
+      logger.info("[Worker Engine] Invoking Draft Selection Engine...");
+      return executeAutomatedDraftSelection(payload);
 
-      case "draft_targets":
-        console.log("[Worker Engine] Invoking Draft Selection Engine...");
-        await executeAutomatedDraftSelection(payload);
-        break;
-
-      default:
-        console.warn(
-          `[Worker Engine] Intercepted unsupported message format signature: ${queueName}`,
-        );
-    }
-    await recordExecution({
-      transactionType: queueName,
-      status: "success",
-      durationMs: Date.now() - startedAt,
-    });
-    return true; // Return true on successful completion code run
-  } catch (error) {
-    console.error(
-      `[Worker Engine] Critical failure processing automation routine: ${error.message}`,
-    );
-    await recordExecution({
-      transactionType: queueName,
-      status: "failure",
-      durationMs: Date.now() - startedAt,
-      errorMessage: error.message,
-    });
-    throw error; // Bubble up errors to handle message re-queuing safely
+    default:
+      logger.warn(
+        `[Worker Engine] Intercepted unsupported message format signature: ${queueName}`,
+      );
+      return undefined;
   }
 }
 
+// Centralized transaction dispatcher mapping queue events straight to automation targets
+async function handleIncomingMessage(queueName, payload) {
+  logger.info(
+    `[Worker Engine] Routing task parameters for queue event: "${queueName}"`,
+  );
+  await withInstrumentation(
+    queueName,
+    { queueName, trackingId: payload && payload.tracking_id },
+    () => dispatch(queueName, payload),
+  );
+  return true; // Return true on successful completion code run
+}
+
 async function bootDaemon() {
-  console.log(
+  logger.info(
     "[Worker Engine] Launching browser worker orchestrator background daemon...",
   );
 
   try {
     // Initialize our managed RabbitMQ connection framework loops
     await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage);
-    console.log(
+    logger.info(
       "[Worker Engine] Background listener threads fully initialized. Standing by...",
     );
   } catch (error) {
-    console.error(
-      `[Worker Engine] Critical cluster initialization failure: ${error.message}`,
-    );
-    process.exit(1);
+    logger.error("[Worker Engine] Critical cluster initialization failure", {
+      err: error,
+    });
+    try {
+      // In a `finally` because NodeSDK.shutdown() can reject; without it, a rejection here
+      // would skip process.exit(1) and leave a pod alive with no queue consumer running.
+      await sdk.shutdown();
+    } finally {
+      process.exit(1);
+    }
   }
 }
 
 // Global process monitoring to prevent memory-leak crashes from corrupting cluster states
-process.on("unhandledRejection", (reason, promise) => {
-  console.error(
-    "[Fatal Worker Event] Unhandled rejection intercepted at:",
-    promise,
-    "reason:",
-    reason,
-  );
+process.on("unhandledRejection", (reason) => {
+  logger.error("[Fatal Worker Event] Unhandled rejection intercepted", {
+    reason: reason && reason.message ? reason.message : reason,
+  });
 });
 
-process.on("uncaughtException", (error) => {
-  console.error(
-    `[Fatal Worker Event] Uncaught system execution exception: ${error.message}`,
-  );
-  process.exit(1);
+process.on("uncaughtException", async (error) => {
+  logger.error("[Fatal Worker Event] Uncaught system execution exception", {
+    err: error,
+  });
+  try {
+    // Flush any buffered spans before exiting -- this is exactly the crash-path trace you'd
+    // most want, and NodeSDK batches/flushes on an interval that a process.exit() would cut
+    // short. In a `finally` because shutdown() can itself reject; without it, a rejection here
+    // would skip process.exit(1) and leave a pod alive after an uncaught exception.
+    await sdk.shutdown();
+  } finally {
+    process.exit(1);
+  }
 });
 
 bootDaemon();

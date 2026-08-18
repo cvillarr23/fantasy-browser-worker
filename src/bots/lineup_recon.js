@@ -1,8 +1,13 @@
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
-const { launchWithManualLogin, waitForEnter, OUTPUT_DIR } = require("./draft_recon");
+const {
+  launchWithManualLogin,
+  waitForEnter,
+  OUTPUT_DIR,
+} = require("./draft_recon");
 const { readRoster } = require("./espn_api");
+const { logger } = require("../telemetry/logger");
 
 /**
  * One-off recon tool for the team/roster page — NOT part of the production worker pipeline.
@@ -40,11 +45,11 @@ const SEASON_ID = process.env.CURRENT_YEAR || "2026";
 // Every selector the bots currently believe in, plus the alternatives worth testing against the
 // real page. Mirrors the shape of recon-output/login-selector-probe.json.
 const CANDIDATE_SELECTORS = [
-  'tr[data-player-id]',
-  'tr[data-playerid]',
-  '.roster-table',
-  '.Table',
-  '.Table__TR',
+  "tr[data-player-id]",
+  "tr[data-playerid]",
+  ".roster-table",
+  ".Table",
+  ".Table__TR",
   '[class*="player-column"]',
   'a[href*="/player/"]',
   'button:has-text("Move")',
@@ -58,13 +63,16 @@ function buildTeamUrl() {
 }
 
 function writeJson(filename, data) {
-  fs.writeFileSync(path.join(OUTPUT_DIR, filename), JSON.stringify(data, null, 2));
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, filename),
+    JSON.stringify(data, null, 2),
+  );
 }
 
 function appendJsonLine(filename, record) {
   fs.appendFileSync(
     path.join(OUTPUT_DIR, filename),
-    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n"
+    JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n",
   );
 }
 
@@ -77,9 +85,13 @@ async function probeSelectors(page) {
       const count = await locator.count();
       let sampleAttributes = null;
       if (count > 0) {
-        sampleAttributes = await locator.first().evaluate((el) =>
-          Object.fromEntries([...el.attributes].map((a) => [a.name, a.value.slice(0, 80)]))
-        );
+        sampleAttributes = await locator
+          .first()
+          .evaluate((el) =>
+            Object.fromEntries(
+              [...el.attributes].map((a) => [a.name, a.value.slice(0, 80)]),
+            ),
+          );
       }
       results[selector] = { count, sampleAttributes };
     } catch (err) {
@@ -104,15 +116,17 @@ function recordApiTraffic(page) {
       headers: request.headers(),
       body: request.postData(),
     });
-    console.log(`[Lineup Recon] Captured ${request.method()} ${url}`);
+    logger.info(`[Lineup Recon] Captured ${request.method()} ${url}`);
   });
 }
 
 async function runLineupRecon() {
   const watchSave = process.argv.includes("--watch-save");
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-  console.log(`[Lineup Recon] Output directory: ${OUTPUT_DIR}`);
-  console.log(`[Lineup Recon] Target: league ${LEAGUE_ID}, team ${TEAM_ID}, season ${SEASON_ID}`);
+  logger.info(`[Lineup Recon] Output directory: ${OUTPUT_DIR}`);
+  logger.info(
+    `[Lineup Recon] Target: league ${LEAGUE_ID}, team ${TEAM_ID}, season ${SEASON_ID}`,
+  );
 
   let session = null;
   try {
@@ -124,18 +138,29 @@ async function runLineupRecon() {
 
     if (watchSave) recordApiTraffic(page);
 
-    await page.goto(buildTeamUrl(), { waitUntil: "networkidle", timeout: 60000 });
+    await page.goto(buildTeamUrl(), {
+      waitUntil: "networkidle",
+      timeout: 60000,
+    });
 
     // 1. Raw DOM + screenshot.
-    fs.writeFileSync(path.join(OUTPUT_DIR, "lineup-dom.html"), await page.content());
-    await page.screenshot({ path: path.join(OUTPUT_DIR, "lineup-screenshot.png"), fullPage: true });
+    fs.writeFileSync(
+      path.join(OUTPUT_DIR, "lineup-dom.html"),
+      await page.content(),
+    );
+    await page.screenshot({
+      path: path.join(OUTPUT_DIR, "lineup-screenshot.png"),
+      fullPage: true,
+    });
 
     // 2. Selector probe — the artifact that decides whether DOM automation is even viable.
     const probe = await probeSelectors(page);
     writeJson("lineup-selector-probe.json", probe);
-    console.log("[Lineup Recon] Selector probe:");
+    logger.info("[Lineup Recon] Selector probe:");
     for (const [selector, result] of Object.entries(probe)) {
-      console.log(`  ${String(result.count ?? "ERR").padStart(4)}  ${selector}`);
+      logger.info(
+        `  ${String(result.count ?? "ERR").padStart(4)}  ${selector}`,
+      );
     }
 
     // 3. Authoritative API snapshot — slot map and current assignments.
@@ -152,33 +177,37 @@ async function runLineupRecon() {
       rosterLocked: roster.rosterLocked,
       slotByPlayerId: Object.fromEntries(roster.slotByPlayerId),
     });
-    console.log(
+    logger.info(
       `[Lineup Recon] Roster: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}, ` +
-        `locked=${roster.lineupLocked || roster.rosterLocked}`
+        `locked=${roster.lineupLocked || roster.rosterLocked}`,
     );
 
     if (roster.entryCount === 0) {
-      console.warn(
+      logger.warn(
         "[Lineup Recon] Roster is EMPTY — the draft hasn't happened. The Move/Here/Save controls " +
-          "and the save request cannot be captured yet. Re-run this post-draft."
+          "and the save request cannot be captured yet. Re-run this post-draft.",
       );
     }
 
     if (watchSave) {
-      console.log(
+      logger.info(
         "\n[Lineup Recon] --watch-save active. In the browser window, move a player and click Save.\n" +
-          "Every non-GET espn.com XHR is being written to recon-output/lineup-xhr.jsonl."
+          "Every non-GET espn.com XHR is being written to recon-output/lineup-xhr.jsonl.",
       );
-      await waitForEnter("[Lineup Recon] Press Enter once you've saved a lineup change... ");
+      await waitForEnter(
+        "[Lineup Recon] Press Enter once you've saved a lineup change... ",
+      );
     }
   } catch (error) {
-    console.error(`[Lineup Recon] Fatal error: ${error.message}`);
+    logger.error(`[Lineup Recon] Fatal error: ${error.message}`, {
+      err: error,
+    });
     process.exitCode = 1;
   } finally {
     if (session && session.browser) {
       await session.browser.close();
     }
-    console.log(`[Lineup Recon] Done. Review ${OUTPUT_DIR}.`);
+    logger.info(`[Lineup Recon] Done. Review ${OUTPUT_DIR}.`);
   }
 }
 

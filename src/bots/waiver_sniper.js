@@ -3,6 +3,7 @@ const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitWaiverClaim } = require("./espn_api");
 const { PermanentError } = require("../errors");
+const { logger } = require("../telemetry/logger");
 
 /**
  * High-Speed Waiver Sniper Bot (fix for #14)
@@ -21,7 +22,9 @@ const { PermanentError } = require("../errors");
  *                    already gone) is a no-op, not a duplicate claim.
  */
 
-const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
+const DEBUG_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
 
 function resolveDryRun() {
   const raw = (process.env.DRY_RUN || "").trim();
@@ -33,7 +36,9 @@ function resolveDryRun() {
 function requirePlayerId(raw, label) {
   const id = String(raw ?? "").trim();
   if (!/^\d+$/.test(id)) {
-    throw new PermanentError(`${label} "${raw}" is not a valid numeric ESPN player id.`);
+    throw new PermanentError(
+      `${label} "${raw}" is not a valid numeric ESPN player id.`,
+    );
   }
   return id;
 }
@@ -44,9 +49,16 @@ function captureFailure(tracking, details) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = path.join(DEBUG_DIR, `waiver-fail-${tracking}-${stamp}.json`);
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    console.error(`[Sniper Bot][${tracking}] Failure context written to: ${file}`);
+    logger.error(
+      `[Sniper Bot][${tracking}] Failure context written to: ${file}`,
+    );
   } catch (captureError) {
-    console.error(`[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`);
+    logger.error(
+      `[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`,
+      {
+        err: captureError,
+      },
+    );
   }
 }
 
@@ -55,16 +67,24 @@ async function executeInstantWaiverClaim(payload) {
   // those are throwable as an ordinary Error here without the whole payload.xxx dereference below
   // throwing a plain TypeError instead, which connection.js requeues forever (only PermanentError
   // and the JSON-parse-failure case are treated as unretryable).
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
     throw new PermanentError(
       `[Sniper Bot] Payload must be a JSON object, got ${
-        payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
-      }.`
+        payload === null
+          ? "null"
+          : Array.isArray(payload)
+            ? "array"
+            : typeof payload
+      }.`,
     );
   }
 
   const tracking = payload.tracking_id || payload.player_id || "no-tracking-id";
-  const log = (message) => console.log(`[Sniper Bot][${tracking}] ${message}`);
+  const log = logger.info;
 
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const teamId = process.env.ESPN_TEAM_ID;
@@ -74,17 +94,23 @@ async function executeInstantWaiverClaim(payload) {
 
   // Permanent: none of these can come good on redelivery without a config/payload change.
   if (!leagueId) {
-    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_LEAGUE_ID is not set.`);
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] ESPN_LEAGUE_ID is not set.`,
+    );
   }
   if (!teamId) {
-    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`);
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`,
+    );
   }
   const addPlayerId = requirePlayerId(payload.player_id, "player_id");
-  const dropPlayerId = payload.drop_player_id ? requirePlayerId(payload.drop_player_id, "drop_player_id") : null;
+  const dropPlayerId = payload.drop_player_id
+    ? requirePlayerId(payload.drop_player_id, "drop_player_id")
+    : null;
   if (dropPlayerId && dropPlayerId === addPlayerId) {
     throw new PermanentError(
       `[Sniper Bot][${tracking}] player_id and drop_player_id are both ${addPlayerId} — a player ` +
-        "cannot be added and dropped in the same claim."
+        "cannot be added and dropped in the same claim.",
     );
   }
 
@@ -92,12 +118,12 @@ async function executeInstantWaiverClaim(payload) {
   const { dryRun, defaulted } = resolveDryRun();
   log(
     `Evaluating claim for ${nameTarget || addPlayerId} (${nflTeam || "?"}) on team ${teamId}` +
-      `${dryRun ? " [DRY_RUN]" : ""}.`
+      `${dryRun ? " [DRY_RUN]" : ""}.`,
   );
   if (defaulted) {
     log(
       "DRY_RUN is unset, defaulting to TRUE — no changes will be written. Set DRY_RUN=false to " +
-        "submit for real (only once submitWaiverClaim's write shape is verified, see espn_api.js)."
+        "submit for real (only once submitWaiverClaim's write shape is verified, see espn_api.js).",
     );
   }
 
@@ -122,10 +148,13 @@ async function executeInstantWaiverClaim(payload) {
     // table keyed by tracking_id), which doesn't exist yet; left as a follow-up rather than
     // guessed at here.
     const needsAdd = !roster.slotByPlayerId.has(addPlayerId);
-    const needsDrop = Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
+    const needsDrop =
+      Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
 
     if (!needsAdd && !needsDrop) {
-      log(`${addPlayerId} already on roster${dropPlayerId ? " and drop already applied" : ""}. No-op.`);
+      log(
+        `${addPlayerId} already on roster${dropPlayerId ? " and drop already applied" : ""}. No-op.`,
+      );
       return;
     }
 
@@ -134,7 +163,7 @@ async function executeInstantWaiverClaim(payload) {
     // just treated as already-satisfied above rather than as an error.
     if (dropPlayerId && needsAdd && !roster.slotByPlayerId.has(dropPlayerId)) {
       throw new PermanentError(
-        `[Sniper Bot][${tracking}] drop_player_id ${dropPlayerId} is not on team ${teamId}'s roster.`
+        `[Sniper Bot][${tracking}] drop_player_id ${dropPlayerId} is not on team ${teamId}'s roster.`,
       );
     }
 
@@ -142,7 +171,9 @@ async function executeInstantWaiverClaim(payload) {
       `${needsAdd ? ` add=${addPlayerId}` : ""}${needsDrop ? ` drop=${dropPlayerId}` : ""}`;
 
     if (dryRun) {
-      log(`DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`);
+      log(
+        `DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`,
+      );
       return;
     }
 
@@ -159,16 +190,19 @@ async function executeInstantWaiverClaim(payload) {
     // an immediate free-agent pickup) is queued and processed later — the roster read right after
     // submit legitimately won't show it yet. So this only confirms the fast path; it does not fail
     // the run when it can't.
-    const confirmed = (await readRoster(session.context, target)).slotByPlayerId.has(addPlayerId);
+    const confirmed = (
+      await readRoster(session.context, target)
+    ).slotByPlayerId.has(addPlayerId);
     log(
       confirmed
         ? `Confirmed: ${addPlayerId} now on roster.`
         : `Submitted, but roster doesn't show ${addPlayerId} yet — likely a queued waiver claim ` +
-            "rather than an immediate pickup; this does not mean it failed."
+            "rather than an immediate pickup; this does not mean it failed.",
     );
   } catch (error) {
-    console.error(
-      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`
+    logger.error(
+      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,
@@ -180,7 +214,7 @@ async function executeInstantWaiverClaim(payload) {
       add_player_id: addPlayerId,
       drop_player_id: dropPlayerId,
       roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
-      error: error.message,
+      err: error,
     });
     throw error;
   } finally {
