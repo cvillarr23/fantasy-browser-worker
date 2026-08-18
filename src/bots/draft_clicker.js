@@ -127,7 +127,10 @@ function waitForConfirmation(socket, playerId, teamId, timeoutMs) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve(null), timeoutMs);
     socket.onSelected((event) => {
-      if (String(event.player_id) === String(playerId) && String(event.team_id) === String(teamId)) {
+      if (
+        String(event.player_id) === String(playerId) &&
+        String(event.team_id) === String(teamId)
+      ) {
         clearTimeout(timer);
         resolve(event);
       }
@@ -158,7 +161,7 @@ function captureFailure(tracking, details) {
   } catch (captureError) {
     logger.error(
       `[Draft Clicker][${tracking}] Could not capture failure context: ${captureError.message}`,
-      { error: captureError.message },
+      { err: captureError },
     );
   }
 }
@@ -169,7 +172,11 @@ async function executeAutomatedDraftSelection(payload) {
   // any PermanentError classification exists — which connection.js treats as transient and
   // requeues forever under its channel-wide prefetch(1), starving every consumer. Must be the
   // very first thing checked.
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
     throw new PermanentError(
       `[Draft Clicker] draft_targets payload is not an object: ${JSON.stringify(payload)}`,
     );
@@ -248,7 +255,12 @@ async function executeAutomatedDraftSelection(payload) {
         // ~0.2s after SELECT, so the listener must already be attached when the frame goes out.
         // No jitter between here and sendPick(): this is the one step that's actually racing the
         // draft clock, so it fires the instant the socket is ready.
-        const confirmation = waitForConfirmation(socket, playerId, teamId, CONFIRM_TIMEOUT_MS);
+        const confirmation = waitForConfirmation(
+          socket,
+          playerId,
+          teamId,
+          CONFIRM_TIMEOUT_MS,
+        );
         socket.sendPick(playerId);
         const result = await confirmation;
         if (!result) {
@@ -256,7 +268,9 @@ async function executeAutomatedDraftSelection(payload) {
             `No SELECTED confirmation for player ${playerId}/team ${teamId} within ${CONFIRM_TIMEOUT_MS}ms.`,
           );
         }
-        log(`SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`);
+        log(
+          `SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`,
+        );
       } finally {
         socket.close();
       }
@@ -273,7 +287,9 @@ async function executeAutomatedDraftSelection(payload) {
       // selector is still unverified (draft_room_dom.js's header), so this is a last resort, not
       // an equal alternative; if it also throws, the original wsError is what gets reported (it's
       // the primary path and the more informative failure).
-      log(`WS submission failed (${wsError.message}) — attempting DOM-click fallback...`);
+      log(
+        `WS submission failed (${wsError.message}) — attempting DOM-click fallback...`,
+      );
 
       // clickPickViaDom launches its own separate Chromium instance — close this one first rather
       // than running two at once. Under the 1200MiB pod limit that's real OOM risk, and this
@@ -285,7 +301,9 @@ async function executeAutomatedDraftSelection(payload) {
 
       try {
         await clickPickViaDom({ leagueId, seasonId, teamId }, playerId);
-        log(`SUCCESS (DOM fallback): pick submitted and confirmed for ${targetName}.`);
+        log(
+          `SUCCESS (DOM fallback): pick submitted and confirmed for ${targetName}.`,
+        );
       } catch (domError) {
         log(`DOM fallback also failed: ${domError.message}`);
         throw wsError;
@@ -294,7 +312,7 @@ async function executeAutomatedDraftSelection(payload) {
   } catch (error) {
     logger.error(
       `[Draft Clicker][${tracking}] Selection failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
-      { error: error.message, permanent: error.permanent === true },
+      { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,
@@ -306,7 +324,7 @@ async function executeAutomatedDraftSelection(payload) {
       dry_run: dryRun,
       permanent: error.permanent === true,
       draft_board: picks,
-      error: error.message,
+      err: error,
     });
     throw error;
   } finally {
@@ -330,7 +348,7 @@ if (require.main === module) {
 
   executeAutomatedDraftSelection(JSON.parse(raw)).catch((error) => {
     logger.error(`[Draft Clicker] Run failed: ${error.message}`, {
-      error: error.message,
+      err: error,
     });
     process.exit(1);
   });

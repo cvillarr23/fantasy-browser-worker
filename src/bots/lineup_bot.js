@@ -30,7 +30,9 @@ const { logger } = require("../telemetry/logger");
  *   - failure capture — dump roster state + a screenshot to DEBUG_OUTPUT_DIR before rethrowing.
  */
 
-const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
+const DEBUG_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
 
 // Bounded poll rather than a fixed sleep: REST is authoritative and usually reflects the write
 // immediately, so this normally exits on the first read.
@@ -72,7 +74,7 @@ function resolveSlotId(slot) {
 
   if (slotId === undefined) {
     throw new Error(
-      `Unrecognized lineup slot "${slot}". Known slots: ${Object.keys(slotConfig.slot_ids).join(", ")}`
+      `Unrecognized lineup slot "${slot}". Known slots: ${Object.keys(slotConfig.slot_ids).join(", ")}`,
     );
   }
   return slotId;
@@ -87,7 +89,7 @@ function requirePlayerId(raw, label, index) {
   const id = String(raw ?? "").trim();
   if (!/^\d+$/.test(id)) {
     throw new PermanentError(
-      `Swap #${index + 1}: ${label} "${raw}" is not a valid numeric ESPN player id.`
+      `Swap #${index + 1}: ${label} "${raw}" is not a valid numeric ESPN player id.`,
     );
   }
   return id;
@@ -113,7 +115,9 @@ function requirePlayerId(raw, label, index) {
  */
 function planSwaps(swaps, roster, log) {
   if (!Array.isArray(swaps)) {
-    throw new PermanentError(`optimized_swaps must be an array, got ${typeof swaps}.`);
+    throw new PermanentError(
+      `optimized_swaps must be an array, got ${typeof swaps}.`,
+    );
   }
 
   const benchSlotId = slotConfig.bench_slot_id;
@@ -124,21 +128,28 @@ function planSwaps(swaps, roster, log) {
   let skipped = 0;
 
   for (const [index, swap] of swaps.entries()) {
-    const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
+    const dropId = requirePlayerId(
+      swap.drop_player_id,
+      "drop_player_id",
+      index,
+    );
     const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
     const targetSlotId = resolveSlotId(swap.slot);
 
     if (dropId === addId) {
       throw new PermanentError(
         `Swap #${index + 1}: drop_player_id and add_player_id are both ${addId} — a player cannot ` +
-          "be benched and promoted in the same swap."
+          "be benched and promoted in the same swap.",
       );
     }
-    for (const [id, label] of [[dropId, "drop"], [addId, "add"]]) {
+    for (const [id, label] of [
+      [dropId, "drop"],
+      [addId, "add"],
+    ]) {
       if (seen.has(id)) {
         throw new PermanentError(
           `Swap #${index + 1}: player ${id} (${label}) already appears in swap #${seen.get(id) + 1}. ` +
-            "Chained swaps over the same player are ambiguous; the producer should collapse them."
+            "Chained swaps over the same player are ambiguous; the producer should collapse them.",
         );
       }
       seen.set(id, index);
@@ -150,33 +161,43 @@ function planSwaps(swaps, roster, log) {
       throw new PermanentError(
         `Swap #${index + 1}: slot "${swap.slot}" resolves to ${describeSlot(targetSlotId)}, which ` +
           `this league does not field (lineupSlotCounts has ${liveCount === 0 ? "0" : "no entry"} ` +
-          "for it). Producer and league settings disagree."
+          "for it). Producer and league settings disagree.",
       );
     }
 
     const dropFrom = current.get(dropId);
     const addFrom = current.get(addId);
     if (dropFrom === undefined) {
-      throw new PermanentError(`Swap #${index + 1}: player ${dropId} (drop) is not on team's roster.`);
+      throw new PermanentError(
+        `Swap #${index + 1}: player ${dropId} (drop) is not on team's roster.`,
+      );
     }
     if (addFrom === undefined) {
-      throw new PermanentError(`Swap #${index + 1}: player ${addId} (add) is not on team's roster.`);
+      throw new PermanentError(
+        `Swap #${index + 1}: player ${addId} (add) is not on team's roster.`,
+      );
     }
 
     // Demote before promoting, so the target slot is free by the time the promotion lands.
     const moves = [];
-    if (dropFrom !== benchSlotId) moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
-    if (addFrom !== targetSlotId) moves.push({ id: addId, from: addFrom, to: targetSlotId });
+    if (dropFrom !== benchSlotId)
+      moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
+    if (addFrom !== targetSlotId)
+      moves.push({ id: addId, from: addFrom, to: targetSlotId });
 
     // Both halves already hold — nothing to do. This is what makes a redelivered message a no-op.
     if (moves.length === 0) {
-      log(`Swap #${index + 1} already satisfied (${addId} in ${describeSlot(targetSlotId)}), skipping.`);
+      log(
+        `Swap #${index + 1} already satisfied (${addId} in ${describeSlot(targetSlotId)}), skipping.`,
+      );
       skipped += 1;
       continue;
     }
 
     for (const move of moves) {
-      log(`Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`);
+      log(
+        `Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`,
+      );
       items.push({
         playerId: Number(move.id),
         type: "LINEUP",
@@ -210,14 +231,16 @@ function assertSlotCapacity(items, finalRoster, slotCounts) {
     const capacity = slotCounts[String(slotId)] || 0;
     const used = occupancy.get(slotId) || 0;
     if (used > capacity) {
-      overfilled.push(`${describeSlot(slotId)}: ${used} players for ${capacity} spot(s)`);
+      overfilled.push(
+        `${describeSlot(slotId)}: ${used} players for ${capacity} spot(s)`,
+      );
     }
   }
 
   if (overfilled.length > 0) {
     throw new PermanentError(
       `Planned lineup overfills ${overfilled.length} slot(s) — ${overfilled.join("; ")}. ` +
-        "ESPN would reject or half-apply this transaction."
+        "ESPN would reject or half-apply this transaction.",
     );
   }
 }
@@ -236,13 +259,15 @@ async function verifyLineup(context, target, intended, log) {
         mismatches.push(
           `player ${playerId}: expected ${describeSlot(expectedSlotId)}, found ${
             actual === undefined ? "not on roster" : describeSlot(actual)
-          }`
+          }`,
         );
       }
     }
 
     if (mismatches.length === 0) {
-      log(`Verification passed on attempt ${attempt}: all ${intended.size} placements confirmed.`);
+      log(
+        `Verification passed on attempt ${attempt}: all ${intended.size} placements confirmed.`,
+      );
       return;
     }
 
@@ -252,7 +277,7 @@ async function verifyLineup(context, target, intended, log) {
   }
 
   throw new Error(
-    `Post-submit verification failed after ${VERIFY_ATTEMPTS} attempts — ${mismatches.join("; ")}`
+    `Post-submit verification failed after ${VERIFY_ATTEMPTS} attempts — ${mismatches.join("; ")}`,
   );
 }
 
@@ -270,11 +295,16 @@ function captureFailure(tracking, details) {
     const file = path.join(DEBUG_DIR, `lineup-fail-${tracking}-${stamp}.json`);
 
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    logger.error(`[Lineup Bot][${tracking}] Failure context written to: ${file}`);
+    logger.error(
+      `[Lineup Bot][${tracking}] Failure context written to: ${file}`,
+    );
   } catch (captureError) {
-    logger.error(`[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`, {
-      error: captureError.message,
-    });
+    logger.error(
+      `[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`,
+      {
+        err: captureError,
+      },
+    );
   }
 }
 
@@ -292,15 +322,17 @@ async function executeLineupAdjustments(payload) {
   // All three are permanent: redelivering the same message against the same config cannot help.
   if (!leagueId) {
     throw new PermanentError(
-      `[Lineup Bot][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify which league to act on.`
+      `[Lineup Bot][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify which league to act on.`,
     );
   }
   if (teamId === undefined || teamId === null || teamId === "") {
-    throw new PermanentError(`[Lineup Bot][${tracking}] Payload is missing team_id.`);
+    throw new PermanentError(
+      `[Lineup Bot][${tracking}] Payload is missing team_id.`,
+    );
   }
   if (!Array.isArray(swaps)) {
     throw new PermanentError(
-      `[Lineup Bot][${tracking}] optimized_swaps must be an array, got ${typeof swaps}.`
+      `[Lineup Bot][${tracking}] optimized_swaps must be an array, got ${typeof swaps}.`,
     );
   }
   if (swaps.length === 0) {
@@ -310,13 +342,15 @@ async function executeLineupAdjustments(payload) {
 
   const target = { leagueId, seasonId, teamId };
   const { dryRun, defaulted } = resolveDryRun();
-  log(`Starting realignment for team ${teamId} in league ${leagueId} (${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`);
+  log(
+    `Starting realignment for team ${teamId} in league ${leagueId} (${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
+  );
   if (defaulted) {
     // Say this loudly: a silent no-op is its own failure mode, and someone deploying this and
     // wondering why nothing changed deserves to see the reason in the logs.
     log(
       "DRY_RUN is unset, defaulting to TRUE — no changes will be written. Set DRY_RUN=false to " +
-        "submit for real (only once the write shape is verified, see issue #15)."
+        "submit for real (only once the write shape is verified, see issue #15).",
     );
   }
 
@@ -325,14 +359,16 @@ async function executeLineupAdjustments(payload) {
     session = await createAuthenticatedSession();
 
     roster = await readRoster(session.context, target);
-    log(`Roster read: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`);
+    log(
+      `Roster read: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`,
+    );
 
     // Permanent rather than retriable: a draft is days or weeks away, and hot-looping until then
     // would pin the queue. The producer can republish once there's a roster to realign.
     if (roster.entryCount === 0) {
       throw new PermanentError(
         `[Lineup Bot][${tracking}] Team ${teamId} has an empty roster — the draft likely hasn't ` +
-          "happened yet, so there is nothing to realign."
+          "happened yet, so there is nothing to realign.",
       );
     }
 
@@ -345,7 +381,9 @@ async function executeLineupAdjustments(payload) {
     // blocks the whole queue under connection.js's prefetch(1). A retry with nothing left to do
     // must succeed.
     if (items.length === 0) {
-      log(`All ${skipped} requested swap(s) already satisfied. No transaction submitted.`);
+      log(
+        `All ${skipped} requested swap(s) already satisfied. No transaction submitted.`,
+      );
       return;
     }
 
@@ -354,30 +392,36 @@ async function executeLineupAdjustments(payload) {
       throw new PermanentError(
         `[Lineup Bot][${tracking}] ESPN reports this lineup as locked ` +
           `(lineupLocked=${roster.lineupLocked}, rosterLocked=${roster.rosterLocked}) — games have ` +
-          `started and the ${items.length} remaining change(s) will not be accepted.`
+          `started and the ${items.length} remaining change(s) will not be accepted.`,
       );
     }
 
     if (dryRun) {
-      log(`DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`);
+      log(
+        `DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`,
+      );
       return;
     }
 
-    log(`Submitting ${items.length} lineup item(s) across ${swaps.length - skipped} swap(s)...`);
+    log(
+      `Submitting ${items.length} lineup item(s) across ${swaps.length - skipped} swap(s)...`,
+    );
     await submitLineup(session.context, {
       ...target,
       memberId: session.swid,
       scoringPeriodId: roster.scoringPeriodId,
       items,
     });
-    log("Transaction accepted by ESPN. Verifying against a fresh roster read...");
+    log(
+      "Transaction accepted by ESPN. Verifying against a fresh roster read...",
+    );
 
     await verifyLineup(session.context, target, intended, log);
     log("Lineup realignment complete and verified.");
   } catch (error) {
     logger.error(
       `[Lineup Bot][${tracking}] Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
-      { error: error.message, permanent: error.permanent === true },
+      { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
       tracking_id: tracking,
@@ -392,7 +436,7 @@ async function executeLineupAdjustments(payload) {
       roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
       slot_counts: roster ? roster.slotCounts : null,
       planned_items: planned ? planned.items : null,
-      error: error.message,
+      err: error,
     });
     // Bubble up: connection.js requeues an ordinary Error, and discards a PermanentError.
     throw error;
@@ -411,13 +455,13 @@ if (require.main === module) {
     logger.error(
       "Usage: node src/bots/lineup_bot.js '<lineup_updates JSON payload>'\n" +
         "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/lineup_bot.js \\\n" +
-        `  '{"team_id":"8","optimized_swaps":[{"drop_player_id":"3139477","add_player_id":"4259545","slot":"FLEX"}]}'`
+        `  '{"team_id":"8","optimized_swaps":[{"drop_player_id":"3139477","add_player_id":"4259545","slot":"FLEX"}]}'`,
     );
     process.exit(1);
   }
 
   executeLineupAdjustments(JSON.parse(raw)).catch((error) => {
-    logger.error(`[Lineup Bot] Run failed: ${error.message}`, { error: error.message });
+    logger.error(`[Lineup Bot] Run failed: ${error.message}`, { err: error });
     process.exit(1);
   });
 }

@@ -27,7 +27,7 @@ async function connectWithRetry() {
       connection.on("error", (err) => {
         logger.error(
           "[Queue Bridge] Underlying connection socket error occurred",
-          { error: err.message },
+          { err },
         );
       });
 
@@ -51,7 +51,7 @@ async function connectWithRetry() {
       const currentDelay = baseDelay * Math.pow(2, attempts - 1);
       logger.error(
         `[Queue Bridge] Connection failure: ${err.message}. Retrying in ${currentDelay}ms...`,
-        { error: err.message },
+        { err },
       );
       await new Promise((resolve) => setTimeout(resolve, currentDelay));
     }
@@ -106,7 +106,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
             } catch (parseError) {
               logger.error(
                 "[Queue Bridge] Discarding unparseable message (not requeued)",
-                { error: parseError.message },
+                { err: parseError },
               );
               channel.nack(msg, false, false);
               return;
@@ -126,7 +126,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
             } catch (error) {
               logger.error(
                 "[Queue Bridge] Execution error encountered handling payload",
-                { error: error.message },
+                { err: error },
               );
 
               // A permanent error can never succeed on redelivery, so requeuing it would redeliver the

@@ -13,7 +13,7 @@ const pool = new Pool({
 
 pool.on("error", (err) => {
   logger.error("[Execution Log] Idle client error on connection pool", {
-    error: err.message,
+    err,
   });
 });
 
@@ -33,11 +33,18 @@ async function recordExecution({
     await pool.query(
       `INSERT INTO execution_log (transaction_type, bot_name, status, duration_ms, error_message, trace_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [transactionType, botName || null, status, durationMs, errorMessage || null, traceId || null]
+      [
+        transactionType,
+        botName || null,
+        status,
+        durationMs,
+        errorMessage || null,
+        traceId || null,
+      ],
     );
   } catch (err) {
     logger.error("[Execution Log] Failed to record execution outcome", {
-      error: err.message,
+      err,
     });
   }
 }

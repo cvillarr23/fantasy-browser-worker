@@ -12,32 +12,45 @@ async function scrapePendingTradeProposals() {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const currentYear = process.env.CURRENT_YEAR || "2026";
   const tradeUrl = `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${currentYear}`;
-  
-  logger.info(`[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`);
-  
+
+  logger.info(
+    `[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`,
+  );
+
   let session = null;
   try {
     session = await createAuthenticatedSession();
-    await session.page.goto(tradeUrl, { waitUntil: "networkidle", timeout: 20000 });
+    await session.page.goto(tradeUrl, {
+      waitUntil: "networkidle",
+      timeout: 20000,
+    });
 
     // Wait for the main trade transaction layout overview component to render
-    await session.page.waitForSelector(".trade-container, .no-pending-trades", { timeout: 10000 });
-    
+    await session.page.waitForSelector(".trade-container, .no-pending-trades", {
+      timeout: 10000,
+    });
+
     // Extract raw block text entries directly from active elements to pass down to Claude over MCP
     const proposalContentText = await session.page.evaluate(() => {
       const tradeCards = document.querySelectorAll(".trade-card-wrapper");
       if (tradeCards.length === 0) return "NO_PENDING_PROPOSALS";
-      
-      return Array.from(tradeCards).map(card => card.innerText.replace(/\s+/g, " ").trim()).join(" | ");
+
+      return Array.from(tradeCards)
+        .map((card) => card.innerText.replace(/\s+/g, " ").trim())
+        .join(" | ");
     });
 
-    logger.info(`[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`);
+    logger.info(
+      `[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`,
+    );
     return proposalContentText;
-
   } catch (error) {
-    logger.error(`[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`, {
-      error: error.message,
-    });
+    logger.error(
+      `[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`,
+      {
+        err: error,
+      },
+    );
     return null;
   } finally {
     if (session && session.browser) {
@@ -47,4 +60,3 @@ async function scrapePendingTradeProposals() {
 }
 
 module.exports = { scrapePendingTradeProposals };
-

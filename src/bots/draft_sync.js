@@ -160,7 +160,7 @@ async function reconcileFromRest(context, redisClient, state) {
     }
   } catch (err) {
     logger.error(`[Draft Sync] REST reconciliation failed: ${err.message}`, {
-      error: err.message,
+      err,
     });
   }
 }
@@ -179,9 +179,12 @@ async function handleSelectedFrame(parsed, redisClient, state) {
   try {
     await publishPickEvent(redisClient, event, state);
   } catch (err) {
-    logger.error(`[Draft Sync] Failed to publish WS pick event: ${err.message}`, {
-      error: err.message,
-    });
+    logger.error(
+      `[Draft Sync] Failed to publish WS pick event: ${err.message}`,
+      {
+        err,
+      },
+    );
   }
 }
 
@@ -293,7 +296,9 @@ async function connectAndStream(redisClient, state) {
     // listeners for it are already attached above; just point session.page at it so the rest of
     // this function (the isDead() poll loop below) watches the actually-active page.
     if (draftContext.page && draftContext.page !== session.page) {
-      logger.info("[Draft Sync] Draft room opened in a new tab — listeners were already attached to it.");
+      logger.info(
+        "[Draft Sync] Draft room opened in a new tab — listeners were already attached to it.",
+      );
       session.page = draftContext.page;
     }
 
@@ -354,7 +359,7 @@ async function streamLiveDraftRoom() {
   // reconnect strategy recover.
   redisClient.on("error", (err) =>
     logger.error(`[Draft Sync] Redis client error: ${err.message}`, {
-      error: err.message,
+      err,
     }),
   );
   await redisClient.connect();
@@ -384,7 +389,7 @@ async function streamLiveDraftRoom() {
         logger.error(
           `[Draft Sync] Session crashed (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}): ` +
             `${error.message}. Reconnecting in ${delay}ms...`,
-          { error: error.message, attempt },
+          { err: error, attempt },
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -393,7 +398,7 @@ async function streamLiveDraftRoom() {
   } catch (error) {
     logger.error(
       `[Draft Sync] Live data sync loop crashed permanently: ${error.message}`,
-      { error: error.message },
+      { err: error },
     );
     const { sdk } = require("../telemetry/init");
     await sdk.shutdown();

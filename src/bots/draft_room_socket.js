@@ -107,7 +107,9 @@ function buildDraftSocketUrl({ leagueId, teamId, memberId }) {
 /** Ensures a SWID has its braces (the JOIN URL and SELECTED frames both carry them). */
 function normalizeSwid(swid) {
   const trimmed = String(swid).trim();
-  return trimmed.startsWith("{") ? trimmed : `{${trimmed.replace(/[{}]/g, "")}}`;
+  return trimmed.startsWith("{")
+    ? trimmed
+    : `{${trimmed.replace(/[{}]/g, "")}}`;
 }
 
 /** Parses a raw WS text frame — same SELECTED format draft_sync.js's parseSelectedFrame handles. */
@@ -138,7 +140,8 @@ function parseErrorFrame(raw) {
   const rest = line.slice("ERROR ".length);
   const spaceIdx = rest.indexOf(" ");
   const code = spaceIdx === -1 ? rest : rest.slice(0, spaceIdx);
-  const message = spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).replace(/\+/g, " ");
+  const message =
+    spaceIdx === -1 ? "" : rest.slice(spaceIdx + 1).replace(/\+/g, " ");
   return { code: Number(code), message };
 }
 
@@ -182,7 +185,7 @@ function connectToDraftRoom({ leagueId, teamId, espnS2, swid }) {
       ws.on("error", (err) => {
         logger.error(
           `[Draft Room Socket] Transport error after connect (league ${leagueId}, team ${teamId}): ${err.message}`,
-          { error: err.message, leagueId, teamId },
+          { err, leagueId, teamId },
         );
       });
       resolve(handleFor(ws));

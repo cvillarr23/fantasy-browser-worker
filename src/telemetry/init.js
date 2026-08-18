@@ -10,7 +10,9 @@ const { Resource } = require("@opentelemetry/resources");
 const {
   SemanticResourceAttributes,
 } = require("@opentelemetry/semantic-conventions");
-const { AmqplibInstrumentation } = require("@opentelemetry/instrumentation-amqplib");
+const {
+  AmqplibInstrumentation,
+} = require("@opentelemetry/instrumentation-amqplib");
 const { PgInstrumentation } = require("@opentelemetry/instrumentation-pg");
 
 const sdk = new NodeSDK({

@@ -57,7 +57,7 @@ async function bootDaemon() {
     );
   } catch (error) {
     logger.error("[Worker Engine] Critical cluster initialization failure", {
-      error: error.message,
+      err: error,
     });
     await sdk.shutdown();
     process.exit(1);
@@ -73,7 +73,7 @@ process.on("unhandledRejection", (reason) => {
 
 process.on("uncaughtException", async (error) => {
   logger.error("[Fatal Worker Event] Uncaught system execution exception", {
-    error: error.message,
+    err: error,
   });
   // Flush any buffered spans before exiting -- this is exactly the crash-path trace you'd most
   // want, and NodeSDK batches/flushes on an interval that a process.exit() would cut short.
