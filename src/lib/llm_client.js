@@ -1,6 +1,7 @@
 const { execFileSync } = require("child_process");
 const { Pool } = require("pg");
 const { trace, SpanStatusCode } = require("@opentelemetry/api");
+const k8s = require("@kubernetes/client-node");
 const { logger } = require("../telemetry/logger");
 
 const tracer = trace.getTracer("fantasy-browser-worker");
@@ -34,6 +35,14 @@ const DEFAULT_TIMEOUT_MS = 15000;
 // take well past 15s, and this is the last-resort tier anyway, so a slower response beats none.
 const DEFAULT_OLLAMA_TIMEOUT_MS = 30000;
 const DEFAULT_OLLAMA_URL = "http://ollama.default.svc.cluster.local:11434";
+
+const DEFAULT_OLLAMA_K8S_NAMESPACE = "default";
+const DEFAULT_OLLAMA_K8S_DEPLOYMENT = "ollama";
+// Cold model load, not just container start -- an 8B model's first request after a scale-up
+// from 0 can genuinely take this long. Polling below returns as soon as it's actually ready,
+// this is only the ceiling.
+const DEFAULT_OLLAMA_SCALE_UP_TIMEOUT_MS = 90000;
+const OLLAMA_SCALE_UP_POLL_INTERVAL_MS = 2000;
 
 // provider -> array of request timestamps (ms), used for the in-memory sliding-window rate
 // limiter below. Process-local by design: each pod/job instance guards its own budget slice
@@ -220,7 +229,84 @@ async function callGemini(model, prompt, opts, apiKey) {
   return text;
 }
 
+// Lazily resolved once per process, not per call -- loadFromCluster() throws immediately when
+// not running inside a pod (no local dev cluster access), and there's no point re-attempting
+// that on every single Ollama call. `undefined` means "not yet attempted", `null` means "tried
+// and it's unavailable, stop trying" (e.g. local dev against a manually-run Ollama instance).
+let cachedAppsV1Api;
+
+function getAppsV1ApiOrNull() {
+  if (cachedAppsV1Api !== undefined) return cachedAppsV1Api;
+  try {
+    const kc = new k8s.KubeConfig();
+    kc.loadFromCluster();
+    cachedAppsV1Api = kc.makeApiClient(k8s.AppsV1Api);
+  } catch (err) {
+    logger.info(
+      `[LLM Client] Not running in-cluster (or no cluster access) -- skipping Ollama on-demand scale-up: ${err.message}`,
+    );
+    cachedAppsV1Api = null;
+  }
+  return cachedAppsV1Api;
+}
+
+// Scales the Ollama Deployment from 0 to 1 replicas on first use and waits for it to become
+// ready, so callOllama's actual HTTP request lands on a warm pod instead of racing a cold
+// scale-up. Deliberately never scales back down -- see the WORKER-12 follow-up plan: with ~16GB
+// of headroom on the homelab node, leaving an 8B model resident is an acceptable tradeoff
+// against building a second idle-timeout/scale-down mechanism.
+async function ensureOllamaScaledUp() {
+  const appsApi = getAppsV1ApiOrNull();
+  if (!appsApi) return; // not in-cluster -- assume OLLAMA_URL already points at something running
+
+  const namespace =
+    process.env.OLLAMA_K8S_NAMESPACE || DEFAULT_OLLAMA_K8S_NAMESPACE;
+  const name =
+    process.env.OLLAMA_K8S_DEPLOYMENT || DEFAULT_OLLAMA_K8S_DEPLOYMENT;
+  const timeoutMs =
+    Number(process.env.OLLAMA_SCALE_UP_TIMEOUT_MS) ||
+    DEFAULT_OLLAMA_SCALE_UP_TIMEOUT_MS;
+
+  const scale = await appsApi.readNamespacedDeploymentScale(name, namespace);
+  if ((scale.spec?.replicas || 0) > 0) {
+    // Already scaled up (either from a prior call in this or another worker instance) -- if
+    // it's not actually Ready yet, the poll loop below will still catch that.
+  } else {
+    logger.info(
+      `[LLM Client] Scaling Ollama deployment "${name}" up from 0 replicas...`,
+    );
+    await appsApi.replaceNamespacedDeploymentScale(name, namespace, {
+      metadata: scale.metadata,
+      spec: { replicas: 1 },
+    });
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const status = await appsApi.readNamespacedDeploymentStatus(
+      name,
+      namespace,
+    );
+    if ((status.status?.readyReplicas || 0) >= 1) {
+      logger.info(`[LLM Client] Ollama deployment "${name}" is ready.`);
+      return;
+    }
+    if (Date.now() >= deadline) {
+      const err = new Error(
+        `Timed out after ${timeoutMs}ms waiting for Ollama deployment "${name}" to become ready.`,
+      );
+      err.scaleUpTimeout = true;
+      throw err;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, OLLAMA_SCALE_UP_POLL_INTERVAL_MS),
+    );
+  }
+}
+
 async function callOllama(model, prompt, opts) {
+  await ensureOllamaScaledUp();
+
   const baseUrl = process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
 
   const response = await fetch(`${baseUrl}/api/generate`, {
@@ -263,8 +349,14 @@ function parsePriorityChain() {
   return raw
     .split(",")
     .map((entry) => {
-      const [provider, model] = entry.split(":").map((s) => s && s.trim());
-      return { provider, model };
+      // Split on the first ":" only -- Ollama model tags contain their own ":" (e.g.
+      // "llama3.1:8b"), so a naive entry.split(":") would truncate the model to "llama3.1".
+      const separatorIdx = entry.indexOf(":");
+      if (separatorIdx === -1) return { provider: entry.trim(), model: "" };
+      return {
+        provider: entry.slice(0, separatorIdx).trim(),
+        model: entry.slice(separatorIdx + 1).trim(),
+      };
     })
     .filter((entry) => entry.provider && entry.model);
 }
@@ -407,9 +499,11 @@ async function completeWithFallback(prompt, opts = {}) {
           const latencyMs = Date.now() - startedAt;
           const errorType = error.rateLimited
             ? "rate_limited"
-            : error.name === "TimeoutError"
-              ? "timeout"
-              : "request_failed";
+            : error.scaleUpTimeout
+              ? "ollama_scale_up_timeout"
+              : error.name === "TimeoutError"
+                ? "timeout"
+                : "request_failed";
 
           logger.error(
             `[LLM Client] "${provider}:${model}" attempt ${attemptNumber} failed: ${error.message}`,
