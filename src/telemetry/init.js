@@ -17,8 +17,12 @@ const sdk = new NodeSDK({
   resource: new Resource({
     // Single shared service name across every bot/entrypoint -- matches the "one deployable
     // image" model. Bot identity is carried per-span as the worker.bot_name attribute instead
-    // (see telemetry/instrument.js), not as a separate OTel service.
-    [SemanticResourceAttributes.SERVICE_NAME]: "fantasy-browser-worker",
+    // (see telemetry/instrument.js), not as a separate OTel service. Defers to OTEL_SERVICE_NAME
+    // when set -- fantasy-infra's INFRA-10 already provisions it ("browser-worker") on every
+    // browser-worker workload manifest; a hardcoded literal here would silently diverge from
+    // that and misreport the service name in Tempo/Grafana.
+    [SemanticResourceAttributes.SERVICE_NAME]:
+      process.env.OTEL_SERVICE_NAME || "fantasy-browser-worker",
   }),
   traceExporter: new OTLPTraceExporter({
     // e.g. http://tempo.default.svc.cluster.local:4317 -- must be http://, not grpc:// or bare
