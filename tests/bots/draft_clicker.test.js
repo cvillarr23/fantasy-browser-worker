@@ -35,7 +35,9 @@ const BASE_PAYLOAD = { team_id: "8", player_id: "4360438", name: "Breece Hall" }
 beforeEach(() => {
   jest.useFakeTimers();
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+  savedEnv.CURRENT_YEAR = process.env.CURRENT_YEAR;
   process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.CURRENT_YEAR = "2026";
 
   createAuthenticatedSession.mockResolvedValue({
     context: {},
@@ -52,6 +54,8 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
+  if (savedEnv.CURRENT_YEAR === undefined) delete process.env.CURRENT_YEAR;
+  else process.env.CURRENT_YEAR = savedEnv.CURRENT_YEAR;
 });
 
 describe("executeAutomatedDraftSelection", () => {
