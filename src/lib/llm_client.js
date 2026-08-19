@@ -14,6 +14,13 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   max: 2,
+  // Every attempt awaits its metrics insert before falling back or returning -- without finite
+  // timeouts here, a stalled/unreachable Postgres would block the actual LLM call indefinitely
+  // despite this being a "best-effort" path (recordLlmCallMetric's catch can't restore service
+  // if the query it's awaiting never settles).
+  connectionTimeoutMillis: 5000,
+  statement_timeout: 5000,
+  query_timeout: 5000,
 });
 
 pool.on("error", (err) => {
@@ -194,11 +201,14 @@ async function callGroq(model, prompt, opts, apiKey) {
 }
 
 async function callGemini(model, prompt, opts, apiKey) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  // The API key goes in the x-goog-api-key header, not the ?key= query string -- a query
+  // string is far more likely to end up captured in proxy/request logs and telemetry than a
+  // header, and Gemini accepts either.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 
   const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       ...(opts.systemPrompt
@@ -471,7 +481,19 @@ async function completeWithFallback(prompt, opts = {}) {
                 "llm.model": model,
               });
               try {
-                return await adapter.call(model, prompt, opts, apiKey);
+                const result = await adapter.call(model, prompt, opts, apiKey);
+                attemptSpan.setStatus({ code: SpanStatusCode.OK });
+                return result;
+              } catch (error) {
+                // Without this, a failed attempt's span ends UNSET (not ERROR) once the outer
+                // fallback loop's later success marks the parent span OK -- per-attempt OTel
+                // instrumentation would then report every failed provider as a non-error.
+                attemptSpan.recordException(error);
+                attemptSpan.setStatus({
+                  code: SpanStatusCode.ERROR,
+                  message: error.message,
+                });
+                throw error;
               } finally {
                 attemptSpan.end();
               }
