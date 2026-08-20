@@ -1,0 +1,87 @@
+# WORKER-11: manual, one-off Job for remote VNC-based interactive ESPN login — NOT part of
+# fantasy-infra's GitOps-synced tree, same as k8s/test-*-job.yaml. Apply/delete this by hand
+# whenever a saved session (secret/fantasy/espn-session-state) has gone stale, or proactively the
+# day before/morning of a draft. Never a mid-draft dependency — draft_room_socket.js's primary WS
+# submission path needs none of this.
+#
+# Prerequisites:
+#   - OpenBao's Kubernetes auth method + a role/policy binding the ServiceAccount below to write
+#     access on secret/fantasy/espn-session-state. This is fantasy-infra-side work tracked as a
+#     companion issue to #24 (mirroring how homelab-deployment#8 is the companion for the ingress
+#     below) — until that lands, remote_login.js's OpenBao write step will fail loudly and this Job
+#     will exit non-zero after a successful login (the login itself and the VNC session still work
+#     fine, the state just won't persist).
+#   - The Tailscale ingress (homelab-deployment#8) for reaching this from a phone. Until that
+#     lands, use the kubectl port-forward fallback below.
+#
+# Usage:
+#   git push origin main                                     # triggers the build+publish workflow
+#   kubectl delete job remote-login --ignore-not-found -n default
+#   kubectl apply -f k8s/remote-login-job.yaml
+#   kubectl logs -f job/remote-login -n default
+#
+# To reach the VNC session:
+#   Interim (no Tailscale ingress yet):
+#     kubectl port-forward job/remote-login 6080:6080 -n default
+#     # then open http://localhost:6080/vnc.html locally (or via your phone if it can reach this
+#     # machine, e.g. over the same LAN/VPN) — click Connect, no password (-nopw, see
+#     # scripts/start-vnc.sh's header for why).
+#   Once homelab-deployment#8 lands:
+#     open https://espn-login.<tailnet>.ts.net directly from your phone, tailnet-only.
+#
+# activeDeadlineSeconds bounds the WHOLE session (login + however long you keep poking around a
+# mock draft afterward) — remote_login.js itself imposes no shorter internal timeout once you're
+# logged in. Bump this if 2 hours isn't enough.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: remote-login
+  namespace: default
+  labels:
+    app: fantasy-browser-worker
+    component: remote-login
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  activeDeadlineSeconds: 7200
+  template:
+    metadata:
+      labels:
+        app: fantasy-browser-worker
+        component: remote-login
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      serviceAccountName: fantasy-browser-worker-remote-login
+      containers:
+        - name: remote-login
+          image: ghcr.io/cvillarr23/fantasy-browser-worker:latest
+          imagePullPolicy: Always # always pull latest for a manually-triggered run
+          command: ["scripts/start-vnc.sh"]
+          ports:
+            - containerPort: 6080
+              name: novnc-web
+          env:
+            - name: ESPN_LEAGUE_ID
+              value: "REPLACE_ME"
+            - name: ESPN_TEAM_ID
+              value: "REPLACE_ME"
+            - name: OPENBAO_ESPN_SESSION_STATE_PATH
+              value: "secret/fantasy/espn-session-state"
+            - name: OPENBAO_K8S_ROLE
+              value: "fantasy-browser-worker"
+            # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
+            # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
+            # grpc://.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.default.svc.cluster.local:4317"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              # Higher than test-draft-sync-job.yaml's 1200Mi — Xvfb + x11vnc + websockify add
+              # overhead on top of Chromium's usual footprint. Revisit after a real run.
+              memory: "1600Mi"
+              cpu: "1000m"

@@ -79,6 +79,64 @@ function resolveEspnCookies() {
 }
 
 /**
+ * Full Playwright `storageState()` (cookies AND localStorage) from a real interactive login,
+ * saved by WORKER-11's `remote_login.js` — distinct from the plain espn_s2/swid fields above.
+ * This is what actually satisfies the Disney/MyDisney identity SDK gate the *rendered* draft room
+ * page imposes on top of cookie auth (see draft_room_dom.js's header for the full story); bare
+ * cookie injection never establishes that session.
+ */
+function fetchStoredSessionStateFromOpenBao() {
+  const secretPath =
+    process.env.OPENBAO_ESPN_SESSION_STATE_PATH ||
+    "secret/fantasy/espn-session-state";
+  logger.info(
+    `[Auth Engine] Checking OpenBao for a saved full session state at "${secretPath}"...`,
+  );
+
+  let raw;
+  try {
+    raw = execFileSync("bao", ["kv", "get", "-format=json", secretPath], {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    logger.info(
+      `[Auth Engine] No stored session state at "${secretPath}" (${err.message}) — falling back to cookie injection.`,
+    );
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    logger.error(
+      `[Auth Engine] Could not parse OpenBao response: ${err.message}`,
+      { err },
+    );
+    return null;
+  }
+
+  // KV v2 nests the secret under data.data; KV v1 puts it directly under data.
+  const fields = parsed?.data?.data ?? parsed?.data;
+  if (!fields?.state) {
+    logger.error(
+      `[Auth Engine] OpenBao secret at "${secretPath}" is missing the "state" field.`,
+    );
+    return null;
+  }
+
+  try {
+    return JSON.parse(fields.state);
+  } catch (err) {
+    logger.error(
+      `[Auth Engine] Stored session state at "${secretPath}" is not valid JSON: ${err.message}`,
+      { err },
+    );
+    return null;
+  }
+}
+
+/**
  * Headless Browser Sandbox Initializer
  * Establishes optimized browser context pools while keeping container RAM under 1200MiB.
  */
@@ -185,7 +243,62 @@ async function createAuthenticatedSession({ headless = true } = {}) {
   }
 }
 
+/**
+ * Prefers a real interactive-login session (full storageState, satisfies the Disney/MyDisney SDK
+ * gate) over the bare cookie injection createAuthenticatedSession does above. Returns null — not a
+ * throw — when no stored state exists in OpenBao, so callers can cleanly fall through to
+ * createAuthenticatedSession() instead; leaves that function itself untouched, so WORKER-06's
+ * cookie-only WS submission path is unaffected either way.
+ */
+async function createSessionFromStoredState({ headless = true } = {}) {
+  const storageState = fetchStoredSessionStateFromOpenBao();
+  if (!storageState) {
+    return null;
+  }
+
+  logger.info(
+    "[Auth Engine] Spawning Chromium sandbox from a saved full session state...",
+  );
+
+  const debugPort = process.env.CDP_DEBUG_PORT;
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+  ];
+  if (debugPort) {
+    launchArgs.push(
+      `--remote-debugging-port=${debugPort}`,
+      "--remote-debugging-address=0.0.0.0",
+    );
+  }
+
+  const browser = await chromium.launch({ headless, args: launchArgs });
+  try {
+    const context = await browser.newContext({
+      storageState,
+      viewport: { width: 1280, height: 720 },
+      userAgent: pickUserAgent(),
+    });
+    const page = await context.newPage();
+
+    // Callers (e.g. draft_room_dom.js's buildDraftUrl) expect `swid` back the same way
+    // createAuthenticatedSession() provides it, even though it came from the stored state's
+    // cookies rather than ESPN_S2/SWID env/OpenBao fields.
+    const cookies = await context.cookies();
+    const swid = cookies.find((c) => c.name === "SWID")?.value;
+
+    return { browser, context, page, swid };
+  } catch (setupError) {
+    await browser.close().catch(() => {});
+    throw setupError;
+  }
+}
+
 module.exports = {
   createAuthenticatedSession,
+  createSessionFromStoredState,
   resolveEspnCookies,
 };
