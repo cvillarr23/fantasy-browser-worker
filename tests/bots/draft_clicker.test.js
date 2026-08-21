@@ -3,6 +3,7 @@ jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/draft_room_socket");
 jest.mock("../../src/bots/draft_room_dom");
 jest.mock("../../src/bots/session_health");
+jest.mock("../../src/db/execution_log");
 
 const { createAuthenticatedSession, resolveEspnCookies } = require("../../src/bots/auth");
 const { readDraftPicks } = require("../../src/bots/espn_api");
@@ -10,6 +11,7 @@ const { connectToDraftRoom } = require("../../src/bots/draft_room_socket");
 const { clickPickViaDom } = require("../../src/bots/draft_room_dom");
 const { assertCookieSessionValid } = require("../../src/bots/session_health");
 const { SessionExpiredError } = require("../../src/errors");
+const { recordDraftPickClick } = require("../../src/db/execution_log");
 const { executeAutomatedDraftSelection } = require("../../src/bots/draft_clicker");
 
 const ENV_KEYS = ["DRY_RUN", "ESPN_LEAGUE_ID"];
@@ -50,6 +52,7 @@ beforeEach(() => {
   resolveEspnCookies.mockReturnValue({ espnS2: "s2-value", swid: "{TEST-SWID}" });
   readDraftPicks.mockResolvedValue([]);
   assertCookieSessionValid.mockResolvedValue(undefined);
+  recordDraftPickClick.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -106,6 +109,7 @@ describe("executeAutomatedDraftSelection", () => {
     await jest.advanceTimersByTimeAsync(1000);
     await runPromise;
     expect(connectToDraftRoom).not.toHaveBeenCalled();
+    expect(recordDraftPickClick).not.toHaveBeenCalled();
   });
 
   it("is idempotent: no-op when already drafted by our own team", async () => {
@@ -119,9 +123,10 @@ describe("executeAutomatedDraftSelection", () => {
     await runPromise;
 
     expect(connectToDraftRoom).not.toHaveBeenCalled();
+    expect(recordDraftPickClick).not.toHaveBeenCalled();
   });
 
-  it("rejects as a conflict when drafted by another team", async () => {
+  it("rejects as a conflict when drafted by another team, without writing a click row", async () => {
     readDraftPicks.mockResolvedValue([
       { player_id: "4360438", team_id: "3", pick_number: 12 },
     ]);
@@ -135,6 +140,9 @@ describe("executeAutomatedDraftSelection", () => {
     await jest.advanceTimersByTimeAsync(1000);
     await assertion;
     expect(connectToDraftRoom).not.toHaveBeenCalled();
+    // No real submission was ever attempted for this conflict - it must not be recorded as
+    // a click outcome.
+    expect(recordDraftPickClick).not.toHaveBeenCalled();
   });
 
   it("sends the pick and resolves on a matching SELECTED confirmation", async () => {
@@ -150,6 +158,14 @@ describe("executeAutomatedDraftSelection", () => {
 
     expect(socket.sendPick).toHaveBeenCalledWith("4360438");
     expect(socket.close).toHaveBeenCalled();
+    expect(recordDraftPickClick).toHaveBeenCalledWith({
+      leagueId: "1248158344",
+      season: "2026",
+      playerId: "4360438",
+      playerName: "Breece Hall",
+      roundNumber: 10,
+      status: "success",
+    });
   });
 
   it("classifies a server ERROR frame as a PermanentError and still closes the socket", async () => {
@@ -167,6 +183,14 @@ describe("executeAutomatedDraftSelection", () => {
     });
     expect(socket.close).toHaveBeenCalled();
     expect(clickPickViaDom).not.toHaveBeenCalled();
+    expect(recordDraftPickClick).toHaveBeenCalledWith({
+      leagueId: "1248158344",
+      season: "2026",
+      playerId: "4360438",
+      playerName: "Breece Hall",
+      status: "failure",
+      errorMessage: expect.stringMatching(/rejected by server/),
+    });
   });
 
   it("falls back to the DOM click path on a non-permanent WS failure", async () => {
@@ -182,6 +206,13 @@ describe("executeAutomatedDraftSelection", () => {
       { leagueId: "1248158344", seasonId: "2026", teamId: "8" },
       "4360438",
     );
+    expect(recordDraftPickClick).toHaveBeenCalledWith({
+      leagueId: "1248158344",
+      season: "2026",
+      playerId: "4360438",
+      playerName: "Breece Hall",
+      status: "success",
+    });
   });
 
   it("rethrows the original WS error when the DOM fallback also fails", async () => {
@@ -195,6 +226,15 @@ describe("executeAutomatedDraftSelection", () => {
     });
     await jest.advanceTimersByTimeAsync(1000);
     await assertion;
+
+    expect(recordDraftPickClick).toHaveBeenCalledWith({
+      leagueId: "1248158344",
+      season: "2026",
+      playerId: "4360438",
+      playerName: "Breece Hall",
+      status: "failure",
+      errorMessage: expect.stringMatching(/ECONNREFUSED/),
+    });
   });
 
   it("short-circuits on a pre-flight SessionExpiredError before connecting to the socket", async () => {
