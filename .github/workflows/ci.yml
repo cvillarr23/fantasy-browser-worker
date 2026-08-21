@@ -50,3 +50,38 @@ jobs:
           tags: |
             ghcr.io/cvillarr23/fantasy-browser-worker:latest
             ghcr.io/cvillarr23/fantasy-browser-worker:${{ github.sha }}
+
+      # ArgoCD (fantasy-infra Application, automated+selfHeal) only syncs on a real git diff -
+      # deployment/cronjob/scaledjob manifests pinning :latest means a plain image push produces
+      # zero diff, so nothing actually redeploys. Bumping the tag to this commit's SHA here gives
+      # ArgoCD something to sync. Covers every fantasy-infra reference to this image, including
+      # BROWSER_WORKER_IMAGE in base/core-pipeline/fastapi-deployment.yaml (the practice-draft
+      # sync Job fantasy-core-pipeline launches at runtime), not just this repo's own
+      # keda-scaledjob.yaml/espn-session-healthcheck-cronjob.yaml. INFRA_DEPLOY_KEY is a
+      # write-enabled deploy key on fantasy-infra only - scoped to that one repo.
+      - name: Set up deploy key for fantasy-infra
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.INFRA_DEPLOY_KEY }}
+
+      - name: Bump fantasy-browser-worker image tag in fantasy-infra
+        env:
+          GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
+        run: |
+          git clone git@github.com:cvillarr23/fantasy-infra.git fantasy-infra
+          cd fantasy-infra
+          grep -rl "ghcr.io/cvillarr23/fantasy-browser-worker:" --include="*.yaml" . \
+            | xargs sed -i "s|ghcr.io/cvillarr23/fantasy-browser-worker:[A-Za-z0-9_.-]*|ghcr.io/cvillarr23/fantasy-browser-worker:${GITHUB_SHA}|g"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No image-tag change to commit"
+            exit 0
+          fi
+          git commit -am "Deploy fantasy-browser-worker@${GITHUB_SHA:0:7}"
+          for attempt in 1 2 3 4 5; do
+            git push && exit 0
+            git fetch origin main
+            git rebase origin/main
+          done
+          exit 1
