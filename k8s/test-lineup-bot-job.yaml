@@ -63,7 +63,10 @@ spec:
             - name: DRY_RUN
               value: "true" # flip to "false" only when you mean to mutate the real lineup
             - name: ESPN_LEAGUE_ID
-              value: "1248158344"
+              valueFrom:
+                configMapKeyRef:
+                  name: fantasy-league-config
+                  key: ESPN_LEAGUE_ID
             - name: CURRENT_YEAR
               value: "2026"
             # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
