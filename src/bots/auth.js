@@ -1,3 +1,4 @@
+const fs = require("fs");
 const { chromium } = require("playwright");
 const { execFileSync } = require("child_process");
 const { logger } = require("../telemetry/logger");
@@ -76,6 +77,91 @@ function resolveEspnCookies() {
     return { espnS2: process.env.ESPN_S2, swid: process.env.SWID };
   }
   return fetchEspnCookiesFromOpenBao();
+}
+
+/**
+ * Full Playwright `storageState()` (cookies AND localStorage) from a real interactive login,
+ * saved by WORKER-11's `remote_login.js` — distinct from the plain espn_s2/swid fields above.
+ * This is what actually satisfies the Disney/MyDisney identity SDK gate the *rendered* draft room
+ * page imposes on top of cookie auth (see draft_room_dom.js's header for the full story); bare
+ * cookie injection never establishes that session.
+ */
+function fetchStoredSessionStateFromOpenBao() {
+  const secretPath =
+    process.env.OPENBAO_ESPN_SESSION_STATE_PATH ||
+    "secret/fantasy/espn-session-state";
+  logger.info(
+    `[Auth Engine] Checking OpenBao for a saved full session state at "${secretPath}"...`,
+  );
+
+  let raw;
+  try {
+    raw = execFileSync("bao", ["kv", "get", "-format=json", secretPath], {
+      encoding: "utf8",
+    });
+  } catch (err) {
+    logger.info(
+      `[Auth Engine] No stored session state at "${secretPath}" (${err.message}) — falling back to cookie injection.`,
+    );
+    return null;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    logger.error(
+      `[Auth Engine] Could not parse OpenBao response: ${err.message}`,
+      { err },
+    );
+    return null;
+  }
+
+  // KV v2 nests the secret under data.data; KV v1 puts it directly under data.
+  const fields = parsed?.data?.data ?? parsed?.data;
+  if (!fields?.state) {
+    logger.error(
+      `[Auth Engine] OpenBao secret at "${secretPath}" is missing the "state" field.`,
+    );
+    return null;
+  }
+
+  try {
+    return JSON.parse(fields.state);
+  } catch (err) {
+    logger.error(
+      `[Auth Engine] Stored session state at "${secretPath}" is not valid JSON: ${err.message}`,
+      { err },
+    );
+    return null;
+  }
+}
+
+/**
+ * Env/file input takes priority (production: an ExternalSecret-mounted file, same delivery model
+ * as ESPN_S2/SWID's secretKeyRef env vars above, just a file instead of a plain env var since this
+ * blob is a full JSON storageState rather than a couple of short strings). The direct `bao` CLI
+ * read (fetchStoredSessionStateFromOpenBao) is a LOCAL-DEV-ONLY fallback — it shells out to
+ * whatever `bao` CLI session is already authenticated via scripts/openbao-connect.sh, exactly like
+ * fetchEspnCookiesFromOpenBao's doc comment already describes for the plain cookie fields. No
+ * running Job authenticates to OpenBao for a *read* here (only remote_login.js writes, via its own
+ * Kubernetes-auth login) — production consumers of this stored state must go through
+ * ESPN_SESSION_STATE_FILE instead.
+ */
+function fetchStoredSessionState() {
+  const statePath = process.env.ESPN_SESSION_STATE_FILE;
+  if (statePath) {
+    try {
+      return JSON.parse(fs.readFileSync(statePath, "utf8"));
+    } catch (err) {
+      logger.error(
+        `[Auth Engine] Could not read/parse ESPN_SESSION_STATE_FILE at "${statePath}": ${err.message}`,
+        { err },
+      );
+      return null;
+    }
+  }
+  return fetchStoredSessionStateFromOpenBao();
 }
 
 /**
@@ -185,7 +271,62 @@ async function createAuthenticatedSession({ headless = true } = {}) {
   }
 }
 
+/**
+ * Prefers a real interactive-login session (full storageState, satisfies the Disney/MyDisney SDK
+ * gate) over the bare cookie injection createAuthenticatedSession does above. Returns null — not a
+ * throw — when no stored state exists in OpenBao, so callers can cleanly fall through to
+ * createAuthenticatedSession() instead; leaves that function itself untouched, so WORKER-06's
+ * cookie-only WS submission path is unaffected either way.
+ */
+async function createSessionFromStoredState({ headless = true } = {}) {
+  const storageState = fetchStoredSessionState();
+  if (!storageState) {
+    return null;
+  }
+
+  logger.info(
+    "[Auth Engine] Spawning Chromium sandbox from a saved full session state...",
+  );
+
+  const debugPort = process.env.CDP_DEBUG_PORT;
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+  ];
+  if (debugPort) {
+    launchArgs.push(
+      `--remote-debugging-port=${debugPort}`,
+      "--remote-debugging-address=0.0.0.0",
+    );
+  }
+
+  const browser = await chromium.launch({ headless, args: launchArgs });
+  try {
+    const context = await browser.newContext({
+      storageState,
+      viewport: { width: 1280, height: 720 },
+      userAgent: pickUserAgent(),
+    });
+    const page = await context.newPage();
+
+    // Callers (e.g. draft_room_dom.js's buildDraftUrl) expect `swid` back the same way
+    // createAuthenticatedSession() provides it, even though it came from the stored state's
+    // cookies rather than ESPN_S2/SWID env/OpenBao fields.
+    const cookies = await context.cookies();
+    const swid = cookies.find((c) => c.name === "SWID")?.value;
+
+    return { browser, context, page, swid };
+  } catch (setupError) {
+    await browser.close().catch(() => {});
+    throw setupError;
+  }
+}
+
 module.exports = {
   createAuthenticatedSession,
+  createSessionFromStoredState,
   resolveEspnCookies,
 };
