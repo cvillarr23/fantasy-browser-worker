@@ -74,9 +74,9 @@ spec:
               name: novnc-web
           env:
             - name: ESPN_LEAGUE_ID
-              value: "REPLACE_ME"
+              value: "1248158344"
             - name: ESPN_TEAM_ID
-              value: "REPLACE_ME"
+              value: "8"
             - name: OPENBAO_ESPN_SESSION_STATE_PATH
               value: "secret/fantasy/espn-session-state"
             - name: OPENBAO_K8S_ROLE
