@@ -220,20 +220,35 @@ actually driving it, just over the network.
   (the heading, an unrelated table caption, and the button); `getByRole("button", { name:
   /practice draft/i })` matches exactly 1 (the button). `mock_draft.js` now tries role=button
   first for this reason.
-- **Headless auto-join is still blocked even with the correct button** (confirmed live
-  2026-08-21) — this supersedes the earlier 2026-08-10 finding that attributed the block to a
-  DisneyID/reCAPTCHA identity-verification flow; that doesn't reproduce with a real stored
-  session. What actually happens: clicking the correct "Practice Draft" button in headless
-  Chromium logs `requestStorageAccess: Permission denied.` in the console, immediately followed
-  by client-side React crashes (`Cannot read properties of undefined (reading 'currentSeason')` /
-  `'pageName'`) — the SPA's draft-room-entry route depends on the Storage Access API succeeding
-  (likely for a cross-origin/partitioned context the draft board or autodraft engine needs), and
-  headless Chromium denies that grant, crashing the route before it renders. The page stays on the
-  lobby URL indefinitely; no error is thrown until `activePagePromise`'s own 150s timeout.
-  `--disable-features=StorageAccessAPI,PrivacySandboxSettings4` was tried and made no difference.
-  Not a selector problem — no amount of retry/selector hardening in `mock_draft.js` fixes this.
-  Next things worth trying: CDP-level `Browser.grantPermissions` (Playwright's own
-  `context.grantPermissions()` doesn't cover this API), or a stored session that already carries
-  whatever cross-origin storage state the draft-room route is trying to reach. Until one of those
-  works, headless auto-join isn't achievable — `DRAFT_ROOM_URL` (a human joins a room once,
-  headless only resumes/observes it) remains the working path.
+- **Headless auto-join is still blocked even with the correct button — traced to the same
+  reCAPTCHA Enterprise gate already confirmed for login** (confirmed live 2026-08-21; refines
+  rather than supersedes the 2026-08-10 finding — same root cause, discovered here via a different
+  symptom first). Full chain, traced step by step against a real practice draft:
+  1. The lobby always embeds an invisible reCAPTCHA Enterprise iframe
+     (`www.google.com/recaptcha/enterprise/anchor?...&size=invisible`) alongside the DisneyID
+     identity iframe, present on page load — not something the click triggers.
+  2. With no permission grant, clicking the correct "Practice Draft" button makes that reCAPTCHA
+     iframe call `document.requestStorageAccess()` (confirmed via an injected wrapper logging the
+     calling origin: `https://www.google.com`), which headless Chromium denies
+     (`requestStorageAccess: Permission denied.`). The surrounding page's own React app doesn't
+     handle that rejection and crashes (`Cannot read properties of undefined (reading
+     'currentSeason')` / `'pageName'`).
+  3. Granting it via CDP fixes step 2's crash: `Browser.setPermission({ permission: { name:
+     "storage-access" }, setting: "granted", origin: "https://www.google.com", embeddingOrigin:
+     "https://fantasy.espn.com" })` — note the permission name is kebab-case `"storage-access"`,
+     not `"storageAccess"` (the latter is rejected as an invalid `PermissionDescriptor`).
+     Playwright's own `context.grantPermissions()` doesn't cover this API; a raw CDP session
+     (`context.newCDPSession(page)`) is needed.
+  4. Even with that grant in place (no more crash, no more denial logged), the click still never
+     navigates — silently, even after a 25s wait, with `navigator.webdriver` already `false`
+     (confirming the `--disable-blink-features=AutomationControlled` launch flag works as
+     intended). A completely silent no-op with no error and no crash is the documented signature
+     of invisible reCAPTCHA Enterprise: it scores the session as automated via deeper
+     behavioral/fingerprint signals than `navigator.webdriver` and simply never completes its
+     challenge or releases whatever callback would trigger navigation.
+
+  Not a selector problem, not fixable by granting more permissions or Chromium flags — reCAPTCHA
+  Enterprise is specifically designed to resist exactly this kind of workaround, and it's the same
+  mechanism already confirmed blocking automated login (see above). `DRAFT_ROOM_URL` (a human
+  joins a room once, headless only resumes/observes it) remains the working path; don't spend more
+  time trying to defeat the reCAPTCHA gate itself.
