@@ -59,7 +59,7 @@ spec:
               name: cdp-debug
           env:
             - name: DRAFT_ROOM_URL
-              value: "https://fantasy.espn.com/football/draft?leagueId=REPLACE_ME&seasonId=2026&teamId=REPLACE_ME&memberId=REPLACE_ME"
+              value: ""
             - name: CDP_DEBUG_PORT
               value: "9222"
             - name: REDIS_HOST

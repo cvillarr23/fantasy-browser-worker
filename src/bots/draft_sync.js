@@ -132,6 +132,22 @@ async function fetchDraftDetail(context, state) {
     buildDraftDetailUrl(state.leagueId, state.seasonId),
   );
   if (!response.ok()) {
+    try {
+      const body = await response.json();
+      if (body?.type === "LEAGUE_NOT_FOUND_DELETED") {
+        throw new Error(
+          `Draft room league ${state.leagueId} no longer exists (LEAGUE_NOT_FOUND_DELETED). ` +
+            "Set DRAFT_ROOM_URL to a newly joined active mock draft room URL and retry.",
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message.includes("LEAGUE_NOT_FOUND_DELETED")
+      ) {
+        throw error;
+      }
+    }
     throw new Error(`mDraftDetail fetch failed: HTTP ${response.status()}`);
   }
   const body = await response.json();
@@ -254,6 +270,11 @@ async function enterDraftRoom(session) {
     const leagueId = process.env.ESPN_LEAGUE_ID;
     const seasonId = process.env.CURRENT_YEAR || "2026";
     const teamId = process.env.ESPN_TEAM_ID;
+    if (!leagueId || !teamId) {
+      throw new Error(
+        "DRAFT_ROOM_URL is not set. For manual draft_sync test runs, set DRAFT_ROOM_URL to an active ESPN mock draft room URL.",
+      );
+    }
     const draftUrl = buildDraftUrl(leagueId, seasonId, teamId, session.swid);
     logger.info(`[Draft Sync] Navigating to live draft room: ${draftUrl}`);
     await session.page.goto(draftUrl, { waitUntil: "load", timeout: 60000 });
