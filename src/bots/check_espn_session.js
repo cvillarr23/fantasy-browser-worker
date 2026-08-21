@@ -1,5 +1,5 @@
 const { createAuthenticatedSession } = require("./auth");
-const selectors = require("../selectors/espn_selectors.json");
+const { assertRenderedSessionValid } = require("./session_health");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -25,37 +25,14 @@ async function checkEspnSession() {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const teamId = process.env.ESPN_TEAM_ID;
   const seasonId = process.env.CURRENT_YEAR || "2026";
-  const targetUrl = `https://fantasy.espn.com/football/team?leagueId=${leagueId}&teamId=${teamId}&seasonId=${seasonId}`;
 
   let session = null;
   try {
     session = await createAuthenticatedSession();
-    await session.page.goto(targetUrl, {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
-
-    const finalUrl = session.page.url();
-    if (/\/login\b/i.test(finalUrl)) {
-      throw new Error(
-        `[ESPN Auth Failure] Redirected to a login page (${finalUrl}) — stored espn_s2/SWID ` +
-          "cookies are no longer valid. Re-extract them from a logged-in browser and update " +
-          "OpenBao: bao kv put secret/fantasy/espn espn_s2=<new> swid=<new>",
-      );
-    }
-
-    await session.page
-      .waitForSelector(selectors.roster_table, { timeout: 10000 })
-      .catch(() => {
-        throw new Error(
-          `[ESPN Auth Failure] Landed on ${finalUrl} but the roster table never rendered — ` +
-            "either the session is invalid in a way that didn't trigger a login redirect, or " +
-            "ESPN changed the page layout. Check auth_failure_diagnostics.png.",
-        );
-      });
+    await assertRenderedSessionValid(session.page, { leagueId, teamId, seasonId });
 
     logger.info(
-      `[Session Check] ESPN session is healthy — roster table rendered for ${targetUrl}`,
+      `[Session Check] ESPN session is healthy — roster table rendered for league ${leagueId}, team ${teamId}.`,
     );
   } catch (error) {
     logger.error(error.message, { err: error });

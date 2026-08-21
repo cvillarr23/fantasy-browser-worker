@@ -264,7 +264,7 @@ async function createAuthenticatedSession({ headless = true } = {}) {
       },
     );
 
-    return { browser, context, page, swid };
+    return { browser, context, page, swid, headless };
   } catch (setupError) {
     await browser.close().catch(() => {}); // Never let a close failure mask the real error.
     throw setupError;
@@ -318,7 +318,7 @@ async function createSessionFromStoredState({ headless = true } = {}) {
     const cookies = await context.cookies();
     const swid = cookies.find((c) => c.name === "SWID")?.value;
 
-    return { browser, context, page, swid };
+    return { browser, context, page, swid, headless };
   } catch (setupError) {
     await browser.close().catch(() => {});
     throw setupError;

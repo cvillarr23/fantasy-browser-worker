@@ -2,11 +2,14 @@ jest.mock("../../src/bots/auth");
 jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/draft_room_socket");
 jest.mock("../../src/bots/draft_room_dom");
+jest.mock("../../src/bots/session_health");
 
 const { createAuthenticatedSession, resolveEspnCookies } = require("../../src/bots/auth");
 const { readDraftPicks } = require("../../src/bots/espn_api");
 const { connectToDraftRoom } = require("../../src/bots/draft_room_socket");
 const { clickPickViaDom } = require("../../src/bots/draft_room_dom");
+const { assertCookieSessionValid } = require("../../src/bots/session_health");
+const { SessionExpiredError } = require("../../src/errors");
 const { executeAutomatedDraftSelection } = require("../../src/bots/draft_clicker");
 
 const ENV_KEYS = ["DRY_RUN", "ESPN_LEAGUE_ID"];
@@ -46,6 +49,7 @@ beforeEach(() => {
   });
   resolveEspnCookies.mockReturnValue({ espnS2: "s2-value", swid: "{TEST-SWID}" });
   readDraftPicks.mockResolvedValue([]);
+  assertCookieSessionValid.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -191,5 +195,36 @@ describe("executeAutomatedDraftSelection", () => {
     });
     await jest.advanceTimersByTimeAsync(1000);
     await assertion;
+  });
+
+  it("short-circuits on a pre-flight SessionExpiredError before connecting to the socket", async () => {
+    process.env.DRY_RUN = "false";
+    assertCookieSessionValid.mockRejectedValue(
+      new SessionExpiredError("cookies rejected"),
+    );
+
+    const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+    const assertion = expect(runPromise).rejects.toMatchObject({
+      name: "SessionExpiredError",
+      message: /cookies rejected/,
+    });
+    await jest.advanceTimersByTimeAsync(1000);
+    await assertion;
+
+    expect(connectToDraftRoom).not.toHaveBeenCalled();
+  });
+
+  it("does not attempt the DOM fallback on a pre-flight SessionExpiredError", async () => {
+    process.env.DRY_RUN = "false";
+    assertCookieSessionValid.mockRejectedValue(
+      new SessionExpiredError("cookies rejected"),
+    );
+
+    const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+    const assertion = expect(runPromise).rejects.toBeInstanceOf(SessionExpiredError);
+    await jest.advanceTimersByTimeAsync(1000);
+    await assertion;
+
+    expect(clickPickViaDom).not.toHaveBeenCalled();
   });
 });

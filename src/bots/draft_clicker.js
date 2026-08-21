@@ -4,7 +4,8 @@ const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
 const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
-const { PermanentError } = require("../errors");
+const { assertCookieSessionValid } = require("./session_health");
+const { PermanentError, SessionExpiredError } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -243,6 +244,11 @@ async function executeAutomatedDraftSelection(payload) {
     log("Connecting to draft room socket to submit pick...");
     await jitter(100, 400);
     const cookies = resolveEspnCookies();
+
+    // Pre-flight: a WS connect failure or unconfirmed pick from a stale cookie session is
+    // otherwise indistinguishable from a real transient network blip. Checking first makes the
+    // failure self-diagnosing and lets the catch below skip the doomed DOM fallback (see there).
+    await assertCookieSessionValid(session.context, { leagueId, seasonId });
 
     try {
       const socket = await connectToDraftRoom({

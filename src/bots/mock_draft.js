@@ -4,14 +4,59 @@ const MOCK_LOBBY_URL = "https://fantasy.espn.com/football/mockdraftlobby";
 const PRACTICE_DRAFT_LINK_TEXT = /practice draft/i;
 const DRAFT_ROOM_URL_PATTERN = /\/football\/draft/i;
 
+// Bounded retry for the auto-click below — WORKER-17: a headless run has no human to fall back
+// on, so it needs a real recovery strategy (try a couple of selector shapes, a couple of times)
+// rather than a single attempt followed by a long unattended wait that can only ever pay off with
+// a person watching.
+const LOBBY_CLICK_ATTEMPTS = 3;
+const LOBBY_CLICK_RETRY_DELAY_MS = 2000;
+const LOBBY_CLICK_ATTEMPT_TIMEOUT_MS = 5000;
+
+/** Thrown when the headless auto-click exhausts every attempt/strategy with no human to fall back on. */
+class HeadlessLobbyJoinError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HeadlessLobbyJoinError";
+  }
+}
+
+/**
+ * One click attempt against a single locator, bounded to a short per-attempt timeout (short
+ * because this runs inside a retry loop — no point waiting long on a locator that isn't there).
+ * Returns true on success, false on any failure (never throws) so the caller can just try the
+ * next strategy/attempt.
+ */
+async function tryClick(locator, logger, label) {
+  try {
+    await locator.waitFor({ timeout: LOBBY_CLICK_ATTEMPT_TIMEOUT_MS });
+    await locator.click();
+    return true;
+  } catch (err) {
+    logger.warn(`[MockDraft] "${label}" click attempt failed: ${err.message}`);
+    return false;
+  }
+}
+
 /**
  * Navigates to the mock draft lobby and starts a brand-new practice draft, since practice draft
- * rooms are ephemeral and there's nothing durable to link to ahead of time. Falls back to letting
- * a human click it if the auto-click selector doesn't match ESPN's current lobby markup — only
- * useful when `page` is on a visible/headed browser, so headless test runs should treat that
- * timeout as a real failure rather than something a person will resolve.
- */
-/**
+ * rooms are ephemeral and there's nothing durable to link to ahead of time.
+ *
+ * Retries the "Practice Draft" auto-click a few times across two selector strategies (text, then
+ * a role-based fallback — the latter is untested defense-in-depth against a markup change, not a
+ * confirmed second selector) before giving up. What happens after that split on `headless`:
+ * headless has no human to fall back on, so it throws `HeadlessLobbyJoinError` immediately rather
+ * than idling out the full activePagePromise wait below, which can only ever succeed with someone
+ * present to click manually. Headed keeps today's behavior — log and let a person click it.
+ *
+ * WORKER-17 LIVE-RUN RISK, check this first if the headless auto-click above keeps failing:
+ * draft_sync.js's DRAFT_ROOM_URL doc comment records an earlier, more specific finding
+ * (2026-08-10, live-debugged) that ESPN's "League Specific Practice Draft" button — possibly a
+ * different element than the generic "Practice Draft" text this file targets, possibly the same
+ * one under an inconsistent description — triggers a DisneyID identity-verification flow gated by
+ * the same reCAPTCHA Enterprise that blocks automated login. If so, no amount of retry/selector
+ * hardening here fixes it; confirm live whether that gate still appears before assuming this
+ * file's retry loop is sufficient for a fully headless join.
+ *
  * Returns `{ url, page }` — NOT just a URL string (changed 2026-08-17). ESPN sometimes opens the
  * actual draft room in a brand-new tab/window rather than navigating the current page in place
  * (confirmed via draft_recon.js diagnostics: a new page appeared carrying the draft URL while the
@@ -20,7 +65,7 @@ const DRAFT_ROOM_URL_PATTERN = /\/football\/draft/i;
  * session). Callers MUST use the returned `page`, not whatever page they originally passed in —
  * it may be a different object.
  */
-async function startFreshPracticeDraft(page, logger = console) {
+async function startFreshPracticeDraft(page, logger = console, { headless = false } = {}) {
   logger.log("[MockDraft] Navigating to mock draft lobby to start a fresh practice draft...");
   await page.goto(MOCK_LOBBY_URL, { waitUntil: "load", timeout: 60000 });
 
@@ -41,15 +86,36 @@ async function startFreshPracticeDraft(page, logger = console) {
     }),
   ]);
 
-  try {
-    const practiceLink = page.getByText(PRACTICE_DRAFT_LINK_TEXT).first();
-    await practiceLink.waitFor({ timeout: 15000 });
-    await practiceLink.click();
-  } catch (err) {
+  let clicked = false;
+  for (let attempt = 1; attempt <= LOBBY_CLICK_ATTEMPTS && !clicked; attempt += 1) {
+    if (attempt > 1) {
+      await page.waitForTimeout(LOBBY_CLICK_RETRY_DELAY_MS);
+    }
+    clicked =
+      (await tryClick(page.getByText(PRACTICE_DRAFT_LINK_TEXT).first(), logger, "text")) ||
+      (await tryClick(
+        page.getByRole("link", { name: PRACTICE_DRAFT_LINK_TEXT }),
+        logger,
+        "role=link",
+      )) ||
+      (await tryClick(
+        page.getByRole("button", { name: PRACTICE_DRAFT_LINK_TEXT }),
+        logger,
+        "role=button",
+      ));
+  }
+
+  if (!clicked) {
+    if (headless) {
+      throw new HeadlessLobbyJoinError(
+        `[MockDraft] Headless auto-click exhausted ${LOBBY_CLICK_ATTEMPTS} attempts across all ` +
+          "selector strategies — no human available to click manually. Aborting practice-draft join.",
+      );
+    }
     logger.warn(
-      `[MockDraft] Couldn't auto-click "Practice Draft" (${err.message}). If this is a headed ` +
-        "session, click it yourself now — waiting up to 2.5 minutes for the draft room to load " +
-        "(either the current tab or a new one)..."
+      `[MockDraft] Couldn't auto-click "Practice Draft" after ${LOBBY_CLICK_ATTEMPTS} attempts. ` +
+        "If this is a headed session, click it yourself now — waiting up to 2.5 minutes for the " +
+        "draft room to load (either the current tab or a new one)...",
     );
   }
 
@@ -73,6 +139,7 @@ module.exports = {
   MOCK_LOBBY_URL,
   PRACTICE_DRAFT_LINK_TEXT,
   DRAFT_ROOM_URL_PATTERN,
+  HeadlessLobbyJoinError,
   startFreshPracticeDraft,
   parseDraftRoomUrl,
 };

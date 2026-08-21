@@ -21,4 +21,20 @@ class PermanentError extends Error {
   }
 }
 
-module.exports = { PermanentError };
+/**
+ * Raised by session_health.js when the stored espn_s2/SWID cookies (or, for the rendered-page
+ * tier, the fuller BAM SDK session) no longer authenticate. Deliberately NOT a PermanentError: a
+ * redelivered pick isn't doomed once the session is refreshed (e.g. OpenBao's secret is updated
+ * with fresh cookies) — this is an infra/config condition, not a payload problem, so it should
+ * requeue-with-backoff like any other transient Error rather than being dropped outright. Kept as
+ * its own class (not a plain Error) so callers can still pattern-match it distinctly — e.g. to
+ * skip a doomed DOM fallback the same way a WS PermanentError already does (see draft_clicker.js).
+ */
+class SessionExpiredError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SessionExpiredError";
+  }
+}
+
+module.exports = { PermanentError, SessionExpiredError };
