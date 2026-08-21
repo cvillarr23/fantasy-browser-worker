@@ -7,6 +7,7 @@ const { clickPickViaDom } = require("./draft_room_dom");
 const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
+const { recordDraftPickClick } = require("../db/execution_log");
 
 /**
  * 1-Click Automated Draft Execution Bot (WORKER-06)
@@ -37,6 +38,11 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *   - idempotency  — a player already drafted by our own team is treated as already satisfied.
  *   - conflict     — a player drafted by someone else is a PermanentError (retrying can't help).
  *   - failure capture — dump payload + last-known draft board to DEBUG_OUTPUT_DIR before rethrowing.
+ *
+ * Every real submission attempt (WS success, DOM fallback success, or a failure after either)
+ * writes a `draft_pick_click` row to execution_log via recordDraftPickClick (#43) - a dry-run or
+ * already-drafted no-op writes nothing, since neither is a real click. fantasy-core-pipeline's
+ * `/v1/draft/status` reads the most recent row per league back into `last_clicker_action`.
  */
 
 const DEBUG_DIR =
@@ -272,6 +278,13 @@ async function executeAutomatedDraftSelection(payload) {
         log(
           `SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`,
         );
+        await recordDraftPickClick({
+          leagueId,
+          playerId,
+          playerName: targetName,
+          pickNumber: result.round,
+          status: "success",
+        });
       } finally {
         socket.close();
       }
@@ -305,6 +318,12 @@ async function executeAutomatedDraftSelection(payload) {
         log(
           `SUCCESS (DOM fallback): pick submitted and confirmed for ${targetName}.`,
         );
+        await recordDraftPickClick({
+          leagueId,
+          playerId,
+          playerName: targetName,
+          status: "success",
+        });
       } catch (domError) {
         log(`DOM fallback also failed: ${domError.message}`);
         throw wsError;
@@ -326,6 +345,13 @@ async function executeAutomatedDraftSelection(payload) {
       permanent: error.permanent === true,
       draft_board: picks,
       err: error,
+    });
+    await recordDraftPickClick({
+      leagueId,
+      playerId,
+      playerName: targetName,
+      status: "failure",
+      errorMessage: error.message,
     });
     throw error;
   } finally {

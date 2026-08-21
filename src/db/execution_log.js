@@ -49,4 +49,39 @@ async function recordExecution({
   }
 }
 
-module.exports = { recordExecution };
+// Per-pick confirmation for the draft-day clicker (WORKER-06/#43) - a dedicated write rather
+// than routing through recordExecution/withInstrumentation, since that wrapper only ever knows
+// "the draft_targets message succeeded or failed" as a whole, not which player/league it was
+// for. fantasy-core-pipeline's `/v1/draft/status` reads the most recent row per league_id back
+// into `last_clicker_action`. Same best-effort, never-throw contract as recordExecution.
+async function recordDraftPickClick({
+  leagueId,
+  playerId,
+  playerName,
+  pickNumber,
+  status,
+  errorMessage,
+}) {
+  try {
+    await pool.query(
+      `INSERT INTO execution_log (transaction_type, bot_name, status, error_message, league_id, player_id, player_name, pick_number)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        "draft_pick_click",
+        "draft_clicker",
+        status,
+        errorMessage || null,
+        leagueId || null,
+        playerId || null,
+        playerName || null,
+        pickNumber || null,
+      ],
+    );
+  } catch (err) {
+    logger.error("[Execution Log] Failed to record draft pick click outcome", {
+      err,
+    });
+  }
+}
+
+module.exports = { recordExecution, recordDraftPickClick };
