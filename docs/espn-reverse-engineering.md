@@ -210,3 +210,30 @@ actually driving it, just over the network.
   `draft_recon.js`.
 - A player added to the *queue* (`DRAFT_LIST` frame, "Queue" button) is easy to mistake for an
   actual pick — it isn't one. Only `SELECT`/`SELECTED` are real picks.
+- **Selector trap** (confirmed live 2026-08-21, stored session, headless): the lobby's "League
+  Specific Practice Draft" *section heading* is a plain `<div>` whose text also matches
+  `/practice draft/i` — a `getByText(/practice draft/i).first()` locator grabs that heading
+  instead of the actual `<button>Practice Draft</button>` a few nodes later. The click on the
+  heading doesn't error (a heading is a valid click target), it just does nothing — no
+  navigation, no visible failure, just a silent no-op that looks identical to "the click never
+  landed." Direct DOM query confirmed the fix: `getByText(/practice draft/i)` matches 3 elements
+  (the heading, an unrelated table caption, and the button); `getByRole("button", { name:
+  /practice draft/i })` matches exactly 1 (the button). `mock_draft.js` now tries role=button
+  first for this reason.
+- **Headless auto-join is still blocked even with the correct button** (confirmed live
+  2026-08-21) — this supersedes the earlier 2026-08-10 finding that attributed the block to a
+  DisneyID/reCAPTCHA identity-verification flow; that doesn't reproduce with a real stored
+  session. What actually happens: clicking the correct "Practice Draft" button in headless
+  Chromium logs `requestStorageAccess: Permission denied.` in the console, immediately followed
+  by client-side React crashes (`Cannot read properties of undefined (reading 'currentSeason')` /
+  `'pageName'`) — the SPA's draft-room-entry route depends on the Storage Access API succeeding
+  (likely for a cross-origin/partitioned context the draft board or autodraft engine needs), and
+  headless Chromium denies that grant, crashing the route before it renders. The page stays on the
+  lobby URL indefinitely; no error is thrown until `activePagePromise`'s own 150s timeout.
+  `--disable-features=StorageAccessAPI,PrivacySandboxSettings4` was tried and made no difference.
+  Not a selector problem — no amount of retry/selector hardening in `mock_draft.js` fixes this.
+  Next things worth trying: CDP-level `Browser.grantPermissions` (Playwright's own
+  `context.grantPermissions()` doesn't cover this API), or a stored session that already carries
+  whatever cross-origin storage state the draft-room route is trying to reach. Until one of those
+  works, headless auto-join isn't achievable — `DRAFT_ROOM_URL` (a human joins a room once,
+  headless only resumes/observes it) remains the working path.

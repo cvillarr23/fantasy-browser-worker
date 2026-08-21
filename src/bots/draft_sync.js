@@ -46,15 +46,17 @@ const REST_RECONCILE_INTERVAL_MS = 15000;
  *
  * DRAFT_ROOM_URL (for local/k8s test runs only — never set this against the real draft): navigates
  * directly to a specific, already-open draft room URL instead of building one or joining fresh.
- * Needed because DRAFT_MODE=mock's auto-join doesn't work headlessly — ESPN's mock lobby has no
- * anonymous "instant start": the "League Specific Practice Draft" button (the closest thing to
- * one) triggers a DisneyID identity-verification flow gated by the same invisible reCAPTCHA
- * Enterprise that blocks automated login, confirmed via live debugging on 2026-08-10. So for
- * testing, join/create a mock draft yourself in a real browser and pass its URL here. Takes
- * priority over DRAFT_MODE=mock if both are set.
+ * Needed because DRAFT_MODE=mock's auto-join doesn't work headlessly. The original 2026-08-10
+ * finding here (a DisneyID/reCAPTCHA identity-verification gate) turned out to describe a
+ * different failure mode than what's actually reproducible — see mock_draft.js's
+ * startFreshPracticeDraft header for the current (2026-08-21) finding: clicking the correct
+ * "Practice Draft" button doesn't hit reCAPTCHA, it hits a Storage Access API permission denial
+ * that crashes the SPA's draft-room route before it renders, headless-only. Either way the
+ * practical upshot is the same — join a mock draft yourself in a real browser and pass its URL
+ * here. Takes priority over DRAFT_MODE=mock if both are set.
  *
- * DRAFT_MODE=mock is left in place (mock_draft.js) in case a future recon finds an unrestricted
- * join path (e.g. one of the pre-scheduled public room links, untested), but don't rely on it now.
+ * DRAFT_MODE=mock is left in place (mock_draft.js) in case a future fix (granting storage access
+ * some other way — see mock_draft.js) unblocks headless auto-join, but don't rely on it now.
  */
 function buildDraftUrl(leagueId, seasonId, teamId, memberId) {
   return `https://fantasy.espn.com/football/draft?leagueId=${leagueId}&seasonId=${seasonId}&teamId=${teamId}&memberId=${memberId}`;

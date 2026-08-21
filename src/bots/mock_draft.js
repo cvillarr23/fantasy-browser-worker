@@ -44,21 +44,38 @@ async function tryClick(locator, logger, label) {
  * Navigates to the mock draft lobby and starts a brand-new practice draft, since practice draft
  * rooms are ephemeral and there's nothing durable to link to ahead of time.
  *
- * Retries the "Practice Draft" auto-click a few times across two selector strategies (text, then
- * a role-based fallback — the latter is untested defense-in-depth against a markup change, not a
- * confirmed second selector) before giving up. What happens after that split on `headless`:
- * headless has no human to fall back on, so it throws `HeadlessLobbyJoinError` immediately rather
- * than idling out the full activePagePromise wait below, which can only ever succeed with someone
- * present to click manually. Headed keeps today's behavior — log and let a person click it.
+ * Retries the "Practice Draft" auto-click a few times across selector strategies (role=button
+ * first — see below for why — then role=link, then plain text as a last resort) before giving up.
+ * What happens after that split on `headless`: headless has no human to fall back on, so it throws
+ * `HeadlessLobbyJoinError` immediately rather than idling out the full activePagePromise wait
+ * below, which can only ever succeed with someone present to click manually. Headed keeps today's
+ * behavior — log and let a person click it.
  *
- * WORKER-17 LIVE-RUN RISK, check this first if the headless auto-click above keeps failing:
- * draft_sync.js's DRAFT_ROOM_URL doc comment records an earlier, more specific finding
- * (2026-08-10, live-debugged) that ESPN's "League Specific Practice Draft" button — possibly a
- * different element than the generic "Practice Draft" text this file targets, possibly the same
- * one under an inconsistent description — triggers a DisneyID identity-verification flow gated by
- * the same reCAPTCHA Enterprise that blocks automated login. If so, no amount of retry/selector
- * hardening here fixes it; confirm live whether that gate still appears before assuming this
- * file's retry loop is sufficient for a fully headless join.
+ * role=button tried FIRST, confirmed live against a real practice-draft lobby (2026-08-21, stored
+ * session, headless): the lobby's "League Specific Practice Draft" section heading is a plain
+ * `<div>` that ALSO matches /practice draft/i — `getByText(...).first()` grabs that heading over
+ * the actual `<button>Practice Draft</button>` a few nodes later. The click "succeeds" (a heading
+ * is a valid click target, so no error is thrown) but navigates nowhere, which is exactly the
+ * mystery 150s activePagePromise timeout this ordering fixes. Confirmed via a direct DOM query:
+ * `getByText(/practice draft/i)` had 3 matches (the heading, a table caption, and the button);
+ * `getByRole("button", { name: /practice draft/i })` had exactly 1 (the button).
+ *
+ * WORKER-17 LIVE-RUN FINDING (2026-08-21, supersedes the earlier reCAPTCHA/DisneyID guess in
+ * draft_sync.js's DRAFT_ROOM_URL doc comment — that finding is from 2026-08-10 and describes a
+ * different failure mode than what's actually reproducible now): clicking the correct button
+ * (role=button, confirmed above) still does NOT navigate to a draft room in headless mode. The
+ * browser console shows `requestStorageAccess: Permission denied.` immediately after the click,
+ * followed by client-side React crashes (`Cannot read properties of undefined (reading
+ * 'currentSeason')` / `'pageName'`) — the SPA's draft-room-entry flow depends on the Storage
+ * Access API succeeding (likely for a cross-origin/partitioned context the draft board or
+ * autodraft engine needs) and headless Chromium denies it, crashing the route before it renders.
+ * Tried `--disable-features=StorageAccessAPI,PrivacySandboxSettings4` — no change, still denied.
+ * This is NOT a selector problem and the retry loop here cannot fix it: whoever picks this back up
+ * needs to find a way to grant/simulate storage access in headless Chromium (Playwright's
+ * `grantPermissions` doesn't cover this API; CDP-level `Browser.grantPermissions` or a stored
+ * cross-origin storageState addressing whatever origin the request targets are the next things to
+ * try), or accept that headless auto-join isn't currently achievable and keep relying on
+ * DRAFT_ROOM_URL (a human joins a room once, headless only ever resumes/observes it).
  *
  * Returns `{ url, page }` — NOT just a URL string (changed 2026-08-17). ESPN sometimes opens the
  * actual draft room in a brand-new tab/window rather than navigating the current page in place
@@ -101,18 +118,24 @@ async function startFreshPracticeDraft(page, logger = console, { headless = fals
     if (attempt > 1) {
       await page.waitForTimeout(LOBBY_CLICK_RETRY_DELAY_MS);
     }
+    // role=button tried FIRST and confirmed live 2026-08-21: the lobby's "League Specific
+    // Practice Draft" section heading (a plain <div>) ALSO matches /practice draft/i, and
+    // getByText's .first() grabs that heading over the actual <button>Practice Draft</button> a
+    // few nodes later — the click "succeeds" (a heading is a valid click target) but navigates
+    // nowhere, which is exactly the mystery 150s activePagePromise timeout this ordering fixes.
+    // getByText/role=link stay only as fallbacks for a markup change that removes the button.
     clicked =
-      (await tryClick(page.getByText(PRACTICE_DRAFT_LINK_TEXT).first(), logger, "text")) ||
+      (await tryClick(
+        page.getByRole("button", { name: PRACTICE_DRAFT_LINK_TEXT }),
+        logger,
+        "role=button",
+      )) ||
       (await tryClick(
         page.getByRole("link", { name: PRACTICE_DRAFT_LINK_TEXT }),
         logger,
         "role=link",
       )) ||
-      (await tryClick(
-        page.getByRole("button", { name: PRACTICE_DRAFT_LINK_TEXT }),
-        logger,
-        "role=button",
-      ));
+      (await tryClick(page.getByText(PRACTICE_DRAFT_LINK_TEXT).first(), logger, "text"));
   }
 
   if (!clicked) {
