@@ -154,6 +154,23 @@ async function initializeQueueConsumer(messageProcessorCallback) {
                 return;
               }
 
+              // Duck-typed rather than importing any specific error class here (keeps this queue
+              // layer generic) — an error can opt into a pause before its own redelivery by
+              // setting retryDelayMs (e.g. SessionExpiredError, src/errors.js). Without this, a
+              // plain immediate nack(requeue=true) hot-loops relaunching Chromium against a
+              // credential that isn't coming back on its own, and — since prefetch is channel-wide
+              // — blocks every consumer on this channel until someone intervenes (PR #42 review).
+              if (typeof error?.retryDelayMs === "number" && error.retryDelayMs > 0) {
+                logger.info(
+                  `[Queue Bridge] Delaying ${error.retryDelayMs}ms before re-queuing message ID ` +
+                    `${msg.fields.deliveryTag} (${error.name || "Error"}) — avoids hot-looping ` +
+                    "against a condition that a fixed backoff, not instant redelivery, should wait out.",
+                );
+                await new Promise((resolve) =>
+                  setTimeout(resolve, error.retryDelayMs),
+                );
+              }
+
               // Re-queue message if processing fails due to unexpected transient errors
               logger.info(
                 `[Queue Bridge] Rejecting message ID ${msg.fields.deliveryTag}. Triggering cluster re-queue logic...`,

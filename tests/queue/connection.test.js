@@ -113,6 +113,41 @@ describe("initializeQueueConsumer", () => {
     expect(channel.ack).not.toHaveBeenCalled();
   });
 
+  it("delays before requeuing when the error carries retryDelayMs (e.g. SessionExpiredError)", async () => {
+    jest.useFakeTimers();
+    try {
+      const err = new Error("cookies rejected");
+      err.retryDelayMs = 30000;
+      const processor = jest.fn().mockRejectedValue(err);
+      await initializeQueueConsumer(processor);
+
+      const msg = fakeMsg({ tracking_id: "abc" });
+      channel.consumers.draft_targets(msg);
+      await Promise.resolve(); // let the processor's rejection reach the catch block
+      await Promise.resolve();
+
+      // Not yet requeued -- still waiting out retryDelayMs.
+      expect(channel.nack).not.toHaveBeenCalled();
+
+      await jest.advanceTimersByTimeAsync(30000);
+
+      expect(channel.nack).toHaveBeenCalledWith(msg, false, true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("requeues immediately (no delay) for a transient error with no retryDelayMs", async () => {
+    const processor = jest.fn().mockRejectedValue(new Error("transient blip"));
+    await initializeQueueConsumer(processor);
+
+    const msg = fakeMsg({ tracking_id: "abc" });
+    channel.consumers.draft_targets(msg);
+    await flushMicrotasks();
+
+    expect(channel.nack).toHaveBeenCalledWith(msg, false, true);
+  });
+
   it("discards (does not requeue) a PermanentError processor failure", async () => {
     const processor = jest.fn().mockRejectedValue(new PermanentError("doomed payload"));
     await initializeQueueConsumer(processor);

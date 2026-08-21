@@ -313,7 +313,9 @@ async function runRecon() {
       log.log(`[Recon] Resuming explicit draft room URL: ${explicitUrl}`);
       await activePage.goto(explicitUrl, { waitUntil: "load", timeout: 60000 });
     } else {
-      ({ page: activePage } = await startFreshPracticeDraft(activePage, log));
+      ({ page: activePage } = await startFreshPracticeDraft(activePage, log, {
+        headless: false,
+      }));
     }
 
     try {

@@ -4,6 +4,7 @@ const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
 const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
+const { assertCookieSessionValid } = require("./session_health");
 const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -230,6 +231,12 @@ async function executeAutomatedDraftSelection(payload) {
   let submissionAttempted = false;
   try {
     session = await createAuthenticatedSession();
+
+    // Pre-flight, right after the session exists and before ANY authenticated call — including
+    // the draft-board read below. Checking after readDraftPicks would be too late: a stale-cookie
+    // 401/403 there throws a plain "mDraftDetail fetch failed" error first, so this check would
+    // never run and the failure would stay opaque (PR #42 review).
+    await assertCookieSessionValid(session.context, { leagueId, seasonId });
 
     await jitter(150, 600);
     picks = await readDraftPicks(session.context, { leagueId, seasonId });

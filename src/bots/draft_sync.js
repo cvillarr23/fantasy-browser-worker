@@ -1,5 +1,10 @@
 const { createAuthenticatedSession } = require("./auth");
 const { startFreshPracticeDraft, parseDraftRoomUrl } = require("./mock_draft");
+const {
+  assertCookieSessionValid,
+  assertRenderedSessionValid,
+} = require("./session_health");
+const { SessionExpiredError } = require("../errors");
 const redis = require("redis");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -265,7 +270,9 @@ async function enterDraftRoom(session) {
     logger.info(
       "[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...",
     );
-    ({ page: activePage } = await startFreshPracticeDraft(session.page));
+    ({ page: activePage } = await startFreshPracticeDraft(session.page, console, {
+      headless: session.headless,
+    }));
   } else {
     const leagueId = process.env.ESPN_LEAGUE_ID;
     const seasonId = process.env.CURRENT_YEAR || "2026";
@@ -289,13 +296,39 @@ async function enterDraftRoom(session) {
   return { leagueId, seasonId, teamId, page: activePage };
 }
 
+/**
+ * Pre-flight session check, run once per (re)connect before spending a browser navigation on a
+ * session that's already dead. Uses ESPN_LEAGUE_ID/ESPN_TEAM_ID (the account's home
+ * league/team — the identity being checked, not necessarily the ephemeral practice draft about to
+ * be joined under DRAFT_MODE=mock) the same way check_espn_session.js's scheduled check does.
+ * Only runs when those env vars are actually set — DRAFT_MODE=mock deployments that don't set
+ * them have no leagueId to check against yet, so this step is skipped and staleness is instead
+ * caught by the periodic in-draft check below (state.leagueId exists by then).
+ */
+async function preflightSessionCheck(session) {
+  const leagueId = process.env.ESPN_LEAGUE_ID;
+  const teamId = process.env.ESPN_TEAM_ID;
+  const seasonId = process.env.CURRENT_YEAR || "2026";
+  if (!leagueId || !teamId) return;
+
+  await assertCookieSessionValid(session.context, { leagueId, seasonId });
+  if (process.env.DRAFT_MODE === "mock") {
+    // The lobby-join flow (mock_draft.js) renders a page — confirm the BAM SDK gate is clear
+    // before fighting it with the headless auto-click added for WORKER-17.
+    await assertRenderedSessionValid(session.page, { leagueId, teamId, seasonId });
+  }
+}
+
 async function connectAndStream(redisClient, state) {
   const session = await createAuthenticatedSession();
   let reconcileInterval;
   state.ready = false;
   state.pendingFrames = [];
+  state.sessionExpiredError = null;
 
   try {
+    await preflightSessionCheck(session);
+
     // Attach to the original page immediately, AND register a context-level listener that
     // attaches to any brand-new page/tab the INSTANT it's created (not after enterDraftRoom
     // returns): DRAFT_MODE=mock's lobby-click flow can open the real draft room in a new tab (see
@@ -350,11 +383,41 @@ async function connectAndStream(redisClient, state) {
     }
     state.ready = true;
 
-    reconcileInterval = setInterval(() => {
-      reconcileFromRest(session.context, redisClient, state);
+    reconcileInterval = setInterval(async () => {
+      await reconcileFromRest(session.context, redisClient, state);
+
+      // Piggybacks on this same 15s cadence rather than a separate timer — a mid-draft cookie
+      // expiry is then caught within one reconcile interval instead of only surfacing when a
+      // pick attempt itself fails. Stored on state (not thrown here) since a rejected setInterval
+      // callback can't propagate to the while loop below; that loop checks it every 5s instead.
+      try {
+        await assertCookieSessionValid(session.context, {
+          leagueId: state.leagueId,
+          seasonId: state.seasonId,
+        });
+      } catch (err) {
+        if (err instanceof SessionExpiredError) {
+          logger.error(
+            `[Draft Sync] ESPN session appears to have expired mid-draft: ${err.message}`,
+            { err },
+          );
+          state.sessionExpiredError = err;
+        } else {
+          logger.error(
+            `[Draft Sync] Periodic session check failed: ${err.message}`,
+            { err },
+          );
+        }
+      }
     }, REST_RECONCILE_INTERVAL_MS);
 
     while (!handle.isDead()) {
+      // Retrying REST reconciliation forever against an expired session is pointless the same way
+      // retrying a doomed pick is — throw out to streamLiveDraftRoom's reconnect-with-backoff
+      // rather than spinning here until the outer WS_DEAD_GRACE_MS watchdog eventually notices.
+      if (state.sessionExpiredError) {
+        throw state.sessionExpiredError;
+      }
       await session.page.waitForTimeout(5000);
     }
     logger.warn(

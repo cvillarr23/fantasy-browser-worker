@@ -46,25 +46,108 @@ function bell() {
 }
 
 const RECONNECT_DELAY_MS = 3000;
+// WORKER-17: how long our own team can sit "on the clock" with no SELECTED before this is treated
+// as a stall worth a loud warning. A guess pending real observed pick-latency from a live draft —
+// tune after the first live run. Override via DRAFT_WATCH_STALL_MS for that tuning pass.
+const STALL_WARN_MS = Number(process.env.DRAFT_WATCH_STALL_MS) || 45000;
+const PROGRESS_SUMMARY_EVERY = 10;
 
-/** Connects and wires up listeners; resolves once the socket closes (evicted or errored). */
+/** Pure — no Date.now() inside, so directly testable with fixed timestamps. */
+function computePickDurationMs(selectingStartedAt, selectedAt) {
+  if (selectingStartedAt == null) return null;
+  return selectedAt - selectingStartedAt;
+}
+
+/** Pure — same reasoning as computePickDurationMs. */
+function hasStalled(selectingStartedAt, now, thresholdMs) {
+  if (selectingStartedAt == null) return false;
+  return now - selectingStartedAt >= thresholdMs;
+}
+
+/**
+ * Connects and wires up listeners; resolves once the socket closes (evicted or errored).
+ *
+ * WORKER-17 addition: tracks per-pick SELECTING->SELECTED timing and flags our own team stalling
+ * (armed on our SELECTING, cleared on our SELECTED). This can only observe THAT a pick landed and
+ * HOW LONG it took — it has no visibility into whether it came from the automated clicker, a
+ * human, or ESPN's own autodraft (draft_targets is intentionally not touched here, see header),
+ * so don't mistake a clean run of this watcher for proof the automated pipeline specifically
+ * fired every pick. Timing state is local to one watchOnce() call and resets on every reconnect —
+ * a gap while disconnected can't be backfilled, so it's logged as a gap rather than papered over.
+ */
 async function watchOnce({ leagueId, teamId }) {
   const cookies = resolveEspnCookies();
   const socket = await connectToDraftRoom({ leagueId, teamId, espnS2: cookies.espnS2, swid: cookies.swid });
   console.log("Connected. Waiting for draft activity... (Ctrl+C to stop)");
+  console.log(
+    "[Draft Watch] Timing/stall tracking reset for this connection — any gap from a prior " +
+      "disconnect is not backfilled.",
+  );
+
+  const selectingStartedAt = new Map();
+  let stallTimer = null;
+  let pickCount = 0;
+  const sessionStartedAt = Date.now();
+  let durationSumMs = 0;
+  // Separate from pickCount: a SELECTED with no matching SELECTING (e.g. right after
+  // reconnecting mid-pick) has no duration to average in. Dividing durationSumMs by pickCount
+  // would silently understate the average once any untimed picks are mixed in (PR #42 review).
+  let timedPickCount = 0;
+
+  const clearStallTimer = () => {
+    if (stallTimer) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  };
 
   socket.onSelected((event) => {
-    const mine = String(event.team_id) === String(teamId) ? " (US)" : "";
-    console.log(`[pick] round ${event.round}: team ${event.team_id}${mine} took player ${event.player_id}`);
+    const isOurs = String(event.team_id) === String(teamId);
+    const mine = isOurs ? " (US)" : "";
+    const startedAt = selectingStartedAt.get(String(event.team_id));
+    const durationMs = computePickDurationMs(startedAt, Date.now());
+    selectingStartedAt.delete(String(event.team_id));
+    if (isOurs) clearStallTimer();
+
+    const durationNote = durationMs != null ? ` [${durationMs}ms on the clock]` : "";
+    console.log(
+      `[pick] round ${event.round}: team ${event.team_id}${mine} took player ${event.player_id}${durationNote}`,
+    );
+
+    pickCount += 1;
+    if (durationMs != null) {
+      durationSumMs += durationMs;
+      timedPickCount += 1;
+    }
+    if (pickCount % PROGRESS_SUMMARY_EVERY === 0) {
+      const elapsedMin = ((Date.now() - sessionStartedAt) / 60000).toFixed(1);
+      const avgNote =
+        timedPickCount > 0
+          ? `avg ${Math.round(durationSumMs / timedPickCount)}ms/pick (${timedPickCount} timed)`
+          : "avg n/a (no timed picks yet)";
+      console.log(
+        `[Draft Watch] Progress: ${pickCount} pick(s) observed, ${elapsedMin}m elapsed, ${avgNote}.`,
+      );
+    }
   });
 
   socket.onMessage((raw) => {
     const line = raw.trim();
     if (!line.startsWith("SELECTING ")) return;
     const [, selectingTeam, clockMs] = line.split(/\s+/);
+    selectingStartedAt.set(String(selectingTeam), Date.now());
+
     if (selectingTeam === String(teamId)) {
       bell();
       console.log(`\n>>> YOUR TURN — team ${teamId} on the clock (${clockMs}ms) <<<\n`);
+      clearStallTimer();
+      stallTimer = setTimeout(() => {
+        bell();
+        console.warn(
+          `\n!!! STALL WARNING: our team has been on the clock for ${STALL_WARN_MS}ms with no ` +
+            "pick submitted — the automated clicker may have missed this turn. !!!\n",
+        );
+      }, STALL_WARN_MS);
     } else {
       console.log(`[clock] team ${selectingTeam} on the clock (${clockMs}ms)`);
     }
@@ -84,6 +167,7 @@ async function watchOnce({ leagueId, teamId }) {
       // cleaned up on a normal (non-Ctrl+C) close, eventually tripping Node's
       // MaxListenersExceededWarning across a long watch session with many evictions.
       process.off("SIGINT", onSigint);
+      clearStallTimer();
       if (!stopping) resolve();
     });
     process.once("SIGINT", onSigint);
@@ -118,7 +202,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(`[Draft Watch] Fatal: ${err.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`[Draft Watch] Fatal: ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = { computePickDurationMs, hasStalled, watchOnce, STALL_WARN_MS };
