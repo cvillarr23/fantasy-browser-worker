@@ -122,7 +122,7 @@ describe("executeAutomatedDraftSelection", () => {
     expect(recordDraftPickClick).not.toHaveBeenCalled();
   });
 
-  it("rejects as a conflict when drafted by another team", async () => {
+  it("rejects as a conflict when drafted by another team, without writing a click row", async () => {
     readDraftPicks.mockResolvedValue([
       { player_id: "4360438", team_id: "3", pick_number: 12 },
     ]);
@@ -136,6 +136,9 @@ describe("executeAutomatedDraftSelection", () => {
     await jest.advanceTimersByTimeAsync(1000);
     await assertion;
     expect(connectToDraftRoom).not.toHaveBeenCalled();
+    // No real submission was ever attempted for this conflict - it must not be recorded as
+    // a click outcome.
+    expect(recordDraftPickClick).not.toHaveBeenCalled();
   });
 
   it("sends the pick and resolves on a matching SELECTED confirmation", async () => {
@@ -153,9 +156,10 @@ describe("executeAutomatedDraftSelection", () => {
     expect(socket.close).toHaveBeenCalled();
     expect(recordDraftPickClick).toHaveBeenCalledWith({
       leagueId: "1248158344",
+      season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
-      pickNumber: 10,
+      roundNumber: 10,
       status: "success",
     });
   });
@@ -177,6 +181,7 @@ describe("executeAutomatedDraftSelection", () => {
     expect(clickPickViaDom).not.toHaveBeenCalled();
     expect(recordDraftPickClick).toHaveBeenCalledWith({
       leagueId: "1248158344",
+      season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
       status: "failure",
@@ -199,6 +204,7 @@ describe("executeAutomatedDraftSelection", () => {
     );
     expect(recordDraftPickClick).toHaveBeenCalledWith({
       leagueId: "1248158344",
+      season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
       status: "success",
@@ -219,6 +225,7 @@ describe("executeAutomatedDraftSelection", () => {
 
     expect(recordDraftPickClick).toHaveBeenCalledWith({
       leagueId: "1248158344",
+      season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
       status: "failure",

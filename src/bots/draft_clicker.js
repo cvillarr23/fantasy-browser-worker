@@ -223,6 +223,11 @@ async function executeAutomatedDraftSelection(payload) {
 
   let session = null;
   let picks = null;
+  // Flips true only once a real WS/DOM submission is about to be attempted - a conflict
+  // caught earlier (checkTarget: player already drafted by someone else) or any other
+  // pre-submission error must NOT write a draft_pick_click row, since no click was ever
+  // attempted for it.
+  let submissionAttempted = false;
   try {
     session = await createAuthenticatedSession();
 
@@ -246,6 +251,7 @@ async function executeAutomatedDraftSelection(payload) {
       return;
     }
 
+    submissionAttempted = true;
     log("Connecting to draft room socket to submit pick...");
     await jitter(100, 400);
     const cookies = resolveEspnCookies();
@@ -280,9 +286,10 @@ async function executeAutomatedDraftSelection(payload) {
         );
         await recordDraftPickClick({
           leagueId,
+          season: seasonId,
           playerId,
           playerName: targetName,
-          pickNumber: result.round,
+          roundNumber: result.round,
           status: "success",
         });
       } finally {
@@ -320,6 +327,7 @@ async function executeAutomatedDraftSelection(payload) {
         );
         await recordDraftPickClick({
           leagueId,
+          season: seasonId,
           playerId,
           playerName: targetName,
           status: "success",
@@ -346,13 +354,16 @@ async function executeAutomatedDraftSelection(payload) {
       draft_board: picks,
       err: error,
     });
-    await recordDraftPickClick({
-      leagueId,
-      playerId,
-      playerName: targetName,
-      status: "failure",
-      errorMessage: error.message,
-    });
+    if (submissionAttempted) {
+      await recordDraftPickClick({
+        leagueId,
+        season: seasonId,
+        playerId,
+        playerName: targetName,
+        status: "failure",
+        errorMessage: error.message,
+      });
+    }
     throw error;
   } finally {
     if (session && session.browser) {
