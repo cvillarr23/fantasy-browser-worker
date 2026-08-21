@@ -22,8 +22,10 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * Flow:
  *   1. Launch Chromium headed on the Xvfb display, navigate to the ESPN login page.
  *   2. Poll (not a stdin/readline wait — there's no tty attached to a k8s Job, unlike
- *      draft_recon.js's launchWithManualLogin) for login success by periodically checking the
- *      team roster page, mirroring check_espn_session.js's staleness check inverted.
+ *      draft_recon.js's launchWithManualLogin) for login success: first for espn_s2/SWID cookies
+ *      to appear (without touching the page the human is actively driving), then a single roster
+ *      page navigation to confirm the rendered UI accepts the session too, mirroring
+ *      check_espn_session.js's staleness check inverted.
  *   3. On success, save the full storageState() (cookies + localStorage — this is what actually
  *      captures the Disney/MyDisney BAM SDK session the rendered draft room additionally gates
  *      on) into OpenBao at secret/fantasy/espn-session-state.
@@ -52,33 +54,48 @@ function rosterUrl() {
 }
 
 /**
- * Mirrors check_espn_session.js's staleness check, inverted: instead of failing when redirected to
- * /login, this waits until a roster-page navigation lands somewhere else AND the roster table
- * actually renders. Polls rather than blocking on a single navigation because the human may still
- * be mid-login (2FA, Disney OneID redirects, etc) for an arbitrary stretch of real time.
+ * Polls WITHOUT navigating the human's active page until espn_s2/SWID actually show up in the
+ * context's cookie jar (a plain context.cookies() read — never touches the page they're driving,
+ * so it can't yank them off a Disney OneID/2FA flow mid-login the way repeatedly re-navigating the
+ * login page itself would). Only once those cookies exist does this do a single roster-page
+ * navigation, mirroring check_espn_session.js's staleness check inverted, to confirm the
+ * *rendered* page also accepts the session (the separate Disney/MyDisney SDK gate) — by that
+ * point the human is done with the login form itself, so one navigation away from it is fine.
  */
-async function waitForLoginSuccess(page) {
+async function waitForLoginSuccess(page, context) {
   const deadline = Date.now() + LOGIN_WAIT_TIMEOUT_MS;
-  const targetUrl = rosterUrl();
 
   while (Date.now() < deadline) {
-    try {
-      await page.goto(targetUrl, { waitUntil: "networkidle", timeout: 15000 });
-      if (!/\/login\b/i.test(page.url())) {
-        const visible = await page
-          .locator(selectors.roster_table)
-          .isVisible()
-          .catch(() => false);
-        if (visible) {
-          return true;
+    const cookies = await context.cookies();
+    const hasAuthCookies =
+      cookies.some((c) => c.name === "espn_s2") &&
+      cookies.some((c) => c.name === "SWID");
+
+    if (hasAuthCookies) {
+      try {
+        await page.goto(rosterUrl(), {
+          waitUntil: "networkidle",
+          timeout: 15000,
+        });
+        if (!/\/login\b/i.test(page.url())) {
+          const visible = await page
+            .locator(selectors.roster_table)
+            .isVisible()
+            .catch(() => false);
+          if (visible) {
+            return true;
+          }
         }
+        logger.info(
+          "[Remote Login] Auth cookies present but roster page didn't confirm login yet, still polling...",
+        );
+      } catch (err) {
+        // Transient nav errors are expected here too (redirects, interstitial pages) — log and
+        // keep polling rather than failing on the first one.
+        logger.info(
+          `[Remote Login] Roster confirmation check failed, still polling: ${err.message}`,
+        );
       }
-    } catch (err) {
-      // Transient nav errors are expected while the human is mid-interaction (redirects,
-      // interstitial pages, etc) — log and keep polling rather than failing on the first one.
-      logger.info(
-        `[Remote Login] Poll attempt failed, retrying: ${err.message}`,
-      );
     }
     await page.waitForTimeout(LOGIN_POLL_INTERVAL_MS);
   }
@@ -143,7 +160,7 @@ async function performLoginAndSaveState(page, context) {
     timeout: 60000,
   });
 
-  const loggedIn = await waitForLoginSuccess(page);
+  const loggedIn = await waitForLoginSuccess(page, context);
   if (!loggedIn) {
     throw new Error(
       `[Remote Login] Timed out after ${LOGIN_WAIT_TIMEOUT_MS}ms waiting for a successful login.`,
@@ -179,10 +196,13 @@ async function runRemoteLogin() {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  const context = await browser.newContext({ viewport: null });
-  const page = await context.newPage();
-
+  // Everything past launch is guarded the same way createAuthenticatedSession() is in auth.js: if
+  // context/page creation or anything below throws, the browser process gets closed right here
+  // rather than orphaned for up to activeDeadlineSeconds with nothing left to close it.
   try {
+    const context = await browser.newContext({ viewport: null });
+    const page = await context.newPage();
+
     await withInstrumentation(
       "remote_login",
       { trackingId: require("crypto").randomUUID() },
@@ -193,24 +213,24 @@ async function runRemoteLogin() {
       waitUntil: "load",
       timeout: 60000,
     });
+
+    logger.info(
+      "[Remote Login] Session saved. Leaving the browser open and interactive over VNC — keep " +
+        "driving it from your phone. This process stays alive until the k8s Job's " +
+        "activeDeadlineSeconds is hit or it's deleted by hand.",
+    );
+    // Deliberately no internal timeout here — see this file's header. Bounded only by the Job's
+    // own activeDeadlineSeconds and the SIGTERM handler above.
+    const heartbeat = setInterval(
+      () => logger.info("[Remote Login] Still alive, session open over VNC."),
+      5 * 60 * 1000,
+    );
+    heartbeat.unref();
+    await new Promise(() => {});
   } catch (err) {
     await browser.close().catch(() => {});
     throw err;
   }
-
-  logger.info(
-    "[Remote Login] Session saved. Leaving the browser open and interactive over VNC — keep " +
-      "driving it from your phone. This process stays alive until the k8s Job's " +
-      "activeDeadlineSeconds is hit or it's deleted by hand.",
-  );
-  // Deliberately no internal timeout here — see this file's header. Bounded only by the Job's own
-  // activeDeadlineSeconds and the SIGTERM handler above.
-  const heartbeat = setInterval(
-    () => logger.info("[Remote Login] Still alive, session open over VNC."),
-    5 * 60 * 1000,
-  );
-  heartbeat.unref();
-  await new Promise(() => {});
 }
 
 if (require.main === module) {

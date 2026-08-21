@@ -1,3 +1,4 @@
+const fs = require("fs");
 const { chromium } = require("playwright");
 const { execFileSync } = require("child_process");
 const { logger } = require("../telemetry/logger");
@@ -137,6 +138,33 @@ function fetchStoredSessionStateFromOpenBao() {
 }
 
 /**
+ * Env/file input takes priority (production: an ExternalSecret-mounted file, same delivery model
+ * as ESPN_S2/SWID's secretKeyRef env vars above, just a file instead of a plain env var since this
+ * blob is a full JSON storageState rather than a couple of short strings). The direct `bao` CLI
+ * read (fetchStoredSessionStateFromOpenBao) is a LOCAL-DEV-ONLY fallback — it shells out to
+ * whatever `bao` CLI session is already authenticated via scripts/openbao-connect.sh, exactly like
+ * fetchEspnCookiesFromOpenBao's doc comment already describes for the plain cookie fields. No
+ * running Job authenticates to OpenBao for a *read* here (only remote_login.js writes, via its own
+ * Kubernetes-auth login) — production consumers of this stored state must go through
+ * ESPN_SESSION_STATE_FILE instead.
+ */
+function fetchStoredSessionState() {
+  const statePath = process.env.ESPN_SESSION_STATE_FILE;
+  if (statePath) {
+    try {
+      return JSON.parse(fs.readFileSync(statePath, "utf8"));
+    } catch (err) {
+      logger.error(
+        `[Auth Engine] Could not read/parse ESPN_SESSION_STATE_FILE at "${statePath}": ${err.message}`,
+        { err },
+      );
+      return null;
+    }
+  }
+  return fetchStoredSessionStateFromOpenBao();
+}
+
+/**
  * Headless Browser Sandbox Initializer
  * Establishes optimized browser context pools while keeping container RAM under 1200MiB.
  */
@@ -251,7 +279,7 @@ async function createAuthenticatedSession({ headless = true } = {}) {
  * cookie-only WS submission path is unaffected either way.
  */
 async function createSessionFromStoredState({ headless = true } = {}) {
-  const storageState = fetchStoredSessionStateFromOpenBao();
+  const storageState = fetchStoredSessionState();
   if (!storageState) {
     return null;
   }
