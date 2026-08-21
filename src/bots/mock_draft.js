@@ -60,22 +60,37 @@ async function tryClick(locator, logger, label) {
  * `getByText(/practice draft/i)` had 3 matches (the heading, a table caption, and the button);
  * `getByRole("button", { name: /practice draft/i })` had exactly 1 (the button).
  *
- * WORKER-17 LIVE-RUN FINDING (2026-08-21, supersedes the earlier reCAPTCHA/DisneyID guess in
- * draft_sync.js's DRAFT_ROOM_URL doc comment — that finding is from 2026-08-10 and describes a
- * different failure mode than what's actually reproducible now): clicking the correct button
- * (role=button, confirmed above) still does NOT navigate to a draft room in headless mode. The
- * browser console shows `requestStorageAccess: Permission denied.` immediately after the click,
- * followed by client-side React crashes (`Cannot read properties of undefined (reading
- * 'currentSeason')` / `'pageName'`) — the SPA's draft-room-entry flow depends on the Storage
- * Access API succeeding (likely for a cross-origin/partitioned context the draft board or
- * autodraft engine needs) and headless Chromium denies it, crashing the route before it renders.
- * Tried `--disable-features=StorageAccessAPI,PrivacySandboxSettings4` — no change, still denied.
- * This is NOT a selector problem and the retry loop here cannot fix it: whoever picks this back up
- * needs to find a way to grant/simulate storage access in headless Chromium (Playwright's
- * `grantPermissions` doesn't cover this API; CDP-level `Browser.grantPermissions` or a stored
- * cross-origin storageState addressing whatever origin the request targets are the next things to
- * try), or accept that headless auto-join isn't currently achievable and keep relying on
- * DRAFT_ROOM_URL (a human joins a room once, headless only ever resumes/observes it).
+ * WORKER-17 LIVE-RUN FINDING (2026-08-21, refines rather than supersedes the 2026-08-10
+ * reCAPTCHA/DisneyID finding in draft_sync.js's DRAFT_ROOM_URL doc comment — traced all the way
+ * through, it's the SAME root cause manifesting differently for this flow): clicking the correct
+ * button (role=button, confirmed above) still does NOT navigate to a draft room in headless mode.
+ * Traced the full chain:
+ *   1. The lobby always embeds an invisible reCAPTCHA Enterprise iframe (`www.google.com/
+ *      recaptcha/enterprise/anchor?...&size=invisible`) alongside the DisneyID identity iframe —
+ *      present on page load, not something the click triggers.
+ *   2. Without any permission grant, that reCAPTCHA iframe calls `document.requestStorageAccess()`
+ *      (confirmed via an injected wrapper logging caller origin: `https://www.google.com`) and
+ *      Chromium headless denies it (`requestStorageAccess: Permission denied.`), which crashes the
+ *      surrounding page's own React app (`Cannot read properties of undefined (reading
+ *      'currentSeason')` / `'pageName'`) — the SPA doesn't handle that rejection.
+ *   3. Granting it via CDP (`Browser.setPermission({ permission: { name: "storage-access" },
+ *      setting: "granted", origin: "https://www.google.com", embeddingOrigin:
+ *      "https://fantasy.espn.com" })` — note the permission name is kebab-case `"storage-access"`,
+ *      not `"storageAccess"`, which the CDP command otherwise rejects as invalid) DOES stop the
+ *      crash — no more denial, no more React error. But the click still never navigates anywhere,
+ *      silently, even after a 25s wait, with `navigator.webdriver` already `false` (this file's
+ *      `--disable-blink-features=AutomationControlled` flag is working as intended).
+ *   4. That silent no-op — no error, no crash, just inert — is exactly the documented signature of
+ *      invisible reCAPTCHA Enterprise: it scores the session as automated via deeper
+ *      behavioral/fingerprint signals than `navigator.webdriver` and simply never completes its
+ *      challenge or releases whatever callback would trigger navigation. This is the SAME
+ *      mechanism already confirmed blocking automated login (see this repo's
+ *      docs/espn-reverse-engineering.md) — just discovered here via a different symptom (a
+ *      storage-access crash) before the underlying reCAPTCHA block became visible.
+ * This is NOT a selector problem and no further retry/selector/permission-grant hardening in this
+ * file is expected to fix it — reCAPTCHA Enterprise is specifically designed to resist exactly
+ * this kind of workaround. Keep relying on `DRAFT_ROOM_URL` (a human joins a room once, headless
+ * only ever resumes/observes it) rather than spending more time on headless auto-join here.
  *
  * Returns `{ url, page }` — NOT just a URL string (changed 2026-08-17). ESPN sometimes opens the
  * actual draft room in a brand-new tab/window rather than navigating the current page in place
