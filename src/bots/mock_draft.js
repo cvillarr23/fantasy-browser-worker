@@ -28,8 +28,11 @@ class HeadlessLobbyJoinError extends Error {
  */
 async function tryClick(locator, logger, label) {
   try {
-    await locator.waitFor({ timeout: LOBBY_CLICK_ATTEMPT_TIMEOUT_MS });
-    await locator.click();
+    // click() starts its own actionability wait (visible, stable, receives events, etc.) with
+    // Playwright's default 30s timeout if not given one explicitly — a visible-but-covered or
+    // detached element would otherwise stall each retry far past LOBBY_CLICK_ATTEMPT_TIMEOUT_MS
+    // (PR #42 review). Bounding it here keeps every attempt actually bounded to that window.
+    await locator.click({ timeout: LOBBY_CLICK_ATTEMPT_TIMEOUT_MS });
     return true;
   } catch (err) {
     logger.warn(`[MockDraft] "${label}" click attempt failed: ${err.message}`);
@@ -85,6 +88,13 @@ async function startFreshPracticeDraft(page, logger = console, { headless = fals
       });
     }),
   ]);
+  // Marks the race as handled immediately, independent of whatever later actually awaits it —
+  // matters because the headless-exhausted branch below can throw before that `await
+  // activePagePromise` ever runs. Left unhandled, the caller then closes the browser (per its own
+  // catch/finally), which rejects the abandoned page.waitForURL()/context "page" listener with no
+  // handler in sight, and Node's unhandled-rejection behavior can crash the process outright
+  // instead of the intended HeadlessLobbyJoinError propagating cleanly (PR #42 review).
+  activePagePromise.catch(() => {});
 
   let clicked = false;
   for (let attempt = 1; attempt <= LOBBY_CLICK_ATTEMPTS && !clicked; attempt += 1) {

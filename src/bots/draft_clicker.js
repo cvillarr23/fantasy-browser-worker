@@ -221,6 +221,12 @@ async function executeAutomatedDraftSelection(payload) {
   try {
     session = await createAuthenticatedSession();
 
+    // Pre-flight, right after the session exists and before ANY authenticated call — including
+    // the draft-board read below. Checking after readDraftPicks would be too late: a stale-cookie
+    // 401/403 there throws a plain "mDraftDetail fetch failed" error first, so this check would
+    // never run and the failure would stay opaque (PR #42 review).
+    await assertCookieSessionValid(session.context, { leagueId, seasonId });
+
     await jitter(150, 600);
     picks = await readDraftPicks(session.context, { leagueId, seasonId });
     log(`Draft board read: ${picks.length} pick(s) recorded so far.`);
@@ -244,11 +250,6 @@ async function executeAutomatedDraftSelection(payload) {
     log("Connecting to draft room socket to submit pick...");
     await jitter(100, 400);
     const cookies = resolveEspnCookies();
-
-    // Pre-flight: a WS connect failure or unconfirmed pick from a stale cookie session is
-    // otherwise indistinguishable from a real transient network blip. Checking first makes the
-    // failure self-diagnosing and lets the catch below skip the doomed DOM fallback (see there).
-    await assertCookieSessionValid(session.context, { leagueId, seasonId });
 
     try {
       const socket = await connectToDraftRoom({

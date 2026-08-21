@@ -89,6 +89,10 @@ async function watchOnce({ leagueId, teamId }) {
   let pickCount = 0;
   const sessionStartedAt = Date.now();
   let durationSumMs = 0;
+  // Separate from pickCount: a SELECTED with no matching SELECTING (e.g. right after
+  // reconnecting mid-pick) has no duration to average in. Dividing durationSumMs by pickCount
+  // would silently understate the average once any untimed picks are mixed in (PR #42 review).
+  let timedPickCount = 0;
 
   const clearStallTimer = () => {
     if (stallTimer) {
@@ -111,12 +115,18 @@ async function watchOnce({ leagueId, teamId }) {
     );
 
     pickCount += 1;
-    if (durationMs != null) durationSumMs += durationMs;
+    if (durationMs != null) {
+      durationSumMs += durationMs;
+      timedPickCount += 1;
+    }
     if (pickCount % PROGRESS_SUMMARY_EVERY === 0) {
       const elapsedMin = ((Date.now() - sessionStartedAt) / 60000).toFixed(1);
-      const avgMs = Math.round(durationSumMs / pickCount);
+      const avgNote =
+        timedPickCount > 0
+          ? `avg ${Math.round(durationSumMs / timedPickCount)}ms/pick (${timedPickCount} timed)`
+          : "avg n/a (no timed picks yet)";
       console.log(
-        `[Draft Watch] Progress: ${pickCount} pick(s) observed, ${elapsedMin}m elapsed, avg ${avgMs}ms/pick.`,
+        `[Draft Watch] Progress: ${pickCount} pick(s) observed, ${elapsedMin}m elapsed, ${avgNote}.`,
       );
     }
   });
@@ -199,4 +209,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { computePickDurationMs, hasStalled };
+module.exports = { computePickDurationMs, hasStalled, watchOnce, STALL_WARN_MS };

@@ -12,13 +12,12 @@ function makeFakePage({ url, attemptsBeforeSuccess, hangOnWaitForUrl = false }) 
   let calls = 0;
   const locator = () => {
     const self = {
-      waitFor: async () => {
+      click: async () => {
         calls += 1;
         if (attemptsBeforeSuccess === -1 || calls <= attemptsBeforeSuccess) {
           throw new Error(`not found (call ${calls})`);
         }
       },
-      click: async () => {},
       first: () => self,
     };
     return self;
@@ -83,7 +82,7 @@ describe("startFreshPracticeDraft", () => {
   it("succeeds on a later retry attempt and resolves normally", async () => {
     const url = { current: "https://fantasy.espn.com/football/mockdraftlobby" };
     // Fails the first two attempts across all three selector strategies (6 calls), succeeds on
-    // the 7th (second attempt's third strategy).
+    // the 7th call — the first strategy ("text") of the third attempt.
     const page = makeFakePage({ url, attemptsBeforeSuccess: 6 });
 
     const result = await startFreshPracticeDraft(page, silentLogger, {
