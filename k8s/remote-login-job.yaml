@@ -5,19 +5,19 @@
 # submission path needs none of this.
 #
 # Prerequisites:
-#   - OpenBao's Kubernetes auth method + a role/policy binding the ServiceAccount below to write
-#     access on secret/fantasy/espn-session-state. This is fantasy-infra-side work tracked as a
-#     companion issue to #24 (mirroring how homelab-deployment#8 is the companion for the ingress
-#     below) — until that lands, remote_login.js's OpenBao write step will fail loudly and this Job
-#     will exit non-zero after a successful login (the login itself and the VNC session still work
-#     fine, the state just won't persist).
+#   - OpenBao's Kubernetes auth method role/policy for the ServiceAccount below (fantasy-infra#33).
+#     Provisioned by homelab-deployment/scripts/openbao-fantasy-browser-worker-role-setup.sh,
+#     which binds this SA to a role granting create/update/read on
+#     secret/fantasy/espn-session-state. Without it, remote_login.js's OpenBao write step fails
+#     loudly and this Job exits non-zero after a successful login (the login itself and the VNC
+#     session still work fine, the state just won't persist).
 #   - The Tailscale ingress (homelab-deployment#8) for reaching this from a phone. Until that
 #     lands, use the kubectl port-forward fallback below.
 #
 # Usage:
 #   git push origin main                                     # triggers the build+publish workflow
 #   kubectl delete job remote-login --ignore-not-found -n default
-#   kubectl apply -f k8s/remote-login-job.yaml
+#   kubectl apply -f k8s/remote-login-job.yaml                # also (re)applies the ServiceAccount below
 #   kubectl logs -f job/remote-login -n default
 #
 # To reach the VNC session:
@@ -32,6 +32,16 @@
 # activeDeadlineSeconds bounds the WHOLE session (login + however long you keep poking around a
 # mock draft afterward) — remote_login.js itself imposes no shorter internal timeout once you're
 # logged in. Bump this if 2 hours isn't enough.
+#
+# The ServiceAccount below carries no k8s RBAC Role/RoleBinding — it exists only so OpenBao's
+# Kubernetes auth method can validate its projected JWT via TokenReview; the Job never calls the
+# Kubernetes API itself.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fantasy-browser-worker-remote-login
+  namespace: default
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
