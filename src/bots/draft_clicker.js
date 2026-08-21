@@ -5,7 +5,7 @@ const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
 const { assertCookieSessionValid } = require("./session_health");
-const { PermanentError, SessionExpiredError } = require("../errors");
+const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
