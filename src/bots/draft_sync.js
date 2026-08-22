@@ -368,6 +368,7 @@ async function connectAndStream(redisClient, state) {
       state.pickCounter = 0;
     }
     state.leagueId = draftContext.leagueId;
+    await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
     state.seasonId = draftContext.seasonId;
     state.teamId = draftContext.teamId;
 
@@ -387,6 +388,7 @@ async function connectAndStream(redisClient, state) {
 
     reconcileInterval = setInterval(async () => {
       await reconcileFromRest(session.context, redisClient, state);
+      await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
 
       // Piggybacks on this same 15s cadence rather than a separate timer — a mid-draft cookie
       // expiry is then caught within one reconcile interval instead of only surfacing when a
@@ -516,6 +518,7 @@ if (require.main === module) {
 
 module.exports = {
   streamLiveDraftRoom,
+  connectAndStream,
   parseSelectedFrame,
   buildDraftUrl,
   buildDraftDetailUrl,
