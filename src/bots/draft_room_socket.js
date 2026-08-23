@@ -124,6 +124,9 @@ function parseSelectedFrame(raw) {
     team_id: Number(teamId),
     player_id: Number(playerId),
     lineup_slot_id: Number(lineupSlotId),
+    // Explicitly null, not absent: this frame carries no round, and consumers that used to
+    // read the slot id as one must see a deterministic "unknown" rather than undefined.
+    round: null,
   };
 }
 

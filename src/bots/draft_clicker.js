@@ -289,14 +289,17 @@ async function executeAutomatedDraftSelection(payload) {
           );
         }
         log(
-          `SUCCESS: Pick submitted and confirmed for ${targetName} (round ${result.round}).`,
+          `SUCCESS: Pick submitted and confirmed for ${targetName} (lineup slot ${result.lineup_slot_id}).`,
         );
         await recordDraftPickClick({
           leagueId,
           season: seasonId,
           playerId,
           playerName: targetName,
-          roundNumber: result.round,
+          // The SELECTED frame's third token is a lineup slot id, not a round (see
+          // parseSelectedFrame). Passing it as roundNumber wrote slot ids into
+          // execution_log.round_number; null is the honest value until a round is available.
+          roundNumber: null,
           status: "success",
         });
       } finally {

@@ -111,7 +111,7 @@ async function watchOnce({ leagueId, teamId }) {
 
     const durationNote = durationMs != null ? ` [${durationMs}ms on the clock]` : "";
     console.log(
-      `[pick] round ${event.round}: team ${event.team_id}${mine} took player ${event.player_id}${durationNote}`,
+      `[pick] slot ${event.lineup_slot_id}: team ${event.team_id}${mine} took player ${event.player_id}${durationNote}`,
     );
 
     pickCount += 1;

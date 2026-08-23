@@ -152,7 +152,7 @@ describe("executeAutomatedDraftSelection", () => {
 
     const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
     await jest.advanceTimersByTimeAsync(1000);
-    socket.handlers.onSelected({ player_id: "4360438", team_id: "8", round: 10 });
+    socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10, round: null });
 
     await runPromise;
 
@@ -163,7 +163,7 @@ describe("executeAutomatedDraftSelection", () => {
       season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
-      roundNumber: 10,
+      roundNumber: null,
       status: "success",
     });
   });
