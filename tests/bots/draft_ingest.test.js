@@ -160,9 +160,9 @@ describe("ingestPickEvent", () => {
     );
 
     expect(decision.action).toBe("correct");
-    expect(redis.calls.hDel).toEqual([["draft:123:board", "1"]]);
+    expect(redis.calls.hDel).toEqual([["draft:123:picks", "1"]]);
     expect(redis.calls.hSet[1]).toEqual([
-      "draft:123:board",
+      "draft:123:picks",
       "17",
       expect.any(String),
     ]);
