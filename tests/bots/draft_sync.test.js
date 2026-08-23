@@ -15,7 +15,11 @@ jest.mock("../../src/bots/session_health", () => ({
 const { createAuthenticatedSession } = require("../../src/bots/auth");
 const { parseDraftRoomUrl } = require("../../src/bots/mock_draft");
 const { assertCookieSessionValid } = require("../../src/bots/session_health");
-const { fetchDraftDetail, connectAndStream } = require("../../src/bots/draft_sync");
+const {
+  fetchDraftDetail,
+  connectAndStream,
+  createDraftState,
+} = require("../../src/bots/draft_sync");
 
 describe("fetchDraftDetail", () => {
   it("throws a clear error when ESPN reports a deleted draft league", async () => {
@@ -102,17 +106,15 @@ describe("connectAndStream", () => {
       },
     };
     const browser = { close: jest.fn().mockResolvedValue(undefined) };
-    const redisClient = { set: jest.fn().mockResolvedValue("OK") };
-    const state = {
-      lastPickNumber: null,
-      pickCounter: 0,
-      leagueId: null,
-      seasonId: null,
-      teamId: null,
-      ready: false,
-      pendingFrames: [],
-      sessionExpiredError: null,
+    const redisClient = {
+      set: jest.fn().mockResolvedValue("OK"),
+      // The ingest path seeds the dedup ledger from the durable board before anything else
+      // (issue #52); an empty hash is the "fresh draft" case.
+      hGetAll: jest.fn().mockResolvedValue({}),
     };
+    // Built by the same factory as the real entry point so this test can't silently drift from
+    // the state shape the ingest path actually dereferences.
+    const state = createDraftState();
 
     createAuthenticatedSession.mockResolvedValue({
       page,
@@ -136,11 +138,9 @@ describe("connectAndStream", () => {
       "1",
       { EX: 60 },
     );
-    expect(redisClient.set).toHaveBeenCalledWith(
-      "draft:987:connected",
-      "1",
-      { EX: 60 },
-    );
+    expect(redisClient.set).toHaveBeenCalledWith("draft:987:connected", "1", {
+      EX: 60,
+    });
     expect(redisClient.set.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(browser.close).toHaveBeenCalledTimes(1);
   });

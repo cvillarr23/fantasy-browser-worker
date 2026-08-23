@@ -678,6 +678,33 @@ async function preflightSessionCheck(session) {
 }
 
 /**
+ * The whole mutable ingest state for one draft-sync run.
+ *
+ * Exists as a factory rather than an object literal at the call site so tests and the real entry
+ * point can't drift apart: every field below is dereferenced unconditionally somewhere in the
+ * ingest path, so a hand-rolled partial state fails at runtime rather than at construction.
+ */
+function createDraftState() {
+  return {
+    lastPickNumber: null,
+    pickCounter: 0,
+    leagueId: null,
+    seasonId: null,
+    teamId: null,
+    ready: false,
+    pendingFrames: [],
+    // Shared across reconnects on purpose: the ledger is what stops a reconnect from
+    // re-publishing the entire board as brand-new picks. It's only reset when the LEAGUE changes
+    // (a fresh practice draft), which connectAndStream handles.
+    ledger: new DraftPickLedger(),
+    health: createIngestHealth(),
+    // Serializes ingest so evaluate -> write -> commit is atomic per pick (see withIngestLock).
+    ingestChain: Promise.resolve(),
+    sessionExpiredError: null,
+  };
+}
+
+/**
  * Initial shape of the ingest health record (issue #52).
  *
  * Everything a pod-log/Grafana investigation needs to answer "why is a pick missing" without a
@@ -895,7 +922,9 @@ async function connectAndStream(redisClient, state) {
 
     reconcileInterval = setInterval(async () => {
       await reconcileFromRest(session.context, redisClient, state);
-      await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
+      await redisClient.set(`draft:${state.leagueId}:connected`, "1", {
+        EX: 60,
+      });
 
       // Piggybacks on this same 15s cadence rather than a separate timer — a mid-draft cookie
       // expiry is then caught within one reconcile interval instead of only surfacing when a
@@ -977,22 +1006,7 @@ async function streamLiveDraftRoom() {
   );
   await redisClient.connect();
 
-  const state = {
-    lastPickNumber: null,
-    pickCounter: 0,
-    leagueId: null,
-    seasonId: null,
-    teamId: null,
-    ready: false,
-    pendingFrames: [],
-    // Shared across reconnects on purpose: the ledger is what stops a reconnect from re-publishing
-    // the entire board as brand-new picks. It's only reset when the LEAGUE changes (a fresh
-    // practice draft), which connectAndStream handles.
-    ledger: new DraftPickLedger(),
-    health: createIngestHealth(),
-    // Serializes ingest so evaluate -> write -> commit is atomic per pick (see withIngestLock).
-    ingestChain: Promise.resolve(),
-  };
+  const state = createDraftState();
   let attempt = 0;
 
   try {
@@ -1059,6 +1073,7 @@ module.exports = {
   assignPickNumber,
   handleDomRecords,
   seedLedgerFromBoard,
+  createDraftState,
   createIngestHealth,
   emitHealthHeartbeat,
 };
