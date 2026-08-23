@@ -424,10 +424,31 @@ async function attachDraftDomObserver(
   return {
     scanNow,
     getHealth: () => ({ ...health }),
-    stop() {
+    /**
+     * Async because it also tears down the in-page MutationObserver, not just the Node-side
+     * timers. Leaving that observer connected means every DOM mutation keeps firing a
+     * cross-process binding call into Node for a scanner that will never run again — pure
+     * overhead, and it makes the "caller MUST call stop()" contract only half true. Best-effort:
+     * the page is usually being closed right after this, and a teardown race there is expected,
+     * not an error.
+     */
+    async stop() {
       stopped = true;
       clearInterval(pollTimer);
       if (debounceTimer) clearTimeout(debounceTimer);
+      try {
+        if (!page.isClosed()) {
+          await page.evaluate(() => {
+            if (window.__fantasyDraftObserver) {
+              window.__fantasyDraftObserver.disconnect();
+              delete window.__fantasyDraftObserver;
+            }
+          });
+        }
+      } catch {
+        // Page already gone/navigating — the observer died with it either way.
+      }
+      health.observer_installed = false;
     },
   };
 }

@@ -189,6 +189,25 @@ describe("DraftPickLedger", () => {
     expect(ledger.evaluate(wsPick(4360438)).action).toBe("publish");
   });
 
+  it("resets stats too, so per-draft metrics don't span two leagues", () => {
+    // draft_sync exports ledger_stats alongside picks_known in the health heartbeat — stale
+    // counters would make those two mutually inconsistent for the new draft.
+    const ledger = new DraftPickLedger();
+    record(ledger, wsPick(4360438));
+    ledger.evaluate(wsPick(4360438));
+
+    ledger.reset();
+
+    expect(ledger.stats).toEqual({
+      published: 0,
+      corrected: 0,
+      duplicate: 0,
+      stale: 0,
+      out_of_order: 0,
+      invalid: 0,
+    });
+  });
+
   it("ranks sources so REST outranks DOM outranks WS", () => {
     expect(SOURCE_PRECEDENCE.rest).toBeGreaterThan(SOURCE_PRECEDENCE.dom);
     expect(SOURCE_PRECEDENCE.dom).toBeGreaterThan(SOURCE_PRECEDENCE.ws);

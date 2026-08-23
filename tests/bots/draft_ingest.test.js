@@ -97,6 +97,22 @@ describe("assignPickNumber", () => {
     expect(second.pick_number).toBe(first.pick_number);
     expect(state.pickCounter).toBe(1);
   });
+
+  it("does not consume a pick number for an unusable record", () => {
+    // A malformed WS frame (player_id NaN/null) is rejected by the ledger moments later. Minting
+    // a number for it first would permanently skew every subsequent WS/DOM pick number by one.
+    const state = freshState();
+
+    expect(assignPickNumber(state, pick({ player_id: null })).pick_number).toBe(
+      null,
+    );
+    expect(
+      assignPickNumber(state, pick({ player_id: "abc" })).pick_number,
+    ).toBe(null);
+    expect(state.pickCounter).toBe(0);
+
+    expect(assignPickNumber(state, pick()).pick_number).toBe(1);
+  });
 });
 
 describe("ingestPickEvent", () => {

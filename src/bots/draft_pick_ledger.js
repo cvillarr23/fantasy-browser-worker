@@ -72,6 +72,31 @@ function sameValue(a, b) {
 }
 
 /**
+ * Whether a record carries a usable ESPN player id. Shared so the pick-number minter and the
+ * ledger agree on exactly what counts as valid — otherwise an unusable record could consume a
+ * locally-minted pick number on its way to being rejected.
+ */
+function isUsablePlayerId(playerId) {
+  return !(
+    playerId == null ||
+    playerId === "" ||
+    Number.isNaN(Number(playerId))
+  );
+}
+
+/** Fresh per-draft counters — shared by the constructor and reset() so they can't drift apart. */
+function createStats() {
+  return {
+    published: 0,
+    corrected: 0,
+    duplicate: 0,
+    stale: 0,
+    out_of_order: 0,
+    invalid: 0,
+  };
+}
+
+/**
  * True when the two events agree on everything that matters. pick_number/round are compared
  * null-tolerantly: a DOM record with no visible pick number shouldn't be treated as CONTRADICTING
  * a WS record that has one — it simply has nothing to say about it.
@@ -103,20 +128,17 @@ class DraftPickLedger {
     this.byPlayer = new Map();
     /** Highest pick_number published so far — used to flag ordering regressions. */
     this.highestPickNumber = null;
-    this.stats = {
-      published: 0,
-      corrected: 0,
-      duplicate: 0,
-      stale: 0,
-      out_of_order: 0,
-      invalid: 0,
-    };
+    this.stats = createStats();
   }
 
   /** Rebuilt-from-scratch reset, for when the league itself changes (a fresh practice draft). */
   reset() {
     this.byPlayer.clear();
     this.highestPickNumber = null;
+    // Stats are per-draft too: draft_sync.js exports them in the health heartbeat alongside
+    // picks_known, so carrying a previous league's counters over would make the two mutually
+    // inconsistent and the new draft's metrics unreadable.
+    this.stats = createStats();
   }
 
   size() {
@@ -175,7 +197,7 @@ class DraftPickLedger {
    */
   evaluate(rawEvent) {
     const playerId = rawEvent.player_id;
-    if (playerId == null || playerId === "" || Number.isNaN(Number(playerId))) {
+    if (!isUsablePlayerId(playerId)) {
       this.stats.invalid += 1;
       return {
         action: "invalid",
@@ -278,4 +300,5 @@ module.exports = {
   SOURCE_PRECEDENCE,
   pickIdentity,
   agreesWith,
+  isUsablePlayerId,
 };

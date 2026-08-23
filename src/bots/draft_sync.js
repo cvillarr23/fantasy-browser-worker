@@ -5,7 +5,11 @@ const {
   assertRenderedSessionValid,
 } = require("./session_health");
 const { SessionExpiredError } = require("../errors");
-const { DraftPickLedger, pickIdentity } = require("./draft_pick_ledger");
+const {
+  DraftPickLedger,
+  pickIdentity,
+  isUsablePlayerId,
+} = require("./draft_pick_ledger");
 const { attachDraftDomObserver } = require("./draft_dom_observer");
 const redis = require("redis");
 const { logger } = require("../telemetry/logger");
@@ -301,6 +305,11 @@ async function seedLedgerFromBoard(redisClient, state) {
  */
 function assignPickNumber(state, event) {
   if (event.pick_number != null) return event;
+
+  // Bail before touching the counter if the record can't be published anyway. evaluate() would
+  // reject it as "invalid" moments later, and minting a number for it would permanently skew
+  // every subsequent locally-numbered WS/DOM pick by one.
+  if (!isUsablePlayerId(event.player_id)) return event;
 
   const existing = state.ledger.byPlayer.get(String(event.player_id));
   if (existing && existing.pick_number != null) {
@@ -839,6 +848,10 @@ async function connectAndStream(redisClient, state) {
       // The ledger is per-draft: keeping the previous practice draft's players would make every
       // pick of the new one look like a duplicate and suppress the entire feed.
       state.ledger.reset();
+      // Health is per-draft for the same reason — carrying started_at, last_pick_seen_at and the
+      // per-tier counters across leagues would make the new draft's heartbeat describe a mixture
+      // of two drafts (recovered_picks and WS frame counts spanning both).
+      state.health = createIngestHealth();
     }
     state.leagueId = draftContext.leagueId;
     state.seasonId = draftContext.seasonId;
@@ -934,7 +947,11 @@ async function connectAndStream(redisClient, state) {
   } finally {
     if (reconcileInterval) clearInterval(reconcileInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
-    if (domObserver) domObserver.stop();
+    // Awaited so the in-page observer is actually disconnected before the browser closes — and
+    // never allowed to throw, since this runs in a finally guarding the browser teardown.
+    if (domObserver) {
+      await domObserver.stop().catch(() => {});
+    }
     if (session.browser) {
       await session.browser.close();
     }
