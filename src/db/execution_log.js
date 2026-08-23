@@ -55,9 +55,10 @@ async function recordExecution({
 // was for. fantasy-core-pipeline's `/v1/draft/status` reads the most recent row per
 // (league_id, season) back into `last_clicker_action` - season matters because a reactivated
 // league keeps the same league_id year over year. Same best-effort, never-throw contract as
-// recordExecution. roundNumber (not "pick number") because the WS SELECTED confirmation only
-// ever carries a round, never an overall pick index - naming it otherwise would misrepresent
-// what's actually stored.
+// recordExecution. roundNumber is nullable and frequently null: the WS SELECTED confirmation
+// carries a lineup slot id, not a round (see draft_room_socket.js's parseSelectedFrame), so the
+// clicker has no round to report. Only ingest tiers that genuinely parse one (the DOM board's
+// "1.04" labels, the REST feed's roundId) can populate this.
 async function recordDraftPickClick({
   leagueId,
   season,

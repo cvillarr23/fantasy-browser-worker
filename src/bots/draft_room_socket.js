@@ -7,7 +7,7 @@ const { logger } = require("../telemetry/logger");
  * CONFIRMED against a real capture on 2026-08-15/16 (recon-output/websockets.jsonl, via
  * draft_recon.js against a live practice draft — the user actually drafted several players): the
  * client submits a pick by sending a plain text frame `SELECT <playerId>\n` on the same socket
- * draft_sync.js (WORKER-05) already reads `SELECTED <teamId> <playerId> <round> [<memberId>]`
+ * draft_sync.js (WORKER-05) already reads `SELECTED <teamId> <playerId> <lineupSlotId> [<memberId>]`
  * broadcasts from. Correlated directly in the capture — a sent `SELECT 4362249` was immediately
  * followed by a received `SELECTED 8 4362249 10 {<our SWID>}`, i.e. our own pick echoed back
  * attributed to our own team. Also observed on the same socket, neither used here:
@@ -117,13 +117,16 @@ function parseSelectedFrame(raw) {
   const line = raw.toString().trim();
   if (!line.startsWith("SELECTED ")) return null;
 
-  const [, teamId, playerId, round] = line.split(/\s+/);
-  if (teamId == null || playerId == null || round == null) return null;
+  const [, teamId, playerId, lineupSlotId] = line.split(/\s+/);
+  if (teamId == null || playerId == null || lineupSlotId == null) return null;
 
   return {
     team_id: Number(teamId),
     player_id: Number(playerId),
-    round: Number(round),
+    lineup_slot_id: Number(lineupSlotId),
+    // Explicitly null, not absent: this frame carries no round, and consumers that used to
+    // read the slot id as one must see a deterministic "unknown" rather than undefined.
+    round: null,
   };
 }
 

@@ -19,7 +19,30 @@ const {
   fetchDraftDetail,
   connectAndStream,
   createDraftState,
+  parseSelectedFrame,
 } = require("../../src/bots/draft_sync");
+
+describe("parseSelectedFrame", () => {
+  // ESPN's SELECTED frame is `SELECTED <teamId> <playerId> <lineupSlotId> [<memberId>]`. The
+  // third token was long read as a round; joining a full 160-pick practice draft against player
+  // positions showed slot 1 was QB x10, 6 was TE x10 and 7 the FLEX. It masquerades as a round
+  // convincingly because a 10-team, 16-slot league produces exactly ten of every value either way.
+  it("reads the third token as a lineup slot id, not a round", () => {
+    expect(parseSelectedFrame("SELECTED 3 4360248 4")).toEqual({
+      team_id: 3,
+      player_id: 4360248,
+      lineup_slot_id: 4,
+    });
+  });
+
+  it("ignores frames that are not SELECTED", () => {
+    expect(parseSelectedFrame("CLOCK 3 90")).toBeNull();
+  });
+
+  it("rejects a truncated SELECTED frame rather than inventing a slot", () => {
+    expect(parseSelectedFrame("SELECTED 3 4360248")).toBeNull();
+  });
+});
 
 describe("fetchDraftDetail", () => {
   it("throws a clear error when ESPN reports a deleted draft league", async () => {

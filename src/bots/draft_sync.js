@@ -54,9 +54,14 @@ const PICK_SILENCE_WARN_MS = Number(
  *
  * 1. WebSocket (wss://fantasydraft.espn.com/game-1/league-{id}/JOIN?...), opened by the draft room
  *    page itself once loaded — NOT JSON. Plain space-delimited text frames, the relevant one being:
- *      SELECTED <teamId> <playerId> <round> [<memberId>]
- *    memberId is only present when a human (not autodraft) makes the pick. There's no overall pick
- *    number on this frame, only round — so pick_number is derived locally (see assignPickNumber).
+ *      SELECTED <teamId> <playerId> <lineupSlotId> [<memberId>]
+ *    memberId is only present when a human (not autodraft) makes the pick. The third token was
+ *    long read as a round; it is ESPN's lineup slot id (1=QB, 2/3=RB, 4/5=WR, 6=TE, 7=FLEX,
+ *    8/9=D-ST and K, 10+ bench), verified by joining a full 160-pick practice draft against
+ *    player positions. It is easy to mistake for a round because a 10-team, 16-slot league
+ *    yields exactly ten of every value either way. There's no overall pick number and no round
+ *    on this frame — so pick_number is derived locally (see assignPickNumber) and round is left
+ *    for the consumer to derive from it.
  *    FASTEST and most precise, but not continuously reliable here: the draft room is
  *    SINGLE-SESSION per league/team/member, so any second connection for the same identity (the
  *    user's own browser tab, or draft_clicker.js submitting a pick) silently EVICTS this one, and
@@ -112,13 +117,13 @@ function parseSelectedFrame(raw) {
   const line = raw.toString().trim();
   if (!line.startsWith("SELECTED ")) return null;
 
-  const [, teamId, playerId, round] = line.split(/\s+/);
-  if (teamId == null || playerId == null || round == null) return null;
+  const [, teamId, playerId, lineupSlotId] = line.split(/\s+/);
+  if (teamId == null || playerId == null || lineupSlotId == null) return null;
 
   return {
     team_id: Number(teamId),
     player_id: Number(playerId),
-    round: Number(round),
+    lineup_slot_id: Number(lineupSlotId),
   };
 }
 
@@ -397,7 +402,11 @@ async function handleSelectedFrame(parsed, redisClient, state) {
     // deriving one (and reusing an existing one for an already-known player).
     pick_number: null,
     team_id: parsed.team_id,
-    round: parsed.round,
+    // Deliberately NOT a round: the frame's third token is ESPN's lineup slot id, and WS
+    // frames carry no round at all. Emitting it as `round` made every consumer's round
+    // wrong (see parseSelectedFrame). Consumers derive round from pick_number instead.
+    lineup_slot_id: parsed.lineup_slot_id,
+    round: null,
     source: "ws",
     timestamp: new Date().toISOString(),
   };

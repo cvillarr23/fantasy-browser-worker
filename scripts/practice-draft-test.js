@@ -203,7 +203,7 @@ async function main() {
       } else if (String(outcome.event.team_id) !== String(teamId)) {
         log(
           `Failure mode: OBSERVED — player ${rank1.id} is owned by team ${outcome.event.team_id} ` +
-            `(round ${outcome.event.round}), not us. Safe: our SELECT produced no attribution to us.`,
+            `(lineup slot ${outcome.event.lineup_slot_id}), not us. Safe: our SELECT produced no attribution to us.`,
         );
       } else {
         log(
@@ -220,7 +220,7 @@ async function main() {
       socket.sendPick(candidate.id);
       const result = await confirmation;
       if (result) {
-        log(`SUCCESS: ${candidate.name} (${candidate.id}) confirmed, round ${result.round}.`);
+        log(`SUCCESS: ${candidate.name} (${candidate.id}) confirmed, lineup slot ${result.lineup_slot_id}.`);
         landed = candidate;
         break;
       }

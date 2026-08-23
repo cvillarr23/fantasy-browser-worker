@@ -112,7 +112,7 @@ describe("watchOnce stall warning (PR #42 review: exercise the actual arm/warn/c
     await flushMicrotasks();
 
     socket.handlers.onMessage("SELECTING 8 60000");
-    socket.handlers.onSelected({ team_id: "8", player_id: "4360438", round: 1 });
+    socket.handlers.onSelected({ team_id: "8", player_id: "4360438", lineup_slot_id: 1, round: null });
 
     jest.advanceTimersByTime(STALL_WARN_MS + 5000);
     expect(warnSpy).not.toHaveBeenCalled();
