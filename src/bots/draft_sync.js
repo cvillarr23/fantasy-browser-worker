@@ -169,15 +169,15 @@ async function ingestPickEvent(redisClient, rawEvent, state) {
     }
 
     const payload = JSON.stringify(decision.event);
-    const boardKey = `draft:${state.leagueId}:board`;
+    const ledgerKey = `draft:${state.leagueId}:picks`;
     const multi = redisClient
       .multi()
       .xAdd(`draft_picks:${state.leagueId}`, "*", { payload })
-      .hSet(boardKey, String(decision.event.pick_number), payload);
+      .hSet(ledgerKey, String(decision.event.pick_number), payload);
 
     // A correction that also changes the pick NUMBER (REST supplying a true overallPickNumber for
     // a pick first seen via WS's locally-counted guess) would otherwise leave the original number
-    // behind as a phantom board entry pointing at the same player.
+    // behind as a phantom ledger entry pointing at the same player.
     if (
       decision.action === "correct" &&
       decision.previous &&
@@ -185,7 +185,7 @@ async function ingestPickEvent(redisClient, rawEvent, state) {
       String(decision.previous.pick_number) !==
         String(decision.event.pick_number)
     ) {
-      multi.hDel(boardKey, String(decision.previous.pick_number));
+      multi.hDel(ledgerKey, String(decision.previous.pick_number));
     }
 
     await multi.exec();
@@ -246,27 +246,27 @@ function withIngestLock(state, fn) {
 }
 
 /**
- * Rehydrates the ledger from the durable board hash before any ingest happens.
+ * Rehydrates the ledger from the durable pick hash before any ingest happens.
  *
  * Without this, a mid-draft worker restart starts with an empty ledger while Redis still holds the
- * full board. The DOM observer's seed scan then reports every pick on the page, none of which the
- * ledger recognizes, so the entire draft is re-emitted downstream as brand-new picks — and worse,
- * assignPickNumber mints fresh numbers 1..N in DOM scan order, overwriting the board hash's
+ * full pick history. The DOM observer's seed scan then reports every pick on the page, none of which
+ * the ledger recognizes, so the entire draft is re-emitted downstream as brand-new picks — and worse,
+ * assignPickNumber mints fresh numbers 1..N in DOM scan order, overwriting the hash's
  * correct pick->player mapping. REST can't prevent that: for practice drafts it returns nothing.
  *
  * Best-effort: a failure here means the ledger starts cold, which is degraded but not fatal, so it
  * must not block the draft sync from coming up.
  */
 async function seedLedgerFromBoard(redisClient, state) {
-  const boardKey = `draft:${state.leagueId}:board`;
+  const ledgerKey = `draft:${state.leagueId}:picks`;
   let seeded = 0;
   try {
-    const board = await redisClient.hGetAll(boardKey);
+    const board = await redisClient.hGetAll(ledgerKey);
     for (const raw of Object.values(board || {})) {
       try {
         if (state.ledger.seed(JSON.parse(raw))) seeded += 1;
       } catch {
-        // One unparseable board entry shouldn't cost us the rest of the seed.
+        // One unparseable ledger entry shouldn't cost us the rest of the seed.
         state.health.seed_parse_errors += 1;
       }
     }
@@ -275,13 +275,13 @@ async function seedLedgerFromBoard(redisClient, state) {
     }
     state.health.seeded_from_board = seeded;
     logger.info(
-      `[Draft Sync] Seeded ledger with ${seeded} already-published pick(s) from ${boardKey} ` +
+      `[Draft Sync] Seeded ledger with ${seeded} already-published pick(s) from ${ledgerKey} ` +
         `(highest pick #${state.ledger.highestPickNumber ?? "none"}).`,
       { component: "draft_ingest", seeded },
     );
   } catch (err) {
     logger.error(
-      `[Draft Sync] Could not seed ledger from ${boardKey} — starting cold, which risks ` +
+      `[Draft Sync] Could not seed ledger from ${ledgerKey} — starting cold, which risks ` +
         `re-publishing picks already on the board: ${err.message}`,
       { component: "draft_ingest", err },
     );
