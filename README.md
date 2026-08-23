@@ -31,5 +31,12 @@ flowchart TD
     selectors --> espn["ESPN fantasy site\n(Playwright/Chromium)"]
 ```
 
+## Image release + Argo CD Image Updater contract
+- Pushes to `main` publish:
+  - `ghcr.io/cvillarr23/fantasy-browser-worker:latest`
+  - `ghcr.io/cvillarr23/fantasy-browser-worker:${GITHUB_SHA}`
+- CI records the pushed immutable digest (`@sha256:...`) in the workflow summary.
+- `fantasy-infra` owns Argo CD Image Updater configuration and should track this image via digest strategy, writing back deterministic Kustomize digest updates to `main`.
+
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
