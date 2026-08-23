@@ -197,6 +197,76 @@ programmatic input from the browser's perspective — the same category reCAPTCH
 blocked once. VNC input is indistinguishable from a real mouse/keyboard because a human is
 actually driving it, just over the network.
 
+## Pick ingestion: three tiers, and why
+
+`draft_sync.js` ingests picks from three sources at once. This is not redundancy for its own sake —
+tiers 1 and 2 have a **confirmed simultaneous blind spot** for exactly the case that matters
+(practice drafts), which is what issue #52 was opened about.
+
+| Tier | Source | Strength | Failure mode |
+|---|---|---|---|
+| 1 | WS `SELECTED` frames | Fastest (~250ms), exact numeric ids | Room is single-session — any second connection for the same league/team/member **evicts** us, and the protocol has **no replay**. Every pick broadcast during the gap is lost. |
+| 2 | REST `mDraftDetail` | Only source with a true `overallPickNumber` | Returns **zero picks for the entire duration** of a practice/mock draft (see above). |
+| 3 | Rendered draft board (DOM observer + poller) | Shows the **full history** regardless of when we connected or who picked | Selector-dependent, and the board markup is **unverified** (see below). |
+
+Tier 3 exists because tiers 1 and 2 fail *together* during a practice draft: the WS gets evicted
+(by the user's own browser tab, or by `draft_clicker.js` connecting to submit a pick), and REST —
+the natural backfill — has nothing. The rendered board is the only surface that still knows what
+happened.
+
+### Dedup: keyed on `player_id`, not `pick_number`
+
+All three tiers funnel through `draft_pick_ledger.js`. Source precedence is
+`rest > dom > init > ws`: WS publishes first (it's the fastest), higher tiers only ever *correct*
+what it published.
+
+The dedup key is **`player_id`**, deliberately not `pick_number`, because pick numbers are not
+comparable across sources: WS frames carry none at all (`draft_sync.js` derives one from a local
+counter, so one missed frame offsets every subsequent pick permanently), the DOM board may show a
+round-relative label or nothing, and only REST has a real one. A player can be drafted exactly
+once, so `player_id` is the only genuinely stable identity. Issue #52's composite
+(`league_id + pick_number + player_id + team_id`) is retained as `pickIdentity()` for
+equality/logging.
+
+Two durability rules make that ledger safe to rely on as the *only* dedup gate:
+
+- **Commit-after-write.** `evaluate()` decides; `commit()` records. `draft_sync.js` only commits
+  once the Redis write actually lands. Recording earlier would mean a transient Redis failure
+  permanently marks a pick as published while nothing was ever emitted — every later observation
+  of it would then be dropped as a duplicate and the pick lost for the rest of the draft.
+- **Seeded from the durable board on startup.** `seedLedgerFromBoard` rehydrates from
+  `draft:{leagueId}:board` before any tier can ingest. Without it, a mid-draft worker restart
+  starts cold, and the DOM observer's first full-board scan re-publishes the entire draft as new
+  picks — minting fresh pick numbers in DOM scan order and overwriting the board hash's correct
+  pick→player mapping. REST cannot cover for this, since it returns nothing for practice drafts.
+
+Ingest is also serialized (one pick at a time) so that two tiers reporting the same pick
+concurrently can't both pass `evaluate()` before either commits.
+
+### DOM board selectors are UNVERIFIED
+
+Unlike the Draft/Queue buttons above, the draft **board / pick-history** markup has never been
+captured while picks were on it. `draft_dom_observer.js` therefore tries a prioritized list of
+candidate strategies (ending in a structure-free `[data-player-id][data-team-id]` scan that should
+survive a redesign) and **logs every miss** with per-candidate match counts and a truncated
+`sample_html` of the board. One look at the pod logs from a real draft is enough to fix the
+selector — no extra live-testing round trip needed just to discover it's broken.
+
+### Debugging a missing pick from pod logs
+
+Structured fields to filter on (`component=`):
+- `draft_ws` — socket open/close with per-socket frame and pick counts. A close logs at `warn`
+  because it's usually an eviction, and tells you how big the gap is.
+- `draft_dom_observer` — scan results, selector misses (with DOM sample), recovery.
+- `draft_ingest` — every publish/correct/drop decision, with `source`, `pick_identity` and
+  `decision`. `"DOM tier recovered N pick(s) the WebSocket never delivered"` is the headline #52
+  signal: if it appears often, the socket is being evicted more than expected.
+- `draft_health` — fixed-cadence heartbeat (also written to `draft:{leagueId}:health` in Redis)
+  with `ws_connected`, `picks_known`, `last_pick_seen_at`, `pick_silence_ms` and per-tier counters.
+  It emits regardless of activity **because silence is ambiguous** — a feed with no picks for two
+  minutes looks identical whether it's healthy during a slow drafter's turn, evicted, session-
+  expired, or running a stale selector.
+
 ## Practice/mock drafts: quirks worth knowing
 
 - Clicking "Practice Draft" from the mock draft lobby sometimes opens the actual draft room in a
