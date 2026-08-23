@@ -15,7 +15,7 @@
  * equality/correction checks compare against — but it is deliberately NOT the map key, because
  * `pick_number` is not trustworthy across sources:
  *
- *   - WS `SELECTED <teamId> <playerId> <round>` carries NO overall pick number at all. draft_sync
+ *   - WS `SELECTED <teamId> <playerId> <lineupSlotId>` carries NO overall pick number at all. draft_sync
  *     derives one from a local running counter, so a single missed frame permanently offsets every
  *     subsequent WS pick number.
  *   - The DOM board may render pick numbers per round ("1.04") or not at all.
