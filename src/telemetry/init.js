@@ -63,11 +63,16 @@ async function shutdownTelemetry() {
   try {
     await sdk.shutdown();
   } catch (err) {
+    // Read the message defensively: a promise can reject with anything, including null, and this
+    // warning is the ONLY evidence that a flush failed. Reading `err.message` off a null rejection
+    // throws, and while the try/catch below would swallow that, the result is a flush failure that
+    // leaves no trace at all -- the silent-failure mode this helper exists to avoid.
+    const detail = (err && err.message) || String(err);
     // logger is required lazily: this module is loaded via NODE_OPTIONS=--require before
     // anything else, and a top-level require of the logger would invert that bootstrap order.
     try {
       require("./logger").logger.warn(
-        `[Telemetry] Could not flush spans on shutdown: ${err.message}. Traces for this run may be missing.`,
+        `[Telemetry] Could not flush spans on shutdown: ${detail}. Traces for this run may be missing.`,
       );
     } catch {
       // Logging the logging failure is where this stops.

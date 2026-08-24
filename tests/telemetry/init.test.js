@@ -55,6 +55,21 @@ describe("shutdownTelemetry", () => {
     );
   });
 
+  // A promise can reject with anything. Reading `.message` off a null rejection throws, and while
+  // the inner catch swallows that, the outcome is a flush failure that leaves NO log line -- the
+  // silent failure this helper exists to avoid. So the warning must survive a non-Error rejection.
+  it.each([
+    [null, "null"],
+    [undefined, "undefined"],
+    ["plain string rejection", "plain string rejection"],
+    [{ code: 14 }, "[object Object]"],
+  ])("still warns when rejected with %p", async (rejection, expected) => {
+    mockShutdown.mockRejectedValue(rejection);
+
+    await expect(shutdownTelemetry()).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(expected));
+  });
+
   it("resolves even if the failure logging itself throws", async () => {
     mockShutdown.mockRejectedValue(new Error("boom"));
     logger.warn.mockImplementation(() => {
