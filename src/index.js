@@ -4,7 +4,7 @@ const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
-const { sdk } = require("./telemetry/init");
+const { shutdownTelemetry } = require("./telemetry/init");
 
 // Routes a parsed queue payload to its automation target. Split out from handleIncomingMessage
 // so withInstrumentation wraps the whole dispatch (span + MDC context + execution_log write) in
@@ -62,7 +62,7 @@ async function bootDaemon() {
     try {
       // In a `finally` because NodeSDK.shutdown() can reject; without it, a rejection here
       // would skip process.exit(1) and leave a pod alive with no queue consumer running.
-      await sdk.shutdown();
+      await shutdownTelemetry();
     } finally {
       process.exit(1);
     }
@@ -85,7 +85,7 @@ process.on("uncaughtException", async (error) => {
     // most want, and NodeSDK batches/flushes on an interval that a process.exit() would cut
     // short. In a `finally` because shutdown() can itself reject; without it, a rejection here
     // would skip process.exit(1) and leave a pod alive after an uncaught exception.
-    await sdk.shutdown();
+    await shutdownTelemetry();
   } finally {
     process.exit(1);
   }

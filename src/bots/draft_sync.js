@@ -1062,9 +1062,9 @@ if (require.main === module) {
     // withInstrumentation's own catch has already recorded the span/execution_log failure by
     // the time this runs -- only flushing and exiting is left to do. In a try/finally because
     // shutdown() can itself reject.
-    const { sdk } = require("../telemetry/init");
+    const { shutdownTelemetry } = require("../telemetry/init");
     try {
-      await sdk.shutdown();
+      await shutdownTelemetry();
     } finally {
       process.exit(1);
     }

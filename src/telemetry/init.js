@@ -39,4 +39,35 @@ const sdk = new NodeSDK({
 
 sdk.start();
 
-module.exports = { sdk };
+/**
+ * Flushes buffered spans, and NEVER rejects.
+ *
+ * Every caller of this is a shutdown path — a `finally` block draining a short-lived Job's event
+ * loop, or a signal handler. `sdk.shutdown()` rejects when the exporter cannot reach the
+ * collector, and in a `finally` that rejection is unhandled, which Node turns into a fatal
+ * uncaught exception. The result is a job that did its work correctly, logged success, and then
+ * died while trying to report that success — the observability layer manufacturing the very
+ * failure it exists to detect.
+ *
+ * Seen in production: espn-session-healthcheck logged "ESPN session is healthy", then crashed on
+ * `connect EPERM 10.152.183.156:4317` and reported the CronJob as Failed.
+ *
+ * A dropped trace is an acceptable loss. A dropped job is not.
+ */
+async function shutdownTelemetry() {
+  try {
+    await sdk.shutdown();
+  } catch (err) {
+    // logger is required lazily: this module is loaded via NODE_OPTIONS=--require before
+    // anything else, and a top-level require of the logger would invert that bootstrap order.
+    try {
+      require("./logger").logger.warn(
+        `[Telemetry] Could not flush spans on shutdown: ${err.message}. Traces for this run may be missing.`,
+      );
+    } catch {
+      // Logging the logging failure is where this stops.
+    }
+  }
+}
+
+module.exports = { sdk, shutdownTelemetry };

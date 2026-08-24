@@ -468,9 +468,9 @@ if (require.main === module) {
     () => executeLineupAdjustments(payload),
   ).catch(async (error) => {
     logger.error(`[Lineup Bot] Run failed: ${error.message}`, { err: error });
-    const { sdk } = require("../telemetry/init");
+    const { shutdownTelemetry } = require("../telemetry/init");
     try {
-      await sdk.shutdown();
+      await shutdownTelemetry();
     } finally {
       process.exit(1);
     }

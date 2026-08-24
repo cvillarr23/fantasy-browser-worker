@@ -29,7 +29,11 @@ async function checkEspnSession() {
   let session = null;
   try {
     session = await createAuthenticatedSession();
-    await assertRenderedSessionValid(session.page, { leagueId, teamId, seasonId });
+    await assertRenderedSessionValid(session.page, {
+      leagueId,
+      teamId,
+      seasonId,
+    });
 
     logger.info(
       `[Session Check] ESPN session is healthy — roster table rendered for league ${leagueId}, team ${teamId}.`,
@@ -67,9 +71,11 @@ if (require.main === module) {
     })
     .finally(async () => {
       // Flush any buffered spans before this short-lived CronJob pod's event loop drains --
-      // not guaranteed to happen on its own before exit.
-      const { sdk } = require("../telemetry/init");
-      await sdk.shutdown();
+      // not guaranteed to happen on its own before exit. shutdownTelemetry never rejects: a
+      // rejection here is unhandled (this is a `finally`) and would kill the pod AFTER the check
+      // already passed, reporting a healthy session as a failed CronJob.
+      const { shutdownTelemetry } = require("../telemetry/init");
+      await shutdownTelemetry();
     });
 }
 

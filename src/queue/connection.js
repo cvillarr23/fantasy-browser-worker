@@ -1,7 +1,7 @@
 const amqp = require("amqplib");
 const { logger } = require("../telemetry/logger");
 const { runWithContext, updateContext } = require("../telemetry/context");
-const { sdk } = require("../telemetry/init");
+const { shutdownTelemetry } = require("../telemetry/init");
 
 // Load AMQP configuration topology safely from cluster-injected variables
 const AMQP_URL =
@@ -45,7 +45,7 @@ async function connectWithRetry() {
           // reject (an exporter/processor failing to flush); without the finally, a rejection
           // here would skip process.exit(1) entirely and leave a pod alive with its channel and
           // consumers gone -- silently processing nothing forever instead of restarting.
-          await sdk.shutdown();
+          await shutdownTelemetry();
         } finally {
           process.exit(1);
         }
