@@ -4,6 +4,7 @@ jest.mock("amqplib");
 // mocking it here keeps that real module from ever loading.
 jest.mock("../../src/telemetry/init", () => ({
   sdk: { shutdown: jest.fn().mockResolvedValue(undefined) },
+  shutdownTelemetry: jest.fn().mockResolvedValue(undefined),
 }));
 
 const amqplib = require("amqplib");

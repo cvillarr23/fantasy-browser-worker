@@ -39,4 +39,45 @@ const sdk = new NodeSDK({
 
 sdk.start();
 
-module.exports = { sdk };
+/**
+ * Flushes buffered spans, and NEVER rejects.
+ *
+ * Every caller of this is a shutdown path — a `finally` block draining a short-lived Job's event
+ * loop, or a signal handler. `sdk.shutdown()` rejects when the exporter cannot reach the
+ * collector, and in a `finally` that rejection is unhandled, which Node turns into a fatal
+ * uncaught exception. The result is a job that did its work correctly, logged success, and then
+ * died while trying to report that success — the observability layer manufacturing the very
+ * failure it exists to detect.
+ *
+ * Seen in production: espn-session-healthcheck logged "ESPN session is healthy", then crashed on
+ * `connect EPERM 10.152.183.156:4317` and reported the CronJob as Failed.
+ *
+ * src/index.js's process.on("unhandledRejection") handler does not save these: k8s Jobs/CronJobs
+ * override the container command to run a bot file directly, bypassing src/index.js entirely (the
+ * same reason this module is bootstrapped via NODE_OPTIONS=--require). So the bots that most need
+ * the guard are exactly the ones running without it -- it has to live here.
+ *
+ * A dropped trace is an acceptable loss. A dropped job is not.
+ */
+async function shutdownTelemetry() {
+  try {
+    await sdk.shutdown();
+  } catch (err) {
+    // Read the message defensively: a promise can reject with anything, including null, and this
+    // warning is the ONLY evidence that a flush failed. Reading `err.message` off a null rejection
+    // throws, and while the try/catch below would swallow that, the result is a flush failure that
+    // leaves no trace at all -- the silent-failure mode this helper exists to avoid.
+    const detail = (err && err.message) || String(err);
+    // logger is required lazily: this module is loaded via NODE_OPTIONS=--require before
+    // anything else, and a top-level require of the logger would invert that bootstrap order.
+    try {
+      require("./logger").logger.warn(
+        `[Telemetry] Could not flush spans on shutdown: ${detail}. Traces for this run may be missing.`,
+      );
+    } catch {
+      // Logging the logging failure is where this stops.
+    }
+  }
+}
+
+module.exports = { sdk, shutdownTelemetry };

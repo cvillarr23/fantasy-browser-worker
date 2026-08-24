@@ -403,9 +403,9 @@ if (require.main === module) {
     logger.error(`[Draft Clicker] Run failed: ${error.message}`, {
       err: error,
     });
-    const { sdk } = require("../telemetry/init");
+    const { shutdownTelemetry } = require("../telemetry/init");
     try {
-      await sdk.shutdown();
+      await shutdownTelemetry();
     } finally {
       process.exit(1);
     }

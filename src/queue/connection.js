@@ -1,7 +1,7 @@
 const amqp = require("amqplib");
 const { logger } = require("../telemetry/logger");
 const { runWithContext, updateContext } = require("../telemetry/context");
-const { sdk } = require("../telemetry/init");
+const { shutdownTelemetry } = require("../telemetry/init");
 
 // Load AMQP configuration topology safely from cluster-injected variables
 const AMQP_URL =
@@ -41,11 +41,11 @@ async function connectWithRetry() {
         );
         try {
           // Flush any buffered spans before exiting -- see src/index.js's uncaughtException
-          // handler for the same reasoning. In a `finally` because NodeSDK.shutdown() can
-          // reject (an exporter/processor failing to flush); without the finally, a rejection
-          // here would skip process.exit(1) entirely and leave a pod alive with its channel and
-          // consumers gone -- silently processing nothing forever instead of restarting.
-          await sdk.shutdown();
+          // handler for the same reasoning. shutdownTelemetry never rejects, so the `finally` is
+          // belt-and-braces: process.exit(1) must run no matter what, or the pod stays alive with
+          // its channel and consumers gone -- silently processing nothing forever instead of
+          // restarting.
+          await shutdownTelemetry();
         } finally {
           process.exit(1);
         }
