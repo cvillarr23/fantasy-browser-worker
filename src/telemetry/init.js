@@ -52,6 +52,11 @@ sdk.start();
  * Seen in production: espn-session-healthcheck logged "ESPN session is healthy", then crashed on
  * `connect EPERM 10.152.183.156:4317` and reported the CronJob as Failed.
  *
+ * src/index.js's process.on("unhandledRejection") handler does not save these: k8s Jobs/CronJobs
+ * override the container command to run a bot file directly, bypassing src/index.js entirely (the
+ * same reason this module is bootstrapped via NODE_OPTIONS=--require). So the bots that most need
+ * the guard are exactly the ones running without it -- it has to live here.
+ *
  * A dropped trace is an acceptable loss. A dropped job is not.
  */
 async function shutdownTelemetry() {

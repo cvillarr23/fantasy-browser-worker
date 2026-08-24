@@ -1060,8 +1060,8 @@ if (require.main === module) {
     streamLiveDraftRoom,
   ).catch(async () => {
     // withInstrumentation's own catch has already recorded the span/execution_log failure by
-    // the time this runs -- only flushing and exiting is left to do. In a try/finally because
-    // shutdown() can itself reject.
+    // the time this runs -- only flushing and exiting is left to do. shutdownTelemetry never
+    // rejects, so the try/finally is belt-and-braces: process.exit(1) must run no matter what.
     const { shutdownTelemetry } = require("../telemetry/init");
     try {
       await shutdownTelemetry();
