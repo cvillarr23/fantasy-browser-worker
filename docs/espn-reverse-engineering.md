@@ -50,7 +50,7 @@ three together got past it; unconfirmed which one (or both) the 403 was actually
 |---|---|---|
 | `INIT <base64 blob>` | server→client | Full draft-state sync, sent once per connection. Large (10-20KB+). |
 | `TOKEN 1:{leagueId}:{teamId}:{memberId}:-301672673` | server→client | Echoes the JOIN token back. |
-| `STATE <n>` | server→client | Seen once at connection start; exact meaning unconfirmed (likely draft-in-progress flag). |
+| `STATE <n>` | server→client | **Draft lifecycle flag — confirmed 2026-08-25** (real practice draft, league 20050783, 10 teams/160 picks): `1` seen once at connection start (in progress); `2` seen exactly once, immediately after the final `SELECTED`, and never again. The socket stayed open afterward (plain `PING`/`PONG` only) — it did **not** close. This is the fastest, most authoritative draft-completion signal available (see issue #62 below); previously unconfirmed and silently discarded. |
 | `CLOCK <slot> <msRemaining> <teamId>` | server→client | Periodic countdown-clock update. |
 | `AUTOSUGGEST <playerId>` | server→client | Best-available-player suggestion broadcast. |
 | `AUTODRAFT <teamId> <bool>` | server→client | A team's autodraft toggle state changed. |
@@ -235,7 +235,8 @@ Two durability rules make that ledger safe to rely on as the *only* dedup gate:
   permanently marks a pick as published while nothing was ever emitted — every later observation
   of it would then be dropped as a duplicate and the pick lost for the rest of the draft.
 - **Seeded from the durable board on startup.** `seedLedgerFromBoard` rehydrates from
-  `draft:{leagueId}:board` before any tier can ingest. Without it, a mid-draft worker restart
+  `draft:{leagueId}:picks` (renamed off the shared `draft:{leagueId}:board` key by #56 — this doc
+  previously lagged that rename) before any tier can ingest. Without it, a mid-draft worker restart
   starts cold, and the DOM observer's first full-board scan re-publishes the entire draft as new
   picks — minting fresh pick numbers in DOM scan order and overwriting the board hash's correct
   pick→player mapping. REST cannot cover for this, since it returns nothing for practice drafts.
@@ -266,6 +267,54 @@ Structured fields to filter on (`component=`):
   It emits regardless of activity **because silence is ambiguous** — a feed with no picks for two
   minutes looks identical whether it's healthy during a slow drafter's turn, evicted, session-
   expired, or running a stale selector.
+
+### Draft completion (issue #62)
+
+A genuinely finished draft used to look, at the transport layer, identical to a dead/evicted
+connection: `mDraftDetail` 404s or goes empty (practice drafts never had it working anyway — see
+above), and the DOM board scan misses (the board is gone). Before #62, `draft_sync.js` treated this
+as always-transient and reconnected forever — a fresh headless Chromium every ~32s, indefinitely.
+Live recon (2026-08-25, practice league 20050783, 10 teams/160 picks) found the WS does **not**
+actually close on completion — it stays open, idle apart from `PING`/`PONG` — so the original
+issue's assumption of a closing socket doesn't reproduce; what does reliably signal completion is
+the `STATE 2` frame documented above.
+
+Two — and only two — signals are treated as authoritative enough to declare the draft complete
+(exit 0), checked every reconnect cycle:
+- **`STATE 2` frame** (`state.draftCompleted`): **CONFIRMED 2026-08-25** — ESPN's own completion
+  signal, fired exactly once immediately after the final `SELECTED` and never again. Sets
+  `state.draftCompleted` the instant the WS frame handler sees it, breaking the connection loop
+  without waiting on anything else.
+- **Total-picks reached** (`fetchDraftTotals`, `state.expectedTotalPicks`): a `mSettings`+`mTeam`
+  REST call learns `teams × draftable roster slots` once per league — excluding slot id `21` (IR),
+  which is allocated roster space never filled during the draft itself. **CONFIRMED 2026-08-25
+  working mid-draft** even for ephemeral practice drafts (unlike `mDraftDetail`, which never worked
+  for them at all): the same league returned `teamCount=10`, `rosterSlotsPerTeam=17` (16 draftable
+  + 1 IR) — naively summing all 17 would compute 170 and the fast path would never fire, since the
+  draft only ever produced 160 picks (10 × 16). **CONFIRMED torn down post-completion**
+  (`LEAGUE_NOT_FOUND_DELETED`, same as `mDraftDetail`'s documented post-completion behavior) — a
+  reconnect landing after the draft ends gets `null` here, which is expected, not a bug: whatever
+  total was already learned on an earlier cycle is preserved rather than cleared, since this is
+  exactly the reconnect where it matters most.
+
+A third counter — `state.consecutiveEmptyCycles`, N consecutive reconnect cycles with zero new
+picks across all three tiers — is deliberately **not** a third way to call this terminal. Silence
+is ambiguous: a sustained ESPN/network outage on a still-active draft looks identical to a finished
+one at this layer, and wrongly declaring "complete" would permanently stop syncing a draft that's
+still going. Instead it only escalates the "still retrying" log line from `warn` to `error` once it
+reaches `DRAFT_STALL_TERMINAL_CYCLES` (env-tunable, default 3), and rides the reconnect-cap/backoff
+machinery (`decideReconnectAction`, `MAX_RECONNECT_ATTEMPTS`) to a bounded, honest **failure** exit
+(1) if neither real signal ever fires — "gave up, don't know if it finished" rather than a false
+"it's done."
+
+The heartbeat snapshot now also carries `terminal`, `terminal_reason` (`"state_2_frame"` or
+`"total_picks_reached"` — `null` otherwise), `consecutive_empty_cycles`, and `expected_total_picks`
+— the last two on every heartbeat (not just a terminal one), so the progression is visible in
+logs/Grafana before a terminal call (or the stall-escalation threshold) fires. On a terminal
+heartbeat, `draft:{leagueId}:connected` is deleted immediately (rather than left to its 60s TTL)
+and the process exits 0 instead of continuing to reconnect. Proposal #4 from issue #62 (raw frame
+types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments
+`ws.other_frames[type]` and logs once per type per run — this is exactly how `STATE 2` was found.
 
 ## Practice/mock drafts: quirks worth knowing
 
