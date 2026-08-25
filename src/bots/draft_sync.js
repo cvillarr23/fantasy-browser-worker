@@ -41,6 +41,13 @@ const HEALTH_HEARTBEAT_INTERVAL_MS = Number(
 const PICK_SILENCE_WARN_MS = Number(
   process.env.DRAFT_PICK_SILENCE_WARN_MS || 180000,
 );
+// Issue #62: how many consecutive reconnect cycles can produce zero new picks across all three
+// ingest tiers before the loop gives up waiting for a transient blip and treats the draft as
+// finished. The fast/authoritative terminal signal (expectedTotalPicks, see fetchDraftTotals) can
+// short-circuit this entirely; this is the fallback for when that signal isn't available.
+const DRAFT_STALL_TERMINAL_CYCLES = Number(
+  process.env.DRAFT_STALL_TERMINAL_CYCLES || 3,
+);
 
 /**
  * Live Draft Room Network Interceptor Daemon
@@ -110,6 +117,14 @@ function buildDraftUrl(leagueId, seasonId, teamId, memberId) {
 
 function buildDraftDetailUrl(leagueId, seasonId) {
   return `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}?view=mDraftDetail`;
+}
+
+// Same view set espn_api.js's readRoster already reads successfully post-draft (mSettings for
+// rosterSettings.lineupSlotCounts, mTeam to populate body.teams). Built locally rather than
+// importing espn_api.js's buildLeagueReadUrl to keep the require edge one-directional (see
+// readDraftPicks's header in espn_api.js) — draft_sync.js is not meant to depend on espn_api.js.
+function buildLeagueSettingsUrl(leagueId, seasonId) {
+  return `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}?view=mSettings&view=mTeam`;
 }
 
 /** Parses a raw WS text frame, returning a SELECTED event or null for anything else (CLOCK, JOINED, etc). */
@@ -367,6 +382,67 @@ async function fetchDraftDetail(context, state) {
     .sort((a, b) => a.pick_number - b.pick_number);
 }
 
+/**
+ * Best-effort fetch of the expected total pick count (teams x roster slots) for issue #62's
+ * proactive terminal-detection fast path — lets connectAndStream exit the instant the ledger
+ * reaches this size, instead of waiting for the stall-detection fallback (see
+ * DRAFT_STALL_TERMINAL_CYCLES) or the WS_DEAD_GRACE_MS watchdog.
+ *
+ * UNVERIFIED for ephemeral practice drafts as of this change (2026-08-24) — this repo has one
+ * confirmed case of a sibling mDraftDetail-family endpoint (mDraftDetail itself, see
+ * fetchDraftDetail/readDraftPicks) returning nothing usable for the exact league type this issue
+ * was filed against, so treat a null/best-guess return here as the expected, safe outcome, not a
+ * bug: every caller falls back to stall detection instead. Re-verify against a real practice draft
+ * (both mid-draft and post-completion) and update this comment with a CONFIRMED
+ * working/unreliable finding once that recon runs.
+ */
+async function fetchDraftTotals(context, state) {
+  try {
+    const response = await context.request.get(
+      buildLeagueSettingsUrl(state.leagueId, state.seasonId),
+    );
+    if (!response.ok()) {
+      throw new Error(
+        `mSettings/mTeam fetch failed: HTTP ${response.status()}`,
+      );
+    }
+    const body = await response.json();
+    const teamCount = Array.isArray(body?.teams) ? body.teams.length : 0;
+    const slotCounts = body?.settings?.rosterSettings?.lineupSlotCounts || {};
+    const rosterSlotsPerTeam = Object.values(slotCounts).reduce(
+      (sum, n) => sum + (Number(n) || 0),
+      0,
+    );
+    if (teamCount === 0 || rosterSlotsPerTeam === 0) {
+      throw new Error(
+        `mSettings/mTeam response missing usable team/roster data (teams=${teamCount}, ` +
+          `rosterSlotsPerTeam=${rosterSlotsPerTeam})`,
+      );
+    }
+    const totalExpectedPicks = teamCount * rosterSlotsPerTeam;
+    logger.info(
+      `[Draft Sync] Learned expected total picks: ${teamCount} teams x ` +
+        `${rosterSlotsPerTeam} roster slots = ${totalExpectedPicks}.`,
+      {
+        component: "draft_ingest",
+        teamCount,
+        rosterSlotsPerTeam,
+        totalExpectedPicks,
+      },
+    );
+    return { teamCount, rosterSlotsPerTeam, totalExpectedPicks };
+  } catch (err) {
+    // Non-fatal by design (mirrors reconcileFromRest): this is a best-effort fast path, not a
+    // required one. A null return means the stall-detection fallback governs terminal detection
+    // instead.
+    logger.warn(
+      `[Draft Sync] Could not learn expected total picks (falling back to stall detection): ${err.message}`,
+      { component: "draft_ingest", err },
+    );
+    return null;
+  }
+}
+
 async function reconcileFromRest(context, redisClient, state) {
   try {
     const picks = await fetchDraftDetail(context, state);
@@ -565,7 +641,23 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       }
 
       const parsed = parseSelectedFrame(line);
-      if (!parsed) return;
+      if (!parsed) {
+        // Issue #62 proposal #4: every non-SELECTED, non-INIT frame was previously discarded with
+        // no trace at all, so a draft-completion frame (if ESPN sends one) would never be
+        // noticed. Cheap capture: count by type, log only the first occurrence per type per run
+        // (CLOCK alone would otherwise spam a line roughly once a second).
+        const type = line.split(/\s+/)[0] || "EMPTY";
+        if (!(type in state.health.ws.other_frames)) {
+          logger.info(`[Draft Sync] First-seen frame type this run: ${type}`, {
+            component: "draft_ws",
+            frame_type: type,
+            socket_id: socketId,
+          });
+        }
+        state.health.ws.other_frames[type] =
+          (state.health.ws.other_frames[type] || 0) + 1;
+        return;
+      }
       picksOnThisSocket += 1;
 
       if (!state.ready) {
@@ -710,6 +802,14 @@ function createDraftState() {
     // Serializes ingest so evaluate -> write -> commit is atomic per pick (see withIngestLock).
     ingestChain: Promise.resolve(),
     sessionExpiredError: null,
+    // Issue #62: consecutive connectAndStream cycles that produced zero new picks across every
+    // tier. Persists across reconnects on purpose (like the ledger) — reset only on real progress
+    // or a league change, never on a mere reconnect.
+    consecutiveEmptyCycles: 0,
+    // Issue #62: best-effort teams x roster-slots total, from fetchDraftTotals. Null means
+    // "unknown" (fetch not yet run, or failed) — terminal detection falls back to
+    // consecutiveEmptyCycles in that case. Per-draft, like the ledger/health.
+    expectedTotalPicks: null,
   };
 }
 
@@ -736,6 +836,9 @@ function createIngestHealth() {
       frames_received: 0,
       init_frames: 0,
       last_close_at: null,
+      // Issue #62 proposal #4: counts of every non-INIT, non-SELECTED frame type seen this run,
+      // keyed by its first token (e.g. "CLOCK", "STATE", "AUTOSUGGEST").
+      other_frames: {},
     },
     dom: {
       scans_ingested: 0,
@@ -765,7 +868,11 @@ function createIngestHealth() {
  * Redis write failures are swallowed deliberately: a heartbeat must never be the thing that takes
  * down a working draft sync.
  */
-async function emitHealthHeartbeat(redisClient, state, { wsConnected, dom }) {
+async function emitHealthHeartbeat(
+  redisClient,
+  state,
+  { wsConnected, dom, terminal = false, terminalReason = null },
+) {
   const now = Date.now();
   const lastPickAt = state.health.last_pick_seen_at
     ? new Date(state.health.last_pick_seen_at).getTime()
@@ -782,6 +889,13 @@ async function emitHealthHeartbeat(redisClient, state, { wsConnected, dom }) {
     picks_known: state.ledger.size(),
     ledger_stats: state.ledger.stats,
     pick_silence_ms: silenceMs,
+    // Issue #62: surfaced on every heartbeat (not just a final one) so the progression toward
+    // DRAFT_STALL_TERMINAL_CYCLES, and whether an authoritative total was ever learned, is visible
+    // in logs/Grafana before a terminal event fires.
+    consecutive_empty_cycles: state.consecutiveEmptyCycles,
+    expected_total_picks: state.expectedTotalPicks,
+    terminal,
+    terminal_reason: terminalReason,
     emitted_at: new Date().toISOString(),
   };
 
@@ -888,11 +1002,21 @@ async function connectAndStream(redisClient, state) {
       // per-tier counters across leagues would make the new draft's heartbeat describe a mixture
       // of two drafts (recovered_picks and WS frame counts spanning both).
       state.health = createIngestHealth();
+      // Issue #62: same reasoning — a stall streak or a learned total from the PREVIOUS league's
+      // draft has no bearing on this one.
+      state.consecutiveEmptyCycles = 0;
+      state.expectedTotalPicks = null;
     }
     state.leagueId = draftContext.leagueId;
     await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
     state.seasonId = draftContext.seasonId;
     state.teamId = draftContext.teamId;
+
+    // Issue #62 proposal #1: best-effort — see fetchDraftTotals' header for the unverified-for-
+    // practice-drafts caveat. A null result just means the stall-detection fallback governs.
+    state.expectedTotalPicks =
+      (await fetchDraftTotals(session.context, state))?.totalExpectedPicks ??
+      null;
 
     // Rehydrate from the durable board BEFORE anything can ingest. On a mid-draft restart Redis
     // still holds every pick published so far, and without this the DOM observer's first full
@@ -972,7 +1096,14 @@ async function connectAndStream(redisClient, state) {
       );
     }, HEALTH_HEARTBEAT_INTERVAL_MS);
 
-    while (!handle.isDead()) {
+    const picksAtCycleStart = state.ledger.size();
+    const totalPicksReached = () =>
+      state.expectedTotalPicks != null &&
+      state.ledger.size() >= state.expectedTotalPicks;
+
+    // Issue #62: the loop now also exits proactively the instant the learned total is reached —
+    // no need to wait out WS_DEAD_GRACE_MS once we're already confident the draft is over.
+    while (!handle.isDead() && !totalPicksReached()) {
       // Retrying REST reconciliation forever against an expired session is pointless the same way
       // retrying a doomed pick is — throw out to streamLiveDraftRoom's reconnect-with-backoff
       // rather than spinning here until the outer WS_DEAD_GRACE_MS watchdog eventually notices.
@@ -981,9 +1112,53 @@ async function connectAndStream(redisClient, state) {
       }
       await session.page.waitForTimeout(5000);
     }
-    logger.warn(
-      "[Draft Sync] Connection appears dead, will attempt to reconnect.",
+
+    const newPicksThisCycle = state.ledger.size() - picksAtCycleStart;
+    if (newPicksThisCycle > 0) {
+      state.consecutiveEmptyCycles = 0;
+    } else {
+      state.consecutiveEmptyCycles += 1;
+    }
+    // Issue #62: two independent ways to call this terminal — an authoritative total being
+    // reached, or (gated by picksAtCycleStart > 0 so a brand-new, legitimately-empty draft can
+    // never trip this) enough consecutive cycles with no new picks from any tier.
+    const isTerminal =
+      totalPicksReached() ||
+      (newPicksThisCycle === 0 &&
+        picksAtCycleStart > 0 &&
+        state.consecutiveEmptyCycles >= DRAFT_STALL_TERMINAL_CYCLES);
+    const terminalReason = totalPicksReached()
+      ? "total_picks_reached"
+      : isTerminal
+        ? `${state.consecutiveEmptyCycles} consecutive reconnect cycles with no new picks across ws/dom/rest`
+        : null;
+
+    await emitHealthHeartbeat(redisClient, state, {
+      wsConnected: handle.hasOpenSocket(),
+      dom: domObserver ? domObserver.getHealth() : null,
+      terminal: isTerminal,
+      terminalReason,
+    }).catch(() => {});
+
+    if (isTerminal && state.leagueId) {
+      // Downstream liveness consumers should see "not connected" immediately, not wait out the
+      // 60s TTL — the sync is deliberately done, not merely quiet.
+      await redisClient
+        .del(`draft:${state.leagueId}:connected`)
+        .catch(() => {});
+    }
+
+    logger[isTerminal ? "info" : "warn"](
+      isTerminal
+        ? `[Draft Sync] Draft appears complete (${terminalReason}) — exiting cleanly.`
+        : "[Draft Sync] Connection appears dead, will attempt to reconnect.",
+      {
+        component: "draft_ingest",
+        consecutive_empty_cycles: state.consecutiveEmptyCycles,
+        expected_total_picks: state.expectedTotalPicks,
+      },
     );
+    return { terminal: isTerminal, newPicksThisCycle };
   } finally {
     if (reconcileInterval) clearInterval(reconcileInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -996,6 +1171,31 @@ async function connectAndStream(redisClient, state) {
       await session.browser.close();
     }
   }
+}
+
+/**
+ * Pure decision of what streamLiveDraftRoom should do after one connectAndStream cycle —
+ * extracted so this logic (issue #62's actual fix) is unit-testable without mocking a browser.
+ *
+ * `terminal` (from connectAndStream) always wins: a confirmed-finished draft exits clean
+ * regardless of `attempt`. Otherwise, real progress (`newPicksThisCycle > 0`) resets backoff to
+ * immediate retry — same as today's behavior for a live, healthy reconnect. A cycle with no new
+ * picks now goes through the SAME backoff/cap machinery a thrown error already used, which it
+ * previously never did (a clean-but-dead connectAndStream return isn't a thrown error, so it
+ * always fell through as if attempt were reset to 0 — the actual root cause of #62's unbounded
+ * loop).
+ */
+function decideReconnectAction({ terminal, newPicksThisCycle, attempt }) {
+  if (terminal) return { action: "exit_clean" };
+  if (newPicksThisCycle > 0)
+    return { action: "retry_immediate", nextAttempt: 0 };
+  const nextAttempt = attempt + 1;
+  if (nextAttempt > MAX_RECONNECT_ATTEMPTS) return { action: "exit_failed" };
+  const delayMs = Math.min(
+    RECONNECT_BASE_DELAY_MS * 2 ** (nextAttempt - 1),
+    RECONNECT_MAX_DELAY_MS,
+  );
+  return { action: "retry_after_delay", nextAttempt, delayMs };
 }
 
 async function streamLiveDraftRoom() {
@@ -1019,12 +1219,18 @@ async function streamLiveDraftRoom() {
   let attempt = 0;
 
   try {
-    while (attempt < MAX_RECONNECT_ATTEMPTS) {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      let result;
       try {
-        await connectAndStream(redisClient, state);
-        attempt = 0; // Clean disconnect/reconnect cycle, not a failure — reset backoff.
+        result = await connectAndStream(redisClient, state);
       } catch (error) {
         attempt += 1;
+        if (attempt > MAX_RECONNECT_ATTEMPTS) {
+          throw new Error(
+            "Exceeded max reconnect attempts for live draft stream.",
+          );
+        }
         const delay = Math.min(
           RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
           RECONNECT_MAX_DELAY_MS,
@@ -1035,9 +1241,35 @@ async function streamLiveDraftRoom() {
           { err: error, attempt },
         );
         await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // Issue #62: a clean connectAndStream return is no longer automatically "reset and retry
+      // immediately" — decideReconnectAction routes a stalled-but-clean cycle through the same
+      // backoff/cap logic a thrown error uses, and a terminal cycle (draft actually finished)
+      // exits the process instead of looping at all.
+      const decision = decideReconnectAction({ ...result, attempt });
+      if (decision.action === "exit_clean") {
+        logger.info(
+          "[Draft Sync] Draft sync complete — no more reconnect attempts needed, exiting.",
+        );
+        return;
+      }
+      if (decision.action === "exit_failed") {
+        throw new Error(
+          "Exceeded max reconnect attempts for live draft stream.",
+        );
+      }
+      attempt = decision.nextAttempt;
+      if (decision.action === "retry_after_delay") {
+        logger.warn(
+          `[Draft Sync] Stalled cycle with no new picks (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}), ` +
+            `reconnecting in ${decision.delayMs}ms...`,
+          { attempt },
+        );
+        await new Promise((resolve) => setTimeout(resolve, decision.delayMs));
       }
     }
-    throw new Error("Exceeded max reconnect attempts for live draft stream.");
   } catch (error) {
     logger.error(
       `[Draft Sync] Live data sync loop crashed permanently: ${error.message}`,
@@ -1058,17 +1290,31 @@ if (require.main === module) {
     "draft_sync",
     { trackingId: require("crypto").randomUUID() },
     streamLiveDraftRoom,
-  ).catch(async () => {
-    // withInstrumentation's own catch has already recorded the span/execution_log failure by
-    // the time this runs -- only flushing and exiting is left to do. shutdownTelemetry never
-    // rejects, so the try/finally is belt-and-braces: process.exit(1) must run no matter what.
-    const { shutdownTelemetry } = require("../telemetry/init");
-    try {
-      await shutdownTelemetry();
-    } finally {
-      process.exit(1);
-    }
-  });
+  ).then(
+    async () => {
+      // Issue #62: previously there was no success branch at all, so even a fully-fixed
+      // reconnect loop would leave the pod hanging — telemetry/init.js's NodeSDK keeps
+      // background timers alive, so a bare resolved promise doesn't let the process exit on its
+      // own. This mirrors the .catch() branch below exactly, just with exit code 0.
+      const { shutdownTelemetry } = require("../telemetry/init");
+      try {
+        await shutdownTelemetry();
+      } finally {
+        process.exit(0);
+      }
+    },
+    async () => {
+      // withInstrumentation's own catch has already recorded the span/execution_log failure by
+      // the time this runs -- only flushing and exiting is left to do. shutdownTelemetry never
+      // rejects, so the try/finally is belt-and-braces: process.exit(1) must run no matter what.
+      const { shutdownTelemetry } = require("../telemetry/init");
+      try {
+        await shutdownTelemetry();
+      } finally {
+        process.exit(1);
+      }
+    },
+  );
 }
 
 module.exports = {
@@ -1077,7 +1323,9 @@ module.exports = {
   parseSelectedFrame,
   buildDraftUrl,
   buildDraftDetailUrl,
+  buildLeagueSettingsUrl,
   fetchDraftDetail,
+  fetchDraftTotals,
   ingestPickEvent,
   assignPickNumber,
   handleDomRecords,
@@ -1085,4 +1333,5 @@ module.exports = {
   createDraftState,
   createIngestHealth,
   emitHealthHeartbeat,
+  decideReconnectAction,
 };

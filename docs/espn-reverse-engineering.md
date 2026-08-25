@@ -235,7 +235,8 @@ Two durability rules make that ledger safe to rely on as the *only* dedup gate:
   permanently marks a pick as published while nothing was ever emitted — every later observation
   of it would then be dropped as a duplicate and the pick lost for the rest of the draft.
 - **Seeded from the durable board on startup.** `seedLedgerFromBoard` rehydrates from
-  `draft:{leagueId}:board` before any tier can ingest. Without it, a mid-draft worker restart
+  `draft:{leagueId}:picks` (renamed off the shared `draft:{leagueId}:board` key by #56 — this doc
+  previously lagged that rename) before any tier can ingest. Without it, a mid-draft worker restart
   starts cold, and the DOM observer's first full-board scan re-publishes the entire draft as new
   picks — minting fresh pick numbers in DOM scan order and overwriting the board hash's correct
   pick→player mapping. REST cannot cover for this, since it returns nothing for practice drafts.
@@ -266,6 +267,38 @@ Structured fields to filter on (`component=`):
   It emits regardless of activity **because silence is ambiguous** — a feed with no picks for two
   minutes looks identical whether it's healthy during a slow drafter's turn, evicted, session-
   expired, or running a stale selector.
+
+### Draft completion (issue #62)
+
+A genuinely finished draft looks, at the transport layer, identical to a dead/evicted connection:
+ESPN closes the WS (nothing left to broadcast), `mDraftDetail` 404s or goes empty (practice drafts
+never had it working anyway — see above), and the DOM board scan misses (the board is gone). Before
+#62, `draft_sync.js` treated this as always-transient and reconnected forever — a fresh headless
+Chromium every ~32s, indefinitely.
+
+Two independent terminal signals now exist, checked every reconnect cycle:
+- **Authoritative** (`fetchDraftTotals`, `state.expectedTotalPicks`): a best-effort `mSettings`+
+  `mTeam` REST call learns `teams × roster slots` once per league. If the ledger reaches that count,
+  the connection loop exits immediately rather than waiting for the socket to even go quiet.
+  **UNVERIFIED for ephemeral practice drafts as of this change** — the same class of risk already
+  flagged for `mDraftDetail` above. A failed/unusable response is expected and safe (falls through
+  to the stall-detection guard below); update this paragraph with a CONFIRMED
+  working/unreliable finding once a live practice-draft recon runs (see `fetchDraftTotals`'s header
+  in `draft_sync.js`).
+- **Stall detection** (fallback, always active): `DRAFT_STALL_TERMINAL_CYCLES` (env-tunable,
+  default 3) consecutive reconnect cycles producing zero new picks across all three tiers, gated so
+  a brand-new/legitimately-empty draft can never trip it.
+
+The heartbeat snapshot now also carries `terminal`, `terminal_reason`
+(`"total_picks_reached"` or a stall-cycle count), `consecutive_empty_cycles`, and
+`expected_total_picks` — the last two on every heartbeat (not just a terminal one), so the
+progression toward a terminal call is visible in logs/Grafana before it fires. On a terminal
+heartbeat, `draft:{leagueId}:connected` is deleted immediately (rather than left to its 60s TTL)
+and the process exits 0 instead of continuing to reconnect. Proposal #4 from issue #62 (raw frame
+types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments
+`ws.other_frames[type]` and logs once per type per run — worth checking after the next live
+draft-completion run in case ESPN sends a distinguishing terminal frame (`STATE <n>` above remains
+the standing unconfirmed candidate).
 
 ## Practice/mock drafts: quirks worth knowing
 
