@@ -101,6 +101,23 @@ function createStats() {
  * null-tolerantly: a DOM record with no visible pick number shouldn't be treated as CONTRADICTING
  * a WS record that has one — it simply has nothing to say about it.
  */
+/**
+ * Whether `incoming` can supply pick attribution that `existing` is missing.
+ *
+ * Only ESPN's WebSocket SELECTED frames carry a member id; REST and DOM observations emit
+ * null for both fields. Combined with `ws` being the lowest precedence source, that means
+ * the normal duplicate/stale rules would discard the one observation that can ever answer
+ * "did our bot make this pick, or did the clock run out and ESPN autodraft it" — the whole
+ * question this metadata exists to settle. Enrichment is strictly additive: it fills nulls
+ * and is never allowed to overwrite an already-known origin or any other field.
+ */
+function enrichesOrigin(existing, incoming) {
+  return (
+    (existing.member_id == null && incoming.member_id != null) ||
+    (existing.pick_origin == null && incoming.pick_origin != null)
+  );
+}
+
 function agreesWith(existing, incoming) {
   return (
     sameValue(existing.team_id, incoming.team_id) &&
@@ -209,7 +226,6 @@ class DraftPickLedger {
 
     const key = String(playerId);
     const existing = this.byPlayer.get(key);
-
     if (!existing) {
       // An event whose pick_number is at or below one already published is NOT rejected — for a
       // genuinely new player this is a legitimate backfill (a REST snapshot filling in a pick the
@@ -230,6 +246,16 @@ class DraftPickLedger {
     }
 
     if (agreesWith(existing, rawEvent)) {
+      // ...unless it carries origin metadata the existing record lacks. WS is the LOWEST
+      // precedence source but the ONLY one that can attribute a pick (REST and DOM both
+      // emit null), so a pick first published from REST or DOM would drop the later WS
+      // frame as a duplicate and lose the attribution permanently. That ordering is not
+      // hypothetical: reconcileFromRest() runs before pending WS frames are drained at
+      // startup, and sameValue() treats the WS frame's null round as agreeing with REST's
+      // real one, so the two look identical here.
+      if (enrichesOrigin(existing, rawEvent)) {
+        return this._enrichOrigin(existing, rawEvent, "duplicate");
+      }
       this.stats.duplicate += 1;
       return {
         action: "duplicate",
@@ -249,6 +275,8 @@ class DraftPickLedger {
         pick_number: rawEvent.pick_number ?? existing.pick_number,
         round: rawEvent.round ?? existing.round,
         team_id: rawEvent.team_id ?? existing.team_id,
+        member_id: rawEvent.member_id ?? existing.member_id,
+        pick_origin: rawEvent.pick_origin ?? existing.pick_origin,
         corrected_from: existing.source,
       };
       return {
@@ -259,12 +287,38 @@ class DraftPickLedger {
       };
     }
 
+    if (enrichesOrigin(existing, rawEvent)) {
+      // Same reasoning as the duplicate branch above: the lower-precedence source is not
+      // allowed to change any field the higher-precedence one already established, but it
+      // is the only one that can supply attribution, so take that and nothing else.
+      return this._enrichOrigin(existing, rawEvent, "stale");
+    }
+
     this.stats.stale += 1;
     return {
       action: "stale",
       event: rawEvent,
       previous: existing,
       reason: `"${rawEvent.source}" does not outrank already-published "${existing.source}"`,
+    };
+  }
+
+  /**
+   * Builds an enrichment-only correction: the existing record wins every field, and the
+   * lower-precedence observation contributes nothing but the origin metadata it alone can
+   * see. `source` deliberately stays the existing (higher-precedence) one, since that is
+   * still where the pick's authoritative fields came from.
+   */
+  _enrichOrigin(existing, rawEvent, wouldHaveBeen) {
+    return {
+      action: "correct",
+      event: {
+        ...existing,
+        member_id: existing.member_id ?? rawEvent.member_id,
+        pick_origin: existing.pick_origin ?? rawEvent.pick_origin,
+      },
+      previous: existing,
+      reason: `"${rawEvent.source}" supplies pick origin missing from "${existing.source}" (otherwise ${wouldHaveBeen})`,
     };
   }
 

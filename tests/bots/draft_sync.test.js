@@ -32,6 +32,16 @@ describe("parseSelectedFrame", () => {
       team_id: 3,
       player_id: 4360248,
       lineup_slot_id: 4,
+      member_id: null,
+    });
+  });
+
+  it("captures the member id when ESPN attributes the pick to a human", () => {
+    expect(parseSelectedFrame("SELECTED 3 4360248 4 {OTHER-SWID}")).toEqual({
+      team_id: 3,
+      player_id: 4360248,
+      lineup_slot_id: 4,
+      member_id: "{OTHER-SWID}",
     });
   });
 
