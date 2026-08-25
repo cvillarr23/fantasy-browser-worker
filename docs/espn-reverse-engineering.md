@@ -279,30 +279,38 @@ actually close on completion — it stays open, idle apart from `PING`/`PONG` �
 issue's assumption of a closing socket doesn't reproduce; what does reliably signal completion is
 the `STATE 2` frame documented above.
 
-Three independent terminal signals now exist, checked every reconnect cycle, fastest/most-confident
-first:
+Two — and only two — signals are treated as authoritative enough to declare the draft complete
+(exit 0), checked every reconnect cycle:
 - **`STATE 2` frame** (`state.draftCompleted`): **CONFIRMED 2026-08-25** — ESPN's own completion
   signal, fired exactly once immediately after the final `SELECTED` and never again. Sets
   `state.draftCompleted` the instant the WS frame handler sees it, breaking the connection loop
   without waiting on anything else.
 - **Total-picks reached** (`fetchDraftTotals`, `state.expectedTotalPicks`): a `mSettings`+`mTeam`
-  REST call learns `teams × roster slots` once per league. **CONFIRMED 2026-08-25 working
-  mid-draft** even for ephemeral practice drafts (unlike `mDraftDetail`, which never worked for
-  them at all) — same league returned `teamCount=10`, `rosterSlotsPerTeam=17` (170 total) accurately
-  while the draft was in progress. **CONFIRMED torn down post-completion**
-  (`LEAGUE_NOT_FOUND_DELETED`, same as `mDraftDetail`'s documented post-completion behavior) — so a
-  reconnect landing after the draft ends gets `null` here, which is expected, not a bug; the other
-  two signals govern instead.
-- **Stall detection** (fallback, always active): `DRAFT_STALL_TERMINAL_CYCLES` (env-tunable,
-  default 3) consecutive reconnect cycles producing zero new picks across all three tiers, gated so
-  a brand-new/legitimately-empty draft can never trip it. Exists for whatever neither of the above
-  two catches (a league where `mSettings`/`mTeam` fails for an unrelated reason, or the unlikely
-  case ESPN doesn't send `STATE 2` for some draft types).
+  REST call learns `teams × draftable roster slots` once per league — excluding slot id `21` (IR),
+  which is allocated roster space never filled during the draft itself. **CONFIRMED 2026-08-25
+  working mid-draft** even for ephemeral practice drafts (unlike `mDraftDetail`, which never worked
+  for them at all): the same league returned `teamCount=10`, `rosterSlotsPerTeam=17` (16 draftable
+  + 1 IR) — naively summing all 17 would compute 170 and the fast path would never fire, since the
+  draft only ever produced 160 picks (10 × 16). **CONFIRMED torn down post-completion**
+  (`LEAGUE_NOT_FOUND_DELETED`, same as `mDraftDetail`'s documented post-completion behavior) — a
+  reconnect landing after the draft ends gets `null` here, which is expected, not a bug: whatever
+  total was already learned on an earlier cycle is preserved rather than cleared, since this is
+  exactly the reconnect where it matters most.
 
-The heartbeat snapshot now also carries `terminal`, `terminal_reason` (`"state_2_frame"`,
-`"total_picks_reached"`, or a stall-cycle count), `consecutive_empty_cycles`, and
-`expected_total_picks` — the last two on every heartbeat (not just a terminal one), so the
-progression toward a terminal call is visible in logs/Grafana before it fires. On a terminal
+A third counter — `state.consecutiveEmptyCycles`, N consecutive reconnect cycles with zero new
+picks across all three tiers — is deliberately **not** a third way to call this terminal. Silence
+is ambiguous: a sustained ESPN/network outage on a still-active draft looks identical to a finished
+one at this layer, and wrongly declaring "complete" would permanently stop syncing a draft that's
+still going. Instead it only escalates the "still retrying" log line from `warn` to `error` once it
+reaches `DRAFT_STALL_TERMINAL_CYCLES` (env-tunable, default 3), and rides the reconnect-cap/backoff
+machinery (`decideReconnectAction`, `MAX_RECONNECT_ATTEMPTS`) to a bounded, honest **failure** exit
+(1) if neither real signal ever fires — "gave up, don't know if it finished" rather than a false
+"it's done."
+
+The heartbeat snapshot now also carries `terminal`, `terminal_reason` (`"state_2_frame"` or
+`"total_picks_reached"` — `null` otherwise), `consecutive_empty_cycles`, and `expected_total_picks`
+— the last two on every heartbeat (not just a terminal one), so the progression is visible in
+logs/Grafana before a terminal call (or the stall-escalation threshold) fires. On a terminal
 heartbeat, `draft:{leagueId}:connected` is deleted immediately (rather than left to its 60s TTL)
 and the process exits 0 instead of continuing to reconnect. Proposal #4 from issue #62 (raw frame
 types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments

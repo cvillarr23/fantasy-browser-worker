@@ -133,7 +133,18 @@ describe("decideReconnectAction", () => {
     ).toEqual({ action: "retry_after_delay", nextAttempt: 9, delayMs: 30000 });
   });
 
-  it("gives up once the reconnect cap is exceeded", () => {
+  it("gives up right at the reconnect cap boundary, not one call past it", () => {
+    // MAX_RECONNECT_ATTEMPTS (10) caps at exactly 10 connectAndStream() calls (attempts 0..9),
+    // matching the original `while (attempt < MAX_RECONNECT_ATTEMPTS)` loop's semantics. attempt:9
+    // means the 10th call already happened — an 11th must never be scheduled. This is the
+    // off-by-one a PR review caught (`>` instead of `>=` let an extra Chromium launch through).
+    expect(
+      decideReconnectAction({
+        terminal: false,
+        newPicksThisCycle: 0,
+        attempt: 9,
+      }),
+    ).toEqual({ action: "exit_failed" });
     expect(
       decideReconnectAction({
         terminal: false,
@@ -193,6 +204,44 @@ describe("fetchDraftTotals", () => {
     };
 
     await expect(fetchDraftTotals(context, state)).resolves.toBeNull();
+  });
+
+  it("excludes the IR slot (21) from the roster-slot sum — the real practice-draft recon finding", async () => {
+    // Real capture (league 20050783, 2026-08-25): 10 teams, rosterSettings.lineupSlotCounts
+    // summed to 17 (including one IR slot), but the draft only ever produced 160 picks (10 x 16),
+    // not the naively-computed 170. IR is filled via free agency/waivers, never during the draft.
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          status: () => 200,
+          json: async () => ({
+            teams: Array.from({ length: 10 }, (_, i) => ({ id: i + 1 })),
+            settings: {
+              rosterSettings: {
+                lineupSlotCounts: {
+                  0: 1,
+                  2: 2,
+                  4: 2,
+                  6: 1,
+                  16: 1,
+                  17: 1,
+                  20: 7,
+                  21: 1,
+                  23: 1,
+                },
+              },
+            },
+          }),
+        }),
+      },
+    };
+
+    await expect(fetchDraftTotals(context, state)).resolves.toEqual({
+      teamCount: 10,
+      rosterSlotsPerTeam: 16,
+      totalExpectedPicks: 160,
+    });
   });
 });
 
@@ -388,10 +437,13 @@ describe("connectAndStream", () => {
     expect(redisClient.del).not.toHaveBeenCalled();
   });
 
-  it("treats DRAFT_STALL_TERMINAL_CYCLES consecutive empty-picks cycles as terminal", async () => {
+  it("never treats a stall streak alone as terminal, but escalates logging (PR review: silence isn't proof of completion)", async () => {
+    // A sustained ESPN/network outage on a still-ACTIVE draft looks identical to a finished one
+    // at this layer — repeated empty cycles must never, on their own, cause a clean exit that
+    // permanently stops syncing a draft that's still going. Only draftCompleted (STATE 2) or
+    // totalPicksReached() may set terminal:true; a stall streak is purely a logging escalation,
+    // and the actual bound comes from decideReconnectAction's reconnect cap (tested separately).
     const redisClient = buildRedisClient({
-      // One already-published pick, so picksAtCycleStart > 0 every cycle — the gate that keeps a
-      // brand-new empty draft from ever being misdetected.
       hGetAll: jest.fn().mockResolvedValue({
         1: JSON.stringify({
           league_id: "987",
@@ -410,25 +462,31 @@ describe("connectAndStream", () => {
     });
     assertCookieSessionValid.mockResolvedValue(undefined);
 
-    // Matches DRAFT_STALL_TERMINAL_CYCLES' default (3) — see the constant in draft_sync.js.
-    const STALL_TERMINAL_CYCLES = 3;
+    const errorSpy = jest.spyOn(logger, "error");
+    // One cycle past DRAFT_STALL_TERMINAL_CYCLES' default (3) — see the constant in
+    // draft_sync.js — to prove escalation continues past the old (now-removed) terminal trigger.
+    const CYCLES = 4;
     const results = [];
-    for (let i = 0; i < STALL_TERMINAL_CYCLES; i += 1) {
+    for (let i = 0; i < CYCLES; i += 1) {
       const { session } = buildSession({ requestGet: buildRequestGet() });
       createAuthenticatedSession.mockResolvedValueOnce(session);
       results.push(await connectAndStream(redisClient, state));
     }
 
-    expect(results.slice(0, -1).every((r) => r.terminal === false)).toBe(true);
-    expect(results[results.length - 1].terminal).toBe(true);
-    expect(state.consecutiveEmptyCycles).toBe(STALL_TERMINAL_CYCLES);
+    expect(results.every((r) => r.terminal === false)).toBe(true);
+    expect(state.consecutiveEmptyCycles).toBe(CYCLES);
+    expect(redisClient.del).not.toHaveBeenCalled();
 
     const finalHeartbeat = lastSetPayload(redisClient, "draft:987:health");
-    expect(finalHeartbeat.terminal).toBe(true);
-    expect(finalHeartbeat.terminal_reason).toMatch(
-      /consecutive reconnect cycles/,
+    expect(finalHeartbeat.terminal).toBe(false);
+    expect(finalHeartbeat.terminal_reason).toBeNull();
+
+    // Escalates to error level once the stall streak reaches the threshold (cycles 3 and 4 here).
+    const escalatedCalls = errorSpy.mock.calls.filter(([msg]) =>
+      msg.includes("connection may be stuck"),
     );
-    expect(redisClient.del).toHaveBeenCalledWith("draft:987:connected");
+    expect(escalatedCalls.length).toBe(2);
+    errorSpy.mockRestore();
   });
 
   it("resets the stall counter once a cycle sees a genuinely new pick", async () => {
