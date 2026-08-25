@@ -1,6 +1,7 @@
 const {
   ingestPickEvent,
   assignPickNumber,
+  handleSelectedFrame,
   handleDomRecords,
   seedLedgerFromBoard,
   createIngestHealth,
@@ -232,6 +233,56 @@ describe("ingestPickEvent", () => {
 
     expect(redis.calls.publish).toHaveLength(1);
     expect(state.ledger.size()).toBe(1);
+  });
+});
+
+describe("handleSelectedFrame", () => {
+  it("classifies autodraft, our bot, and other human picks", async () => {
+    const redis = fakeRedis();
+    const state = freshState();
+    state.memberId = "{OUR-SWID}";
+
+    await handleSelectedFrame(
+      {
+        team_id: 8,
+        player_id: 1,
+        lineup_slot_id: 1,
+        member_id: null,
+      },
+      redis,
+      state,
+    );
+    await handleSelectedFrame(
+      {
+        team_id: 8,
+        player_id: 2,
+        lineup_slot_id: 2,
+        member_id: "{OUR-SWID}",
+      },
+      redis,
+      state,
+    );
+    await handleSelectedFrame(
+      {
+        team_id: 3,
+        player_id: 3,
+        lineup_slot_id: 4,
+        member_id: "{OTHER-SWID}",
+      },
+      redis,
+      state,
+    );
+
+    const events = redis.calls.xAdd.map(([, , fields]) =>
+      JSON.parse(fields.payload),
+    );
+    expect(
+      events.map(({ member_id, pick_origin }) => ({ member_id, pick_origin })),
+    ).toEqual([
+      { member_id: null, pick_origin: "autodraft" },
+      { member_id: "{OUR-SWID}", pick_origin: "us" },
+      { member_id: "{OTHER-SWID}", pick_origin: "other" },
+    ]);
   });
 });
 

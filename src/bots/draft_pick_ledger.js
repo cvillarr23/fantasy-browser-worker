@@ -249,6 +249,8 @@ class DraftPickLedger {
         pick_number: rawEvent.pick_number ?? existing.pick_number,
         round: rawEvent.round ?? existing.round,
         team_id: rawEvent.team_id ?? existing.team_id,
+        member_id: rawEvent.member_id ?? existing.member_id,
+        pick_origin: rawEvent.pick_origin ?? existing.pick_origin,
         corrected_from: existing.source,
       };
       return {

@@ -117,13 +117,14 @@ function parseSelectedFrame(raw) {
   const line = raw.toString().trim();
   if (!line.startsWith("SELECTED ")) return null;
 
-  const [, teamId, playerId, lineupSlotId] = line.split(/\s+/);
+  const [, teamId, playerId, lineupSlotId, memberId] = line.split(/\s+/);
   if (teamId == null || playerId == null || lineupSlotId == null) return null;
 
   return {
     team_id: Number(teamId),
     player_id: Number(playerId),
     lineup_slot_id: Number(lineupSlotId),
+    member_id: memberId ?? null,
   };
 }
 
@@ -361,6 +362,8 @@ async function fetchDraftDetail(context, state) {
       team_id: pick.teamId,
       round: pick.roundId,
       round_pick_number: pick.roundPickNumber,
+      member_id: null,
+      pick_origin: null,
       source: "rest",
       timestamp: new Date().toISOString(),
     }))
@@ -395,6 +398,7 @@ async function reconcileFromRest(context, redisClient, state) {
 }
 
 async function handleSelectedFrame(parsed, redisClient, state) {
+  const memberId = parsed.member_id ?? null;
   const event = {
     league_id: state.leagueId,
     player_id: parsed.player_id,
@@ -407,6 +411,13 @@ async function handleSelectedFrame(parsed, redisClient, state) {
     // wrong (see parseSelectedFrame). Consumers derive round from pick_number instead.
     lineup_slot_id: parsed.lineup_slot_id,
     round: null,
+    member_id: memberId,
+    pick_origin:
+      memberId == null
+        ? "autodraft"
+        : memberId === state.memberId
+          ? "us"
+          : "other",
     source: "ws",
     timestamp: new Date().toISOString(),
   };
@@ -460,6 +471,8 @@ async function handleDomRecords(records, redisClient, state, meta) {
       team_id: record.team_id,
       round: record.round ?? null,
       round_pick_number: record.round_pick_number ?? null,
+      member_id: null,
+      pick_origin: null,
       source: "dom",
       timestamp: new Date().toISOString(),
     };
@@ -700,6 +713,7 @@ function createDraftState() {
     leagueId: null,
     seasonId: null,
     teamId: null,
+    memberId: null,
     ready: false,
     pendingFrames: [],
     // Shared across reconnects on purpose: the ledger is what stops a reconnect from
@@ -814,6 +828,7 @@ async function emitHealthHeartbeat(redisClient, state, { wsConnected, dom }) {
 
 async function connectAndStream(redisClient, state) {
   const session = await createAuthenticatedSession();
+  state.memberId = session.swid;
   let reconcileInterval;
   let heartbeatInterval;
   let domObserver = null;
@@ -1080,6 +1095,7 @@ module.exports = {
   fetchDraftDetail,
   ingestPickEvent,
   assignPickNumber,
+  handleSelectedFrame,
   handleDomRecords,
   seedLedgerFromBoard,
   createDraftState,

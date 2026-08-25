@@ -135,6 +135,31 @@ describe("DraftPickLedger", () => {
     expect(decision.event.team_id).toBe(3);
   });
 
+  it("preserves a known WS origin through a REST correction", () => {
+    const ledger = new DraftPickLedger();
+    record(
+      ledger,
+      wsPick(4360438, {
+        pick_number: 7,
+        member_id: "{OUR-SWID}",
+        pick_origin: "us",
+      }),
+    );
+
+    const decision = ledger.evaluate(
+      wsPick(4360438, {
+        pick_number: 12,
+        source: "rest",
+        member_id: null,
+        pick_origin: null,
+      }),
+    );
+
+    expect(decision.action).toBe("correct");
+    expect(decision.event.member_id).toBe("{OUR-SWID}");
+    expect(decision.event.pick_origin).toBe("us");
+  });
+
   it("treats a null pick_number as 'no opinion' rather than a disagreement", () => {
     const ledger = new DraftPickLedger();
     record(ledger, wsPick(4360438, { pick_number: 5 }));
