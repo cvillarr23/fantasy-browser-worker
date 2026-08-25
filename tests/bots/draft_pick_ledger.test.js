@@ -160,6 +160,115 @@ describe("DraftPickLedger", () => {
     expect(decision.event.pick_origin).toBe("us");
   });
 
+  // Regression (PR #63 review round 2): `ws` is the LOWEST precedence source but the ONLY
+  // one that can attribute a pick. reconcileFromRest() runs before pending WS frames are
+  // drained at startup, so a REST/DOM row routinely lands first — and sameValue() treats the
+  // WS frame's null round as agreeing with REST's real one, so the attribution was dropped
+  // as a plain duplicate and the bot-vs-autodraft answer lost for good.
+  it.each(["rest", "dom"])(
+    "keeps a later WS frame's origin when %s published the pick first",
+    (source) => {
+      const ledger = new DraftPickLedger();
+      record(
+        ledger,
+        wsPick(4360438, {
+          source,
+          pick_number: 7,
+          round: 1,
+          member_id: null,
+          pick_origin: null,
+        }),
+      );
+
+      const decision = ledger.evaluate(
+        wsPick(4360438, {
+          pick_number: null,
+          round: null,
+          member_id: "{OUR-SWID}",
+          pick_origin: "us",
+        }),
+      );
+
+      expect(decision.action).toBe("correct");
+      expect(decision.event.member_id).toBe("{OUR-SWID}");
+      expect(decision.event.pick_origin).toBe("us");
+      // Enrichment is additive only: the authoritative source keeps every other field,
+      // including the round and pick number the WS frame cannot see.
+      expect(decision.event.source).toBe(source);
+      expect(decision.event.pick_number).toBe(7);
+      expect(decision.event.round).toBe(1);
+    },
+  );
+
+  it("does not re-correct once the origin is known", () => {
+    const ledger = new DraftPickLedger();
+    record(
+      ledger,
+      wsPick(4360438, {
+        source: "rest",
+        member_id: null,
+        pick_origin: null,
+      }),
+    );
+    record(
+      ledger,
+      wsPick(4360438, { member_id: "{OUR-SWID}", pick_origin: "us" }),
+    );
+
+    const decision = ledger.evaluate(
+      wsPick(4360438, { member_id: "{OUR-SWID}", pick_origin: "us" }),
+    );
+
+    expect(decision.action).toBe("duplicate");
+  });
+
+  it("never lets an enriching WS frame overwrite an origin already recorded", () => {
+    const ledger = new DraftPickLedger();
+    record(
+      ledger,
+      wsPick(4360438, { member_id: "{OUR-SWID}", pick_origin: "us" }),
+    );
+
+    const decision = ledger.evaluate(
+      wsPick(4360438, {
+        pick_number: null,
+        member_id: "{SOMEONE-ELSE}",
+        pick_origin: "other",
+      }),
+    );
+
+    expect(decision.action).toBe("duplicate");
+    expect(decision.previous.pick_origin).toBe("us");
+  });
+
+  it("enriches from a genuinely conflicting lower-precedence frame without adopting its other fields", () => {
+    const ledger = new DraftPickLedger();
+    record(
+      ledger,
+      wsPick(4360438, {
+        source: "rest",
+        team_id: 3,
+        pick_number: 7,
+        member_id: null,
+        pick_origin: null,
+      }),
+    );
+
+    // Disagrees on team_id, so this would previously have been dropped as `stale`.
+    const decision = ledger.evaluate(
+      wsPick(4360438, {
+        team_id: 9,
+        pick_number: 7,
+        member_id: "{OUR-SWID}",
+        pick_origin: "us",
+      }),
+    );
+
+    expect(decision.action).toBe("correct");
+    expect(decision.event.pick_origin).toBe("us");
+    expect(decision.event.team_id).toBe(3);
+  });
+
   it("treats a null pick_number as 'no opinion' rather than a disagreement", () => {
     const ledger = new DraftPickLedger();
     record(ledger, wsPick(4360438, { pick_number: 5 }));
