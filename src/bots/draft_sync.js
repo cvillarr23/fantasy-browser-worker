@@ -11,6 +11,7 @@ const {
   isUsablePlayerId,
 } = require("./draft_pick_ledger");
 const { attachDraftDomObserver } = require("./draft_dom_observer");
+const { normalizeSwid } = require("./draft_room_socket");
 const redis = require("redis");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -126,6 +127,29 @@ function parseSelectedFrame(raw) {
     lineup_slot_id: Number(lineupSlotId),
     member_id: memberId ?? null,
   };
+}
+
+/**
+ * Attributes a SELECTED frame to us, another manager, or ESPN's autodraft.
+ *
+ * The frame's optional 4th token is the drafting member's SWID (see draft_room_socket.js's
+ * header: `SELECTED 8 4362249 10 {<our SWID>}`, correlated in a real capture against a pick we
+ * sent ourselves). ESPN attributes server-side autodraft fallbacks to no member at all, so an
+ * absent token is the only signal distinguishing "our bot picked" from "we ran out of clock".
+ *
+ * Both sides are pushed through normalizeSwid because the two SWIDs reach us by different
+ * routes: ours comes from the ESPN_S2/SWID env var or OpenBao (which may or may not carry the
+ * braces, depending on how it was pasted in), while the frame's always carries them. Comparing
+ * them raw silently reports every one of our own picks as `other`, which is exactly the
+ * misattribution this classification exists to prevent. Case is folded for the same reason —
+ * the value is a GUID whose casing is not guaranteed to survive a round-trip through storage.
+ */
+function classifyPickOrigin(frameMemberId, ourMemberId) {
+  if (frameMemberId == null) return "autodraft";
+  if (ourMemberId == null) return "other";
+  const frame = normalizeSwid(frameMemberId).toUpperCase();
+  const ours = normalizeSwid(ourMemberId).toUpperCase();
+  return frame === ours ? "us" : "other";
 }
 
 /**
@@ -412,12 +436,7 @@ async function handleSelectedFrame(parsed, redisClient, state) {
     lineup_slot_id: parsed.lineup_slot_id,
     round: null,
     member_id: memberId,
-    pick_origin:
-      memberId == null
-        ? "autodraft"
-        : memberId === state.memberId
-          ? "us"
-          : "other",
+    pick_origin: classifyPickOrigin(memberId, state.memberId),
     source: "ws",
     timestamp: new Date().toISOString(),
   };
@@ -1096,6 +1115,7 @@ module.exports = {
   ingestPickEvent,
   assignPickNumber,
   handleSelectedFrame,
+  classifyPickOrigin,
   handleDomRecords,
   seedLedgerFromBoard,
   createDraftState,

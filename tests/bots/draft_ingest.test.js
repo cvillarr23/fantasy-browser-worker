@@ -2,6 +2,7 @@ const {
   ingestPickEvent,
   assignPickNumber,
   handleSelectedFrame,
+  classifyPickOrigin,
   handleDomRecords,
   seedLedgerFromBoard,
   createIngestHealth,
@@ -237,6 +238,32 @@ describe("ingestPickEvent", () => {
 });
 
 describe("handleSelectedFrame", () => {
+  // Regression (PR #63 review): our SWID reaches us from an env var or OpenBao, so it may
+  // arrive without braces or in different casing, while the WS frame always carries braces.
+  // Comparing the two raw reported every one of OUR OWN picks as `other` — the precise
+  // misattribution this classification exists to prevent, and silent when it happens.
+  it.each([
+    ["both braced", "{OUR-SWID}", "{OUR-SWID}"],
+    ["ours unbraced", "{OUR-SWID}", "OUR-SWID"],
+    ["frame unbraced", "OUR-SWID", "{OUR-SWID}"],
+    ["mixed casing", "{our-swid}", "{OUR-SWID}"],
+    ["surrounding whitespace", "{OUR-SWID}", " {OUR-SWID} "],
+  ])("classifies a pick as ours with %s", (_label, frameSwid, ourSwid) => {
+    expect(classifyPickOrigin(frameSwid, ourSwid)).toBe("us");
+  });
+
+  it("classifies an absent member as autodraft and a different member as other", () => {
+    expect(classifyPickOrigin(null, "{OUR-SWID}")).toBe("autodraft");
+    expect(classifyPickOrigin(undefined, "{OUR-SWID}")).toBe("autodraft");
+    expect(classifyPickOrigin("{OTHER-SWID}", "{OUR-SWID}")).toBe("other");
+  });
+
+  it("does not claim a pick as ours when our own SWID is unknown", () => {
+    // Guard against normalizeSwid(null) stringifying to "{null}" and matching a frame that
+    // also failed to carry a member id.
+    expect(classifyPickOrigin("{OTHER-SWID}", null)).toBe("other");
+  });
+
   it("classifies autodraft, our bot, and other human picks", async () => {
     const redis = fakeRedis();
     const state = freshState();
