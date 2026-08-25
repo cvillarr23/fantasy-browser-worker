@@ -577,6 +577,47 @@ describe("connectAndStream", () => {
     expect(finalHeartbeat.terminal_reason).toBe("total_picks_reached");
   });
 
+  it("exits proactively the instant a WS STATE 2 frame arrives — ESPN's confirmed completion signal", async () => {
+    const redisClient = buildRedisClient();
+    const state = createDraftState();
+    const { session, page, pageListeners } = buildSession({
+      requestGet: buildRequestGet(),
+    });
+
+    // Override waitForTimeout so its FIRST call fires a live STATE 2 frame instead of advancing
+    // the clock — proves the loop reacts directly to the frame rather than needing
+    // WS_DEAD_GRACE_MS to elapse (the case the "total-picks" test above covers instead).
+    let fired = false;
+    page.waitForTimeout = jest.fn(async () => {
+      if (fired) return;
+      fired = true;
+      const wsFrameListeners = {};
+      pageListeners.websocket({
+        url: () => "wss://fake",
+        on: (event, cb) => {
+          wsFrameListeners[event] = cb;
+        },
+      });
+      await wsFrameListeners.framereceived({ payload: Buffer.from("STATE 2") });
+    });
+
+    createAuthenticatedSession.mockResolvedValue(session);
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    const result = await connectAndStream(redisClient, state);
+
+    expect(result).toEqual({ terminal: true, newPicksThisCycle: 0 });
+    expect(page.waitForTimeout).toHaveBeenCalledTimes(1);
+
+    const finalHeartbeat = lastSetPayload(redisClient, "draft:987:health");
+    expect(finalHeartbeat.terminal_reason).toBe("state_2_frame");
+  });
+
   it("captures unknown WS frame types instead of silently discarding them (issue #62 proposal #4)", async () => {
     const { session, pageListeners } = buildSession({
       requestGet: buildRequestGet(),

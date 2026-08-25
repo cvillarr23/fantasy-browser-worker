@@ -388,13 +388,13 @@ async function fetchDraftDetail(context, state) {
  * reaches this size, instead of waiting for the stall-detection fallback (see
  * DRAFT_STALL_TERMINAL_CYCLES) or the WS_DEAD_GRACE_MS watchdog.
  *
- * UNVERIFIED for ephemeral practice drafts as of this change (2026-08-24) — this repo has one
- * confirmed case of a sibling mDraftDetail-family endpoint (mDraftDetail itself, see
- * fetchDraftDetail/readDraftPicks) returning nothing usable for the exact league type this issue
- * was filed against, so treat a null/best-guess return here as the expected, safe outcome, not a
- * bug: every caller falls back to stall detection instead. Re-verify against a real practice draft
- * (both mid-draft and post-completion) and update this comment with a CONFIRMED
- * working/unreliable finding once that recon runs.
+ * CONFIRMED 2026-08-25 against a real ephemeral practice draft (league 20050783, 10 teams, 160
+ * picks): returns real teams/rosterSettings data while the draft is in progress — unlike its
+ * sibling mDraftDetail, which never worked for practice drafts at all. AFTER the draft completes,
+ * the league is torn down (`LEAGUE_NOT_FOUND_DELETED`, same as mDraftDetail's confirmed
+ * post-completion behavior) — so a null return here on a later reconnect is expected, not a bug:
+ * that's exactly when the other two terminal signals (draftCompleted from the WS `STATE 2` frame,
+ * and the stall-detection fallback) take over.
  */
 async function fetchDraftTotals(context, state) {
   try {
@@ -646,7 +646,23 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
         // no trace at all, so a draft-completion frame (if ESPN sends one) would never be
         // noticed. Cheap capture: count by type, log only the first occurrence per type per run
         // (CLOCK alone would otherwise spam a line roughly once a second).
-        const type = line.split(/\s+/)[0] || "EMPTY";
+        const tokens = line.split(/\s+/);
+        const type = tokens[0] || "EMPTY";
+
+        // CONFIRMED 2026-08-25 (real practice draft, league 20050783, 10 teams/160 picks): `STATE`
+        // carries 1 at connection start (draft in progress) and 2 exactly once, immediately after
+        // the final SELECTED — the terminal frame docs/espn-reverse-engineering.md flagged as
+        // unconfirmed. The socket did NOT close afterward (plain PING/PONG continued), so this is
+        // strictly more useful than WS closure ever was for detecting completion. Treated as the
+        // fastest of the three terminal signals — see the isTerminal computation below.
+        if (type === "STATE" && tokens[1] === "2") {
+          state.draftCompleted = true;
+          logger.info(
+            "[Draft Sync] STATE 2 frame received — ESPN's own signal that the draft has finished.",
+            { component: "draft_ws", socket_id: socketId },
+          );
+        }
+
         if (!(type in state.health.ws.other_frames)) {
           logger.info(`[Draft Sync] First-seen frame type this run: ${type}`, {
             component: "draft_ws",
@@ -810,6 +826,10 @@ function createDraftState() {
     // "unknown" (fetch not yet run, or failed) — terminal detection falls back to
     // consecutiveEmptyCycles in that case. Per-draft, like the ledger/health.
     expectedTotalPicks: null,
+    // Issue #62: set true the instant a WS `STATE 2` frame is observed — ESPN's own confirmed
+    // (2026-08-25) completion signal, the fastest and most authoritative of the three terminal
+    // checks. Per-draft, like the above.
+    draftCompleted: false,
   };
 }
 
@@ -1002,18 +1022,21 @@ async function connectAndStream(redisClient, state) {
       // per-tier counters across leagues would make the new draft's heartbeat describe a mixture
       // of two drafts (recovered_picks and WS frame counts spanning both).
       state.health = createIngestHealth();
-      // Issue #62: same reasoning — a stall streak or a learned total from the PREVIOUS league's
-      // draft has no bearing on this one.
+      // Issue #62: same reasoning — a stall streak, a learned total, or a completion signal from
+      // the PREVIOUS league's draft has no bearing on this one.
       state.consecutiveEmptyCycles = 0;
       state.expectedTotalPicks = null;
+      state.draftCompleted = false;
     }
     state.leagueId = draftContext.leagueId;
     await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
     state.seasonId = draftContext.seasonId;
     state.teamId = draftContext.teamId;
 
-    // Issue #62 proposal #1: best-effort — see fetchDraftTotals' header for the unverified-for-
-    // practice-drafts caveat. A null result just means the stall-detection fallback governs.
+    // Issue #62 proposal #1: best-effort — see fetchDraftTotals' header. Confirmed working
+    // mid-draft even for ephemeral practice drafts (2026-08-25); a null result here just means
+    // this reconnect landed after the league was already torn down (confirmed post-completion
+    // behavior, same as mDraftDetail) — the other two terminal signals still govern.
     state.expectedTotalPicks =
       (await fetchDraftTotals(session.context, state))?.totalExpectedPicks ??
       null;
@@ -1101,9 +1124,10 @@ async function connectAndStream(redisClient, state) {
       state.expectedTotalPicks != null &&
       state.ledger.size() >= state.expectedTotalPicks;
 
-    // Issue #62: the loop now also exits proactively the instant the learned total is reached —
-    // no need to wait out WS_DEAD_GRACE_MS once we're already confident the draft is over.
-    while (!handle.isDead() && !totalPicksReached()) {
+    // Issue #62: the loop now also exits proactively the instant either the learned total is
+    // reached or ESPN's own STATE 2 completion frame arrives — no need to wait out
+    // WS_DEAD_GRACE_MS once we're already confident the draft is over.
+    while (!handle.isDead() && !totalPicksReached() && !state.draftCompleted) {
       // Retrying REST reconciliation forever against an expired session is pointless the same way
       // retrying a doomed pick is — throw out to streamLiveDraftRoom's reconnect-with-backoff
       // rather than spinning here until the outer WS_DEAD_GRACE_MS watchdog eventually notices.
@@ -1119,19 +1143,23 @@ async function connectAndStream(redisClient, state) {
     } else {
       state.consecutiveEmptyCycles += 1;
     }
-    // Issue #62: two independent ways to call this terminal — an authoritative total being
+    // Issue #62: three independent ways to call this terminal, checked fastest/most-confident
+    // first — ESPN's own confirmed STATE 2 completion frame, an authoritative total being
     // reached, or (gated by picksAtCycleStart > 0 so a brand-new, legitimately-empty draft can
     // never trip this) enough consecutive cycles with no new picks from any tier.
     const isTerminal =
+      state.draftCompleted ||
       totalPicksReached() ||
       (newPicksThisCycle === 0 &&
         picksAtCycleStart > 0 &&
         state.consecutiveEmptyCycles >= DRAFT_STALL_TERMINAL_CYCLES);
-    const terminalReason = totalPicksReached()
-      ? "total_picks_reached"
-      : isTerminal
-        ? `${state.consecutiveEmptyCycles} consecutive reconnect cycles with no new picks across ws/dom/rest`
-        : null;
+    const terminalReason = state.draftCompleted
+      ? "state_2_frame"
+      : totalPicksReached()
+        ? "total_picks_reached"
+        : isTerminal
+          ? `${state.consecutiveEmptyCycles} consecutive reconnect cycles with no new picks across ws/dom/rest`
+          : null;
 
     await emitHealthHeartbeat(redisClient, state, {
       wsConnected: handle.hasOpenSocket(),
