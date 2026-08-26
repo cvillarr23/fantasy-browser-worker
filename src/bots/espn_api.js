@@ -199,11 +199,13 @@ async function submitWaiverClaim(
 /**
  * Fetches the draft-room player pool — the same `view=draftInit` call ESPN's own draft room loads
  * on entry (confirmed via draft_recon.js capture, HTTP 200, 2026-08-10/2026-08-16), including each
- * player's `defaultPositionId` (16 = D/ST, 5 = K, among the standard ESPN position ids) and
+ * player's `defaultPositionId` (16 = D/ST, 5 = K, among the standard ESPN position ids),
+ * `proTeamId` (confirmed present in the raw response, 2026-08-25), and
  * `draftRanksByRankType.STANDARD.rank`. Used by scripts/practice-draft-test.js to pick guaranteed
  * -available low-priority test targets (kickers/D-ST rank far below any position bots draft
  * early) without depending on the draft-pick REST board, which is unreliable for ephemeral
- * practice drafts (see readDraftPicks's header below).
+ * practice drafts (see readDraftPicks's header below). Also used by draft_sync.js (issue #31) to
+ * resolve a bare AUTOSUGGEST player id into a name/position/team for the published suggestion.
  *
  * Unlike readDraftPicks, this is NOT draft-instance state — it's the current-season player
  * catalog/rankings, which is why it kept working against these same ephemeral leagues when the
@@ -229,6 +231,7 @@ async function fetchDraftPlayerPool(context, { leagueId, seasonId }) {
       id: p.id,
       name: p.fullName,
       positionId: p.defaultPositionId,
+      proTeamId: p.proTeamId ?? null,
       rank: p.draftRanksByRankType?.STANDARD?.rank ?? null,
       percentOwned: p.ownership?.percentOwned ?? null,
     };

@@ -244,6 +244,27 @@ Two durability rules make that ledger safe to rely on as the *only* dedup gate:
 Ingest is also serialized (one pick at a time) so that two tiers reporting the same pick
 concurrently can't both pass `evaluate()` before either commits.
 
+### Suggested pick: `AUTOSUGGEST` is on the WS, no DOM scraping needed (issue #31)
+
+Issue #31 asked for ESPN's own suggested-next-pick, for fantasy-web-ui's comparison panel. Scope
+note #1 there asked to confirm whether it's already on a WS frame before committing to DOM
+scraping (which would mean touching `draft_room_dom.js` and the reCAPTCHA-blocked recon path
+documented above) — it is: `AUTOSUGGEST <playerId>` (see the frame table above) is a real,
+confirmed frame, not a guess — 154 instances captured in a single real practice draft
+(`recon-output/websockets.jsonl`, 2026-08-25), one per pick cycle. It carries only a bare player
+id, no name/position/team.
+
+`draft_sync.js` resolves that id against a player catalog fetched once per draft
+(`loadPlayerPool`, `espn_api.js`'s `fetchDraftPlayerPool` — the same `view=draftInit` call already
+used elsewhere, which also carries `proTeamId` alongside the `defaultPositionId` it was already
+returning) and publishes the result to `draft:{leagueId}:suggested` — a single overwritten Redis
+key (`SET`, no TTL), not routed through the pick ledger/ingest pipeline: it isn't a pick, has no
+dedup semantics, and would corrupt pick numbering if it were. A cold or failed catalog fetch
+degrades the published suggestion to a bare `player_id` rather than dropping it or blocking sync.
+
+Exposing this via fantasy-core-pipeline's `/v1/draft/status` (fantasy-core-pipeline#80) is a
+separate, not-yet-done change in that repo.
+
 ### DOM board selectors are UNVERIFIED
 
 Unlike the Draft/Queue buttons above, the draft **board / pick-history** markup has never been

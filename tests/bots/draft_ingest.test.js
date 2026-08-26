@@ -2,6 +2,8 @@ const {
   ingestPickEvent,
   assignPickNumber,
   handleSelectedFrame,
+  parseAutosuggestFrame,
+  handleAutosuggestFrame,
   classifyPickOrigin,
   handleDomRecords,
   seedLedgerFromBoard,
@@ -57,6 +59,7 @@ function freshState() {
     ledger: new DraftPickLedger(),
     health: createIngestHealth(),
     ingestChain: Promise.resolve(),
+    playerPool: null,
   };
 }
 
@@ -310,6 +313,76 @@ describe("handleSelectedFrame", () => {
       { member_id: "{OUR-SWID}", pick_origin: "us" },
       { member_id: "{OTHER-SWID}", pick_origin: "other" },
     ]);
+  });
+});
+
+describe("parseAutosuggestFrame", () => {
+  it("parses a real captured frame (recon-output/websockets.jsonl, 2026-08-25)", () => {
+    expect(parseAutosuggestFrame("AUTOSUGGEST 4426515")).toEqual({
+      player_id: 4426515,
+    });
+  });
+
+  it("ignores frames that are not AUTOSUGGEST", () => {
+    expect(parseAutosuggestFrame("SELECTED 8 4360438 6")).toBeNull();
+  });
+
+  it("returns null for a truncated frame rather than inventing an id", () => {
+    expect(parseAutosuggestFrame("AUTOSUGGEST")).toBeNull();
+  });
+});
+
+describe("handleAutosuggestFrame", () => {
+  it("resolves the player id against the pool and publishes name/position/team", async () => {
+    const redis = fakeRedis();
+    const state = freshState();
+    state.playerPool = new Map([
+      [
+        "4426515",
+        { id: 4426515, name: "Test Player", positionId: 2, proTeamId: 14 },
+      ],
+    ]);
+
+    await handleAutosuggestFrame({ player_id: 4426515 }, redis, state);
+
+    expect(redis.calls.set).toHaveLength(1);
+    const [key, payload] = redis.calls.set[0];
+    expect(key).toBe("draft:123:suggested");
+    expect(JSON.parse(payload)).toMatchObject({
+      league_id: "123",
+      player_id: 4426515,
+      name: "Test Player",
+      position_id: 2,
+      pro_team_id: 14,
+    });
+  });
+
+  it("degrades to a bare player_id when the pool is missing or doesn't have the id", async () => {
+    const redis = fakeRedis();
+    const state = freshState(); // playerPool: null
+
+    await handleAutosuggestFrame({ player_id: 999 }, redis, state);
+
+    const [, payload] = redis.calls.set[0];
+    expect(JSON.parse(payload)).toMatchObject({
+      player_id: 999,
+      name: null,
+      position_id: null,
+      pro_team_id: null,
+    });
+  });
+
+  it("never throws when the Redis write fails", async () => {
+    const state = freshState();
+    const redis = {
+      set: async () => {
+        throw new Error("redis down");
+      },
+    };
+
+    await expect(
+      handleAutosuggestFrame({ player_id: 1 }, redis, state),
+    ).resolves.toBeUndefined();
   });
 });
 
