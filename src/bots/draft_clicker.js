@@ -41,9 +41,11 @@ const { recordDraftPickClick } = require("../db/execution_log");
  *   - failure capture — dump payload + last-known draft board to DEBUG_OUTPUT_DIR before rethrowing.
  *
  * Every real submission attempt (WS success, DOM fallback success, or a failure after either)
- * writes a `draft_pick_click` row to execution_log via recordDraftPickClick (#43) - a dry-run or
- * already-drafted no-op writes nothing, since neither is a real click. fantasy-core-pipeline's
- * `/v1/draft/status` reads the most recent row per league back into `last_clicker_action`.
+ * writes a `draft_pick_click` row to execution_log via recordDraftPickClick (#43) - so does a
+ * DRY_RUN skip (status "skipped_dry_run"), so that mode is visible in
+ * fantasy-core-pipeline's `/v1/draft/status`/`last_clicker_action` instead of only existing in
+ * pod logs. An already-drafted no-op still writes nothing, since no target was ever assigned
+ * for a real click.
  */
 
 const DEBUG_DIR =
@@ -69,10 +71,18 @@ function jitter(minMs, maxMs) {
  * Live writes are OPT-IN, not opt-out — same reasoning as lineup_bot.js's resolveDryRun: the
  * production queue path sets no env var of its own, and an unset DRY_RUN must not mean "submit to
  * the live draft."
+ *
+ * `mode` is the practice/live tag fantasy-core-pipeline already stamps on every draft_targets
+ * message (sourced from the listener Job's own `mode=practice`/`mode=live` label — never
+ * inferred here). Only an *unset* DRY_RUN is mode-aware: `mode === "practice"` flips that one
+ * case to submit for real, since a practice room is consequence-free and the whole point of
+ * this bot silently no-op'ing there is lost observability, not safety. An explicit DRY_RUN
+ * env var — true or false — always wins over mode, live or practice, so an operator's
+ * explicit intent is never second-guessed.
  */
-function resolveDryRun() {
+function resolveDryRun(mode) {
   const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return { dryRun: true, defaulted: true };
+  if (raw === "") return { dryRun: mode !== "practice", defaulted: true };
   return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
 }
 
@@ -194,12 +204,20 @@ async function executeAutomatedDraftSelection(payload) {
   const log = logger.info;
 
   const targetName = payload.name;
-  const leagueId = process.env.ESPN_LEAGUE_ID;
+  // The message's own league_id (fantasy-core-pipeline already knows it and now includes it,
+  // see routes.py's trigger_draft_pick) is preferred over ESPN_LEAGUE_ID: this pod's env var
+  // is a single static value, so a shared/standing worker acting on a practice league's target
+  // would otherwise silently read and click against whichever league ESPN_LEAGUE_ID happens to
+  // point at instead — confirmed live during a practice run, where this logged the operator's
+  // real live league id while actually processing a practice room's message. The env var
+  // remains the fallback for the local/manual CLI entrypoint below, which has no payload.
+  const leagueId = payload.league_id || process.env.ESPN_LEAGUE_ID;
   const seasonId = process.env.CURRENT_YEAR || "2026";
+  const mode = payload.mode || null;
 
   if (!leagueId) {
     throw new PermanentError(
-      `[Draft Clicker][${tracking}] ESPN_LEAGUE_ID is not set — cannot identify the league.`,
+      `[Draft Clicker][${tracking}] Neither payload.league_id nor ESPN_LEAGUE_ID is set — cannot identify the league.`,
     );
   }
   const teamId = requireTeamId(payload.team_id, tracking);
@@ -210,7 +228,7 @@ async function executeAutomatedDraftSelection(payload) {
     );
   }
 
-  const { dryRun, defaulted } = resolveDryRun();
+  const { dryRun, defaulted } = resolveDryRun(mode);
   log(
     `Target assigned: "${targetName}" (id ${playerId}) for team ${teamId} in league ${leagueId} ` +
       `(${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
@@ -255,6 +273,17 @@ async function executeAutomatedDraftSelection(payload) {
       log(
         `DRY_RUN set — would submit pick: player ${playerId} ("${targetName}") for team ${teamId}.`,
       );
+      // Otherwise this is invisible outside raw pod logs: no draft_pick_click row means
+      // fantasy-core-pipeline's /v1/draft/status (last_clicker_action) and /v1/draft/logs
+      // show nothing happened at all, which is exactly what looked like a silent timeout
+      // during a practice run where DRY_RUN defaulted true.
+      await recordDraftPickClick({
+        leagueId,
+        season: seasonId,
+        playerId,
+        playerName: targetName,
+        status: "skipped_dry_run",
+      });
       return;
     }
 

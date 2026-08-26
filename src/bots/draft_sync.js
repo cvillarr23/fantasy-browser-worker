@@ -166,6 +166,51 @@ function parseAutosuggestFrame(raw) {
 }
 
 /**
+ * Parses ESPN's own turn-notification broadcast — `SELECTING <teamId> <clockMs>`, documented in
+ * draft_room_socket.js's header and confirmed live 2026-08-16 (scripts/practice-draft-test.js
+ * waited on exactly this frame before sending SELECT). Never parsed anywhere until now — nothing
+ * consumed it, so fantasy-core-pipeline's on_the_clock_team_id had to be derived from snake-draft
+ * math instead, which can't resolve a team's own first-round pick before that pick has already
+ * happened (chicken-and-egg: the slot map is only populated from an observed round-1 pick). This
+ * is the fix: ESPN tells us directly, in real time, so no derivation is needed at all.
+ */
+function parseSelectingFrame(raw) {
+  const line = raw.toString().trim();
+  if (!line.startsWith("SELECTING ")) return null;
+
+  const [, teamId, clockMs] = line.split(/\s+/);
+  if (!teamId || !/^\d+$/.test(teamId)) return null;
+
+  return {
+    team_id: Number(teamId),
+    // clockMs is best-effort context, not load-bearing the way team_id is - a malformed or
+    // absent token degrades to "unknown remaining time," not a dropped frame.
+    clock_ms: clockMs && /^\d+$/.test(clockMs) ? Number(clockMs) : null,
+  };
+}
+
+/**
+ * Parses ESPN's own autodraft-toggle broadcast — `AUTODRAFT <teamId> <bool>`, documented in
+ * docs/espn-reverse-engineering.md but previously discarded as noise (scripts/practice-draft-test.js's
+ * KNOWN_NOISE regex). This is the only live signal for "this team's autodraft is currently
+ * engaged" - draft_pick_ledger.js's classifyPickOrigin only tells you a pick already happened via
+ * autodraft, after the fact, which is too late for a UI banner meant to warn a user before their
+ * own clock runs out.
+ */
+function parseAutodraftFrame(raw) {
+  const line = raw.toString().trim();
+  if (!line.startsWith("AUTODRAFT ")) return null;
+
+  const [, teamId, boolToken] = line.split(/\s+/);
+  if (!teamId || !/^\d+$/.test(teamId) || boolToken == null) return null;
+
+  return {
+    team_id: Number(teamId),
+    active: /^(1|true)$/i.test(boolToken),
+  };
+}
+
+/**
  * Attributes a SELECTED frame to us, another manager, or ESPN's autodraft.
  *
  * The frame's optional 4th token is the drafting member's SWID (see draft_room_socket.js's
@@ -634,6 +679,67 @@ async function handleAutosuggestFrame(parsed, redisClient, state) {
 }
 
 /**
+ * Publishes ESPN's own live turn notification to `draft:{leagueId}:selecting` - same
+ * overwritten-status shape as handleAutosuggestFrame, for the same reason: this isn't a pick and
+ * has no dedup semantics, just "whoever's turn it is right now."
+ */
+async function handleSelectingFrame(parsed, redisClient, state) {
+  const payload = {
+    league_id: state.leagueId,
+    team_id: parsed.team_id,
+    clock_ms: parsed.clock_ms,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await redisClient.set(
+      `draft:${state.leagueId}:selecting`,
+      JSON.stringify(payload),
+    );
+  } catch (err) {
+    logger.error(
+      `[Draft Sync] Failed to publish on-the-clock team: ${err.message}`,
+      {
+        component: "draft_ingest",
+        source: "ws",
+        team_id: parsed.team_id,
+        err,
+      },
+    );
+  }
+}
+
+/**
+ * Publishes ESPN's own autodraft-toggle state to `draft:{leagueId}:autodraft` - same
+ * overwritten-status shape as handleSelectingFrame/handleAutosuggestFrame. A UI banner meant to
+ * warn a user their own team is about to be autodrafted needs this to be the same "whoever it is
+ * right now" snapshot, not an append-only log of every toggle.
+ */
+async function handleAutodraftFrame(parsed, redisClient, state) {
+  const payload = {
+    league_id: state.leagueId,
+    team_id: parsed.team_id,
+    active: parsed.active,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await redisClient.set(
+      `draft:${state.leagueId}:autodraft`,
+      JSON.stringify(payload),
+    );
+  } catch (err) {
+    logger.error(
+      `[Draft Sync] Failed to publish autodraft state: ${err.message}`,
+      {
+        component: "draft_ingest",
+        source: "ws",
+        team_id: parsed.team_id,
+        err,
+      },
+    );
+  }
+}
+
+/**
  * Feeds DOM-observed board records through the same ingest pipeline as WS and REST.
  *
  * A DOM record is a RECOVERY observation, not a live event: a full board scan re-reports every
@@ -790,6 +896,28 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
           return;
         }
         await handleAutosuggestFrame(suggestion, redisClient, state);
+        return;
+      }
+
+      if (line.startsWith("SELECTING ")) {
+        const selecting = parseSelectingFrame(line);
+        if (!selecting) return;
+        if (!state.ready) {
+          state.pendingSelecting = selecting;
+          return;
+        }
+        await handleSelectingFrame(selecting, redisClient, state);
+        return;
+      }
+
+      if (line.startsWith("AUTODRAFT ")) {
+        const autodraft = parseAutodraftFrame(line);
+        if (!autodraft) return;
+        if (!state.ready) {
+          state.pendingAutodraft = autodraft;
+          return;
+        }
+        await handleAutodraftFrame(autodraft, redisClient, state);
         return;
       }
 
@@ -967,6 +1095,10 @@ function createDraftState() {
     // Issue #31 (PR #65 review): the latest AUTOSUGGEST seen while !ready, published once ready
     // flips. Only the latest, unlike pendingFrames — see attachDraftListeners' AUTOSUGGEST branch.
     pendingAutosuggest: null,
+    // Same "only the latest, published once ready flips" shape as pendingAutosuggest, for the
+    // SELECTING/AUTODRAFT frames — see attachDraftListeners' branches for each.
+    pendingSelecting: null,
+    pendingAutodraft: null,
     // Shared across reconnects on purpose: the ledger is what stops a reconnect from
     // re-publishing the entire board as brand-new picks. It's only reset when the LEAGUE changes
     // (a fresh practice draft), which connectAndStream handles.
@@ -1117,6 +1249,8 @@ async function connectAndStream(redisClient, state) {
   state.ready = false;
   state.pendingFrames = [];
   state.pendingAutosuggest = null;
+  state.pendingSelecting = null;
+  state.pendingAutodraft = null;
   state.sessionExpiredError = null;
 
   // Recovery sweep, shared by every trigger that means "we may have missed picks": an INIT frame
@@ -1252,6 +1386,14 @@ async function connectAndStream(redisClient, state) {
     if (state.pendingAutosuggest) {
       await handleAutosuggestFrame(state.pendingAutosuggest, redisClient, state);
       state.pendingAutosuggest = null;
+    }
+    if (state.pendingSelecting) {
+      await handleSelectingFrame(state.pendingSelecting, redisClient, state);
+      state.pendingSelecting = null;
+    }
+    if (state.pendingAutodraft) {
+      await handleAutodraftFrame(state.pendingAutodraft, redisClient, state);
+      state.pendingAutodraft = null;
     }
 
     // DOM tier comes up only after state.ready — its very first scan reports the whole visible
@@ -1555,6 +1697,8 @@ module.exports = {
   connectAndStream,
   parseSelectedFrame,
   parseAutosuggestFrame,
+  parseSelectingFrame,
+  parseAutodraftFrame,
   buildDraftUrl,
   buildDraftDetailUrl,
   buildLeagueSettingsUrl,
@@ -1565,6 +1709,8 @@ module.exports = {
   assignPickNumber,
   handleSelectedFrame,
   handleAutosuggestFrame,
+  handleSelectingFrame,
+  handleAutodraftFrame,
   classifyPickOrigin,
   handleDomRecords,
   seedLedgerFromBoard,
