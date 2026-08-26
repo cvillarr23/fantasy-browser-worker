@@ -104,12 +104,45 @@ describe("executeAutomatedDraftSelection", () => {
     });
   });
 
-  it("does not connect to the draft socket when DRY_RUN defaults true", async () => {
+  it("does not connect to the draft socket when DRY_RUN defaults true, but records a visible skip", async () => {
     const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
     await jest.advanceTimersByTimeAsync(1000);
     await runPromise;
     expect(connectToDraftRoom).not.toHaveBeenCalled();
-    expect(recordDraftPickClick).not.toHaveBeenCalled();
+    // A silent skip is what made a practice-run pick look like an unexplained timeout - it has
+    // to be visible via execution_log/last_clicker_action, not just a pod log line.
+    expect(recordDraftPickClick).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "skipped_dry_run" }),
+    );
+  });
+
+  it("submits for real when DRY_RUN is unset but the payload says mode is practice", async () => {
+    const socket = makeFakeSocket();
+    connectToDraftRoom.mockResolvedValue(socket);
+    const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, mode: "practice" });
+    await jest.advanceTimersByTimeAsync(1000);
+    socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10 });
+    await runPromise;
+    expect(connectToDraftRoom).toHaveBeenCalled();
+    expect(recordDraftPickClick).toHaveBeenCalledWith(expect.objectContaining({ status: "success" }));
+  });
+
+  it("an explicit DRY_RUN env var still wins over mode: practice", async () => {
+    process.env.DRY_RUN = "true";
+    const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, mode: "practice" });
+    await jest.advanceTimersByTimeAsync(1000);
+    await runPromise;
+    expect(connectToDraftRoom).not.toHaveBeenCalled();
+  });
+
+  it("prefers payload.league_id over ESPN_LEAGUE_ID, so a shared worker never acts against the wrong league", async () => {
+    process.env.ESPN_LEAGUE_ID = "1248158344";
+    const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, league_id: "1768121792" });
+    await jest.advanceTimersByTimeAsync(1000);
+    await runPromise;
+    expect(recordDraftPickClick).toHaveBeenCalledWith(
+      expect.objectContaining({ leagueId: "1768121792" }),
+    );
   });
 
   it("is idempotent: no-op when already drafted by our own team", async () => {

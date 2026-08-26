@@ -22,8 +22,66 @@ const {
   connectAndStream,
   createDraftState,
   parseSelectedFrame,
+  parseSelectingFrame,
+  parseAutodraftFrame,
   decideReconnectAction,
 } = require("../../src/bots/draft_sync");
+
+describe("parseSelectingFrame", () => {
+  it("reads the team on the clock and the remaining clock in ms", () => {
+    expect(parseSelectingFrame("SELECTING 8 45000")).toEqual({
+      team_id: 8,
+      clock_ms: 45000,
+    });
+  });
+
+  it("degrades to a null clock rather than dropping the frame when the clock token is malformed", () => {
+    expect(parseSelectingFrame("SELECTING 8 abc")).toEqual({
+      team_id: 8,
+      clock_ms: null,
+    });
+  });
+
+  it("returns null for a non-SELECTING frame", () => {
+    expect(parseSelectingFrame("CLOCK 90")).toBeNull();
+  });
+
+  it("returns null when the team id token is missing or malformed", () => {
+    expect(parseSelectingFrame("SELECTING abc 45000")).toBeNull();
+  });
+});
+
+describe("parseAutodraftFrame", () => {
+  it("reads a truthy autodraft toggle", () => {
+    expect(parseAutodraftFrame("AUTODRAFT 8 true")).toEqual({
+      team_id: 8,
+      active: true,
+    });
+    expect(parseAutodraftFrame("AUTODRAFT 8 1")).toEqual({
+      team_id: 8,
+      active: true,
+    });
+  });
+
+  it("reads a falsy autodraft toggle", () => {
+    expect(parseAutodraftFrame("AUTODRAFT 8 false")).toEqual({
+      team_id: 8,
+      active: false,
+    });
+    expect(parseAutodraftFrame("AUTODRAFT 8 0")).toEqual({
+      team_id: 8,
+      active: false,
+    });
+  });
+
+  it("returns null for a non-AUTODRAFT frame", () => {
+    expect(parseAutodraftFrame("AUTOSUGGEST 123")).toBeNull();
+  });
+
+  it("returns null when the team id token is missing or malformed", () => {
+    expect(parseAutodraftFrame("AUTODRAFT abc true")).toBeNull();
+  });
+});
 
 describe("parseSelectedFrame", () => {
   // ESPN's SELECTED frame is `SELECTED <teamId> <playerId> <lineupSlotId> [<memberId>]`. The
