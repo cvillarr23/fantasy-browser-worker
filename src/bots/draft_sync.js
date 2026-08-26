@@ -147,6 +147,25 @@ function parseSelectedFrame(raw) {
 }
 
 /**
+ * Parses ESPN's own best-available-player suggestion — `AUTOSUGGEST <playerId>`, confirmed via a
+ * real capture (issue #31, 2026-08-25: 154 instances in recon-output/websockets.jsonl, one per pick
+ * cycle). Carries only a bare player id, no name/position/team — handleAutosuggestFrame resolves
+ * those against state.playerPool.
+ */
+function parseAutosuggestFrame(raw) {
+  const line = raw.toString().trim();
+  if (!line.startsWith("AUTOSUGGEST ")) return null;
+
+  const [, playerId] = line.split(/\s+/);
+  // Strictly a positive integer, not just Number()-coercible: a malformed token (e.g. "abc") would
+  // otherwise become NaN, which JSON.stringify silently renders as null — overwriting the last
+  // valid suggestion in Redis with a garbage status instead of leaving it alone (PR #65 review).
+  if (!playerId || !/^\d+$/.test(playerId)) return null;
+
+  return { player_id: Number(playerId) };
+}
+
+/**
  * Attributes a SELECTED frame to us, another manager, or ESPN's autodraft.
  *
  * The frame's optional 4th token is the drafting member's SWID (see draft_room_socket.js's
@@ -480,6 +499,38 @@ async function fetchDraftTotals(context, state) {
   }
 }
 
+/**
+ * Fetches and caches the current-season player catalog (issue #31) so AUTOSUGGEST's bare player id
+ * can be resolved to a name/position/team. Lazily requires espn_api.js — mirrors the pattern
+ * espn_api.js's own readDraftPicks already uses in reverse (lazily requiring draft_sync.js) to keep
+ * the dependency edge from becoming a real top-level cycle (see buildLeagueSettingsUrl's header
+ * above: draft_sync.js is deliberately not meant to depend on espn_api.js at module load).
+ *
+ * Best-effort, mirrors fetchDraftTotals: a failure leaves state.playerPool null rather than
+ * throwing, which just means published suggestions degrade to a bare player_id until the next
+ * league (re)connect retries this.
+ */
+async function loadPlayerPool(context, state) {
+  try {
+    const { fetchDraftPlayerPool } = require("./espn_api");
+    const players = await fetchDraftPlayerPool(context, {
+      leagueId: state.leagueId,
+      seasonId: state.seasonId,
+    });
+    state.playerPool = new Map(players.map((p) => [String(p.id), p]));
+    logger.info(
+      `[Draft Sync] Loaded player pool: ${state.playerPool.size} players.`,
+      { component: "draft_ingest", player_count: state.playerPool.size },
+    );
+  } catch (err) {
+    logger.warn(
+      `[Draft Sync] Could not load player pool — suggested picks will carry only a player_id ` +
+        `until this succeeds: ${err.message}`,
+      { component: "draft_ingest", err },
+    );
+  }
+}
+
 async function reconcileFromRest(context, redisClient, state) {
   try {
     const picks = await fetchDraftDetail(context, state);
@@ -531,6 +582,47 @@ async function handleSelectedFrame(parsed, redisClient, state) {
   } catch (err) {
     logger.error(
       `[Draft Sync] Failed to publish WS pick event: ${err.message}`,
+      {
+        component: "draft_ingest",
+        source: "ws",
+        player_id: parsed.player_id,
+        err,
+      },
+    );
+  }
+}
+
+/**
+ * Publishes ESPN's own suggested-next-pick (issue #31) to `draft:{leagueId}:suggested`.
+ *
+ * Deliberately NOT routed through ingestPickEvent/the ledger: this isn't a pick, has no dedup
+ * semantics, and feeding it through assignPickNumber would corrupt pick numbering for every real
+ * pick behind it. It's a single overwritten status snapshot instead — same durability shape as
+ * `draft:{leagueId}:health`/`:connected` (SET, no stream, no pub/sub), not the append/publish shape
+ * picks get.
+ *
+ * Resolves the bare player id against state.playerPool (populated once per draft by
+ * loadPlayerPool). A cold/failed pool lookup degrades to a suggestion carrying only player_id —
+ * still directly draftable, just missing display fields — rather than dropping the suggestion.
+ */
+async function handleAutosuggestFrame(parsed, redisClient, state) {
+  const player = state.playerPool?.get(String(parsed.player_id)) ?? null;
+  const payload = {
+    league_id: state.leagueId,
+    player_id: parsed.player_id,
+    name: player?.name ?? null,
+    position_id: player?.positionId ?? null,
+    pro_team_id: player?.proTeamId ?? null,
+    timestamp: new Date().toISOString(),
+  };
+  try {
+    await redisClient.set(
+      `draft:${state.leagueId}:suggested`,
+      JSON.stringify(payload),
+    );
+  } catch (err) {
+    logger.error(
+      `[Draft Sync] Failed to publish suggested pick: ${err.message}`,
       {
         component: "draft_ingest",
         source: "ws",
@@ -679,6 +771,25 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
               ),
             );
         }
+        return;
+      }
+
+      if (line.startsWith("AUTOSUGGEST ")) {
+        const suggestion = parseAutosuggestFrame(line);
+        if (!suggestion) return;
+        if (!state.ready) {
+          // Buffered rather than dropped (PR #65 review): a socket that opens/reconnects can emit
+          // AUTOSUGGEST before league context is seeded, and without this a consumer would see no
+          // suggestion — or a stale one for an already-drafted player — for an entire pick cycle,
+          // since the next AUTOSUGGEST only fires on the next pick. Only the LATEST one is kept
+          // (unlike state.pendingFrames, which keeps every SELECTED): it's an overwritten status
+          // snapshot, not an append-only log, so an earlier buffered value is already stale the
+          // instant a newer one arrives. Published once state.ready flips, right after the
+          // pendingFrames drain below.
+          state.pendingAutosuggest = suggestion;
+          return;
+        }
+        await handleAutosuggestFrame(suggestion, redisClient, state);
         return;
       }
 
@@ -853,6 +964,9 @@ function createDraftState() {
     memberId: null,
     ready: false,
     pendingFrames: [],
+    // Issue #31 (PR #65 review): the latest AUTOSUGGEST seen while !ready, published once ready
+    // flips. Only the latest, unlike pendingFrames — see attachDraftListeners' AUTOSUGGEST branch.
+    pendingAutosuggest: null,
     // Shared across reconnects on purpose: the ledger is what stops a reconnect from
     // re-publishing the entire board as brand-new picks. It's only reset when the LEAGUE changes
     // (a fresh practice draft), which connectAndStream handles.
@@ -873,6 +987,11 @@ function createDraftState() {
     // (2026-08-25) completion signal, the fastest and most authoritative of the three terminal
     // checks. Per-draft, like the above.
     draftCompleted: false,
+    // Issue #31: Map<String(playerId), {id, name, positionId, proTeamId, rank, percentOwned}>,
+    // populated once per draft by loadPlayerPool — resolves AUTOSUGGEST's bare player id into a
+    // display-ready suggestion. Null until loaded (or if the catalog fetch failed); per-draft, like
+    // the ledger/health, so a league change (a fresh practice draft) must refetch it.
+    playerPool: null,
   };
 }
 
@@ -997,6 +1116,7 @@ async function connectAndStream(redisClient, state) {
   let domObserver = null;
   state.ready = false;
   state.pendingFrames = [];
+  state.pendingAutosuggest = null;
   state.sessionExpiredError = null;
 
   // Recovery sweep, shared by every trigger that means "we may have missed picks": an INIT frame
@@ -1071,6 +1191,9 @@ async function connectAndStream(redisClient, state) {
       state.consecutiveEmptyCycles = 0;
       state.expectedTotalPicks = null;
       state.draftCompleted = false;
+      // Issue #31: the previous league's player catalog is meaningless for a fresh draft — a stale
+      // pool would resolve AUTOSUGGEST ids from the wrong league (or miss them entirely).
+      state.playerPool = null;
     }
     state.leagueId = draftContext.leagueId;
     await redisClient.set(`draft:${state.leagueId}:connected`, "1", { EX: 60 });
@@ -1086,6 +1209,13 @@ async function connectAndStream(redisClient, state) {
     const totals = await fetchDraftTotals(session.context, state);
     if (totals) {
       state.expectedTotalPicks = totals.totalExpectedPicks;
+    }
+
+    // Issue #31: best-effort, once per draft (skipped on a mere reconnect if already loaded — see
+    // the league-change reset above for when it's cleared). A failed fetch leaves playerPool null,
+    // which degrades published suggestions to a bare player_id rather than blocking the sync.
+    if (!state.playerPool) {
+      await loadPlayerPool(session.context, state);
     }
 
     // Rehydrate from the durable board BEFORE anything can ingest. On a mid-draft restart Redis
@@ -1115,6 +1245,14 @@ async function connectAndStream(redisClient, state) {
       await handleSelectedFrame(parsed, redisClient, state);
     }
     state.ready = true;
+
+    // Issue #31 (PR #65 review): publish whatever AUTOSUGGEST arrived during startup/reconnect so
+    // consumers aren't left with no suggestion — or a stale one for an already-drafted player — for
+    // an entire pick cycle, since the next AUTOSUGGEST only fires on the next pick.
+    if (state.pendingAutosuggest) {
+      await handleAutosuggestFrame(state.pendingAutosuggest, redisClient, state);
+      state.pendingAutosuggest = null;
+    }
 
     // DOM tier comes up only after state.ready — its very first scan reports the whole visible
     // board at once, which would be dropped by handleDomRecords' not-ready guard otherwise.
@@ -1416,14 +1554,17 @@ module.exports = {
   streamLiveDraftRoom,
   connectAndStream,
   parseSelectedFrame,
+  parseAutosuggestFrame,
   buildDraftUrl,
   buildDraftDetailUrl,
   buildLeagueSettingsUrl,
   fetchDraftDetail,
   fetchDraftTotals,
+  loadPlayerPool,
   ingestPickEvent,
   assignPickNumber,
   handleSelectedFrame,
+  handleAutosuggestFrame,
   classifyPickOrigin,
   handleDomRecords,
   seedLedgerFromBoard,

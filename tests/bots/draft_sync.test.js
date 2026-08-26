@@ -729,4 +729,83 @@ describe("connectAndStream", () => {
     expect(newInfoCalls).toHaveLength(1);
     infoSpy.mockRestore();
   });
+
+  it("buffers an AUTOSUGGEST frame that arrives before ready, publishing it once ready flips (PR #65 review)", async () => {
+    // 2 teams x 1 roster slot = 2 total picks, matching the 2 already-seeded picks below, so the
+    // proactive total-picks exit fires immediately and the run loop never has to actually wait —
+    // same trick as the "exits proactively once the learned total-picks count is reached" test.
+    const redisClient = buildRedisClient({
+      hGetAll: jest.fn().mockResolvedValue({
+        1: JSON.stringify({
+          league_id: "987",
+          player_id: 111,
+          pick_number: 1,
+          team_id: 1,
+          source: "rest",
+        }),
+        2: JSON.stringify({
+          league_id: "987",
+          player_id: 222,
+          pick_number: 2,
+          team_id: 2,
+          source: "rest",
+        }),
+      }),
+    });
+    const state = createDraftState();
+
+    let capturedPageListeners;
+    const wsFrameListeners = {};
+    let injected = false;
+    let suggestedSetsRightAfterInjection = null;
+    const baseRequestGet = buildRequestGet({
+      settingsBody: {
+        teams: [{ id: 1 }, { id: 2 }],
+        settings: { rosterSettings: { lineupSlotCounts: { 0: 1 } } },
+      },
+    });
+    // fetchDraftTotals is the first REST call connectAndStream makes after attachDraftListeners
+    // has already registered the page's "websocket" handler — so this is the earliest point a
+    // test can simulate a frame arriving while state.ready is still false.
+    const requestGet = jest.fn(async (url) => {
+      if (!injected && capturedPageListeners) {
+        injected = true;
+        capturedPageListeners.websocket({
+          url: () => "wss://fake",
+          on: (event, cb) => {
+            wsFrameListeners[event] = cb;
+          },
+        });
+        await wsFrameListeners.framereceived({
+          payload: Buffer.from("AUTOSUGGEST 4426515"),
+        });
+        // Recorded here (not asserted inline) so a failure can't be silently swallowed by
+        // fetchDraftTotals' own try/catch around this same call.
+        suggestedSetsRightAfterInjection = redisClient.set.mock.calls.filter(
+          ([key]) => key === "draft:987:suggested",
+        ).length;
+      }
+      return baseRequestGet(url);
+    });
+    const { session, pageListeners } = buildSession({ requestGet });
+    capturedPageListeners = pageListeners;
+
+    createAuthenticatedSession.mockResolvedValue(session);
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    await connectAndStream(redisClient, state);
+
+    expect(suggestedSetsRightAfterInjection).toBe(0);
+    expect(state.pendingAutosuggest).toBeNull();
+    const suggestion = lastSetPayload(redisClient, "draft:987:suggested");
+    expect(suggestion).toMatchObject({
+      league_id: "987",
+      player_id: 4426515,
+    });
+  });
 });
