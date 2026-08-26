@@ -157,7 +157,10 @@ function parseAutosuggestFrame(raw) {
   if (!line.startsWith("AUTOSUGGEST ")) return null;
 
   const [, playerId] = line.split(/\s+/);
-  if (playerId == null) return null;
+  // Strictly a positive integer, not just Number()-coercible: a malformed token (e.g. "abc") would
+  // otherwise become NaN, which JSON.stringify silently renders as null — overwriting the last
+  // valid suggestion in Redis with a garbage status instead of leaving it alone (PR #65 review).
+  if (!playerId || !/^\d+$/.test(playerId)) return null;
 
   return { player_id: Number(playerId) };
 }
@@ -772,15 +775,21 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       }
 
       if (line.startsWith("AUTOSUGGEST ")) {
-        // Unlike SELECTED, dropped rather than buffered when not yet ready: it's an overwritten
-        // status snapshot keyed on state.leagueId (null pre-ready would corrupt the Redis key), not
-        // a pick that would be lost forever — the next AUTOSUGGEST arrives well within a pick clock.
-        if (state.ready) {
-          const suggestion = parseAutosuggestFrame(line);
-          if (suggestion) {
-            await handleAutosuggestFrame(suggestion, redisClient, state);
-          }
+        const suggestion = parseAutosuggestFrame(line);
+        if (!suggestion) return;
+        if (!state.ready) {
+          // Buffered rather than dropped (PR #65 review): a socket that opens/reconnects can emit
+          // AUTOSUGGEST before league context is seeded, and without this a consumer would see no
+          // suggestion — or a stale one for an already-drafted player — for an entire pick cycle,
+          // since the next AUTOSUGGEST only fires on the next pick. Only the LATEST one is kept
+          // (unlike state.pendingFrames, which keeps every SELECTED): it's an overwritten status
+          // snapshot, not an append-only log, so an earlier buffered value is already stale the
+          // instant a newer one arrives. Published once state.ready flips, right after the
+          // pendingFrames drain below.
+          state.pendingAutosuggest = suggestion;
+          return;
         }
+        await handleAutosuggestFrame(suggestion, redisClient, state);
         return;
       }
 
@@ -955,6 +964,9 @@ function createDraftState() {
     memberId: null,
     ready: false,
     pendingFrames: [],
+    // Issue #31 (PR #65 review): the latest AUTOSUGGEST seen while !ready, published once ready
+    // flips. Only the latest, unlike pendingFrames — see attachDraftListeners' AUTOSUGGEST branch.
+    pendingAutosuggest: null,
     // Shared across reconnects on purpose: the ledger is what stops a reconnect from
     // re-publishing the entire board as brand-new picks. It's only reset when the LEAGUE changes
     // (a fresh practice draft), which connectAndStream handles.
@@ -1104,6 +1116,7 @@ async function connectAndStream(redisClient, state) {
   let domObserver = null;
   state.ready = false;
   state.pendingFrames = [];
+  state.pendingAutosuggest = null;
   state.sessionExpiredError = null;
 
   // Recovery sweep, shared by every trigger that means "we may have missed picks": an INIT frame
@@ -1232,6 +1245,14 @@ async function connectAndStream(redisClient, state) {
       await handleSelectedFrame(parsed, redisClient, state);
     }
     state.ready = true;
+
+    // Issue #31 (PR #65 review): publish whatever AUTOSUGGEST arrived during startup/reconnect so
+    // consumers aren't left with no suggestion — or a stale one for an already-drafted player — for
+    // an entire pick cycle, since the next AUTOSUGGEST only fires on the next pick.
+    if (state.pendingAutosuggest) {
+      await handleAutosuggestFrame(state.pendingAutosuggest, redisClient, state);
+      state.pendingAutosuggest = null;
+    }
 
     // DOM tier comes up only after state.ready — its very first scan reports the whole visible
     // board at once, which would be dropped by handleDomRecords' not-ready guard otherwise.

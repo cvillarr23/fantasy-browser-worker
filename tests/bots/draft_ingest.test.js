@@ -330,6 +330,12 @@ describe("parseAutosuggestFrame", () => {
   it("returns null for a truncated frame rather than inventing an id", () => {
     expect(parseAutosuggestFrame("AUTOSUGGEST")).toBeNull();
   });
+
+  it("returns null for a non-numeric id rather than NaN (PR #65 review)", () => {
+    // Number("abc") is NaN, which JSON.stringify silently renders as null — publishing that would
+    // overwrite the last valid suggestion in Redis with a garbage status.
+    expect(parseAutosuggestFrame("AUTOSUGGEST abc")).toBeNull();
+  });
 });
 
 describe("handleAutosuggestFrame", () => {
