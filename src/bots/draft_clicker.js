@@ -57,6 +57,21 @@ const DEBUG_DIR =
 const CONFIRM_TIMEOUT_MS = 5000;
 
 /**
+ * A confirmation timeout is ambiguous the first time (could be a network blip), but a *dead* draft
+ * room — e.g. a cancelled practice room — times out identically every single delivery, on both the
+ * WS and the DOM fallback tier. Thrown as a plain Error, connection.js requeues that forever with
+ * no backoff, so one impossible target pins a whole replica on a ~20-25s spawn-Chromium/timeout/
+ * requeue loop indefinitely (issue #68).
+ *
+ * AMQP exposes only a `redelivered` boolean (no delivery count, and no dead-letter-exchange
+ * `x-death` header is configured), so the attempt budget is tracked here in memory, keyed per
+ * target. A process restart just resets the budget — the loop still terminates, it only costs a
+ * few more attempts.
+ */
+const MAX_CONFIRMATION_TIMEOUTS = 3;
+const confirmationTimeouts = new Map();
+
+/**
  * Small randomized delay applied only to setup steps (the draft-board read, opening the socket) —
  * never between deciding to pick and calling sendPick(), which stays immediate. A fixed-latency
  * bot firing every request at an identical cadence is its own signal; jittering the parts that
@@ -254,6 +269,14 @@ async function executeAutomatedDraftSelection(payload) {
   // pre-submission error must NOT write a draft_pick_click row, since no click was ever
   // attempted for it.
   let submissionAttempted = false;
+  // tracking_id is the message's own identity (so a redelivery of the *same* message keeps
+  // counting up), but it is not guaranteed present — fall back to the target itself, which is
+  // what actually can't be fulfilled, rather than lumping every untracked message together.
+  const timeoutKey = payload.tracking_id || `${leagueId}:${teamId}:${playerId}`;
+  // Only a run that ended in a counted confirmation timeout keeps its tally; any other outcome
+  // (success, a different failure) clears it, so the budget is "consecutive", and the Map does
+  // not grow without bound.
+  let timeoutCounted = false;
   try {
     session = await createAuthenticatedSession();
 
@@ -320,9 +343,13 @@ async function executeAutomatedDraftSelection(payload) {
         socket.sendPick(playerId);
         const result = await confirmation;
         if (!result) {
-          throw new Error(
+          const timeoutError = new Error(
             `No SELECTED confirmation for player ${playerId}/team ${teamId} within ${CONFIRM_TIMEOUT_MS}ms.`,
           );
+          // Tagged so the DOM-fallback catch below can tell this apart from other transient WS
+          // failures (a refused connection, say) and count it against this target's retry budget.
+          timeoutError.confirmationTimeout = true;
+          throw timeoutError;
         }
         log(
           `SUCCESS: Pick submitted and confirmed for ${targetName} (lineup slot ${result.lineup_slot_id}).`,
@@ -380,6 +407,22 @@ async function executeAutomatedDraftSelection(payload) {
         });
       } catch (domError) {
         log(`DOM fallback also failed: ${domError.message}`);
+        // Both tiers timed out for this target. Once that has happened MAX_CONFIRMATION_TIMEOUTS
+        // times in a row, stop requeuing it: the room is gone, not momentarily unreachable.
+        if (wsError.confirmationTimeout) {
+          const attempts = (confirmationTimeouts.get(timeoutKey) || 0) + 1;
+          confirmationTimeouts.set(timeoutKey, attempts);
+          if (attempts >= MAX_CONFIRMATION_TIMEOUTS) {
+            confirmationTimeouts.delete(timeoutKey);
+            throw new PermanentError(
+              `[Draft Clicker][${tracking}] ${wsError.message} DOM fallback also failed ` +
+                `(${domError.message}). That is ${attempts} consecutive confirmation timeouts for ` +
+                `player ${playerId}/team ${teamId} — the draft room is not accepting picks ` +
+                `(cancelled or ended); retrying can't help.`,
+            );
+          }
+          timeoutCounted = true;
+        }
         throw wsError;
       }
     }
@@ -412,6 +455,9 @@ async function executeAutomatedDraftSelection(payload) {
     }
     throw error;
   } finally {
+    if (!timeoutCounted) {
+      confirmationTimeouts.delete(timeoutKey);
+    }
     if (session && session.browser) {
       await session.browser.close();
     }
