@@ -2,7 +2,7 @@ const {
   assertCookieSessionValid,
   assertRenderedSessionValid,
 } = require("../../src/bots/session_health");
-const { SessionExpiredError } = require("../../src/errors");
+const { PermanentError, SessionExpiredError } = require("../../src/errors");
 
 function makeContext(status) {
   return {
@@ -45,6 +45,16 @@ describe("assertCookieSessionValid", () => {
     });
     await expect(promise).rejects.not.toBeInstanceOf(SessionExpiredError);
     await expect(promise).rejects.toThrow(/500/);
+  });
+
+  it("throws PermanentError on a 404 — the league is gone, not just unreachable", async () => {
+    const context = makeContext(404);
+    const promise = assertCookieSessionValid(context, {
+      leagueId: "1650162962",
+      seasonId: "2026",
+    });
+    await expect(promise).rejects.toBeInstanceOf(PermanentError);
+    await expect(promise).rejects.toThrow(/not found/);
   });
 });
 

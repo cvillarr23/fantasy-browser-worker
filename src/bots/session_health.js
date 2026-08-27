@@ -1,6 +1,6 @@
 const { buildLeagueReadUrl } = require("./espn_api");
 const selectors = require("../selectors/espn_selectors.json");
-const { SessionExpiredError } = require("../errors");
+const { PermanentError, SessionExpiredError } = require("../errors");
 
 /**
  * Proactive session-validity checks (WORKER-17) — every consumer of the stored espn_s2/SWID
@@ -31,6 +31,18 @@ async function assertCookieSessionValid(context, { leagueId, seasonId }) {
       `[Session Health] ESPN session cookies rejected (HTTP ${response.status()}) for league ` +
         `${leagueId} — espn_s2/SWID have likely expired. Re-extract them and update OpenBao: ` +
         "bao kv put secret/fantasy/espn espn_s2=<new> swid=<new>",
+    );
+  }
+  // A cancelled/expired practice room 404s here permanently — every redelivery of a message
+  // targeting it fails identically forever, since the league itself is gone, not merely
+  // slow/unreachable. Confirmed live 2026-08-27: a message for a cancelled room's league_id
+  // (1650162962) requeued via a plain Error every ~0.5s for 3+ hours, pinning a worker replica,
+  // until manually purged. A 5xx/other non-ok status stays a plain (retryable) Error below —
+  // those genuinely can recover on their own.
+  if (response.status() === 404) {
+    throw new PermanentError(
+      `[Session Health] League ${leagueId} not found (HTTP 404) — the room no longer exists ` +
+        "(ended, cancelled, or never existed for this season); retrying can't help.",
     );
   }
   if (!response.ok()) {
