@@ -104,9 +104,10 @@ describe("session_registry", () => {
         sessionId: "s",
         leaseTtlMs: 1000,
       });
+      const after = Date.now();
       const expiresAtMs = Date.parse(fields.lease_expires_at);
       expect(expiresAtMs).toBeGreaterThanOrEqual(before + 1000);
-      expect(expiresAtMs).toBeLessThanOrEqual(Date.now() + 1000 + 50);
+      expect(expiresAtMs).toBeLessThanOrEqual(after + 1000);
     });
 
     it("exposes the grace multiplier draft_sync.js derives its lease TTL from", () => {

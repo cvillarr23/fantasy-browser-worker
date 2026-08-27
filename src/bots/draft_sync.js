@@ -912,13 +912,17 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
 
       // Issue #70: a rejected delegated SELECT gets this frame (see draft_room_socket.js's header)
       // instead of an ordinary SELECTED — checked before AUTOSUGGEST/SELECTING/AUTODRAFT since a
-      // pending delegated command needs a definitive answer as fast as any other frame here.
+      // pending delegated command needs a definitive answer as fast as any other frame here. Only
+      // short-circuits when a pending delegated command actually consumes it — an ERROR frame
+      // with nothing awaiting it (e.g. a rejection surfacing after this bot's own confirm timeout
+      // already gave up) falls through to the generic frame-type accounting below instead of
+      // vanishing with no trace, same as any other non-SELECTED frame.
       if (line.startsWith("ERROR ")) {
         const errorFrame = parseErrorFrame(line);
         if (errorFrame && state.pendingCommand) {
           state.pendingCommand.onError(errorFrame);
+          return;
         }
-        return;
       }
 
       if (line.startsWith("AUTOSUGGEST ")) {
@@ -1265,6 +1269,13 @@ function createDraftState() {
     // Exactly one at a time — a draft's pick clock only ever has one live submission in flight,
     // so this is a single slot rather than a map keyed by command_id.
     pendingCommand: null,
+    // Issue #70: cursor into draft_commands:{leagueId}, shared across reconnects on purpose (like
+    // ledger/consecutiveEmptyCycles above) — starting a fresh connectAndStream() cycle from "$"
+    // would silently skip any command published during the reconnect window between the old
+    // socket dying and the new one coming up, permanently dropping that delegated pick. A plain
+    // `{ current: string }` box (not a bare string) so consumeCommandsOnce can mutate the cursor
+    // in place without this module reaching back into state after every poll.
+    commandLastIdRef: { current: "$" },
   };
 }
 
@@ -1405,10 +1416,9 @@ async function connectAndStream(redisClient, state) {
   state.pendingSelecting = null;
   state.pendingAutodraft = null;
   state.sessionExpiredError = null;
-  // Issue #70: cursor into draft_commands:{leagueId}, reset per reconnect (a new session has a
-  // new browser page/socket for sendPickViaPage to target — replaying a command against a
-  // stale, already-closed page would be pointless at best).
-  const commandLastIdRef = { current: "$" };
+  // Issue #70: reuses state.commandLastIdRef (persisted across reconnects) rather than resetting
+  // to "$" here — see createDraftState's comment for why a per-reconnect reset would drop
+  // commands published during the reconnect window.
 
   // Issue #70: installed on the CONTEXT, before enterDraftRoom navigates anywhere — see
   // installDraftSocketSendHook's own header for why this ordering matters (a page that already
@@ -1626,7 +1636,7 @@ async function connectAndStream(redisClient, state) {
     commandPollInterval = setInterval(() => {
       if (commandPollInFlight) return;
       commandPollInFlight = true;
-      pollDraftCommands(redisClient, state, session, commandLastIdRef)
+      pollDraftCommands(redisClient, state, session, state.commandLastIdRef)
         .catch((err) =>
           logger.error(
             `[Draft Sync] Draft command poll failed: ${err.message}`,
