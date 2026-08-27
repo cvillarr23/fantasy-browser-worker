@@ -270,6 +270,80 @@ describe("executeAutomatedDraftSelection", () => {
     });
   });
 
+  // A cancelled/dead draft room times out identically on every redelivery (WS confirmation, then
+  // DOM fallback), which connection.js would otherwise requeue forever with no backoff.
+  async function runConfirmationTimeout(payload) {
+    const socket = makeFakeSocket();
+    connectToDraftRoom.mockResolvedValue(socket);
+    clickPickViaDom.mockRejectedValue(new Error("locator.waitFor: Timeout 15000ms exceeded"));
+
+    const runPromise = executeAutomatedDraftSelection(payload);
+    const settled = runPromise.catch((error) => error);
+    await jest.advanceTimersByTimeAsync(10000);
+    return settled;
+  }
+
+  it("keeps requeuing the first confirmation timeouts, then classifies the third as permanent", async () => {
+    process.env.DRY_RUN = "false";
+    const payload = { ...BASE_PAYLOAD, tracking_id: "dead-room-1" };
+
+    const first = await runConfirmationTimeout(payload);
+    expect(first.permanent).toBeUndefined();
+    expect(first.message).toMatch(/No SELECTED confirmation/);
+
+    const second = await runConfirmationTimeout(payload);
+    expect(second.permanent).toBeUndefined();
+
+    const third = await runConfirmationTimeout(payload);
+    expect(third).toMatchObject({
+      permanent: true,
+      message: /3 consecutive confirmation timeouts/,
+    });
+  });
+
+  it("counts confirmation timeouts per tracking_id, not globally", async () => {
+    process.env.DRY_RUN = "false";
+    await runConfirmationTimeout({ ...BASE_PAYLOAD, tracking_id: "room-a" });
+    await runConfirmationTimeout({ ...BASE_PAYLOAD, tracking_id: "room-a" });
+
+    const other = await runConfirmationTimeout({ ...BASE_PAYLOAD, tracking_id: "room-b" });
+    expect(other.permanent).toBeUndefined();
+  });
+
+  it("resets the timeout budget once a pick succeeds again", async () => {
+    process.env.DRY_RUN = "false";
+    const payload = { ...BASE_PAYLOAD, tracking_id: "flaky-room" };
+
+    await runConfirmationTimeout(payload);
+    await runConfirmationTimeout(payload);
+
+    const socket = makeFakeSocket();
+    connectToDraftRoom.mockResolvedValue(socket);
+    const runPromise = executeAutomatedDraftSelection(payload);
+    await jest.advanceTimersByTimeAsync(1000);
+    socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10 });
+    await runPromise;
+
+    const afterSuccess = await runConfirmationTimeout(payload);
+    expect(afterSuccess.permanent).toBeUndefined();
+  });
+
+  it("does not count an unrelated transient WS failure against the timeout budget", async () => {
+    process.env.DRY_RUN = "false";
+    const payload = { ...BASE_PAYLOAD, tracking_id: "econnrefused-room" };
+    clickPickViaDom.mockRejectedValue(new Error("dom selector not found"));
+
+    for (let i = 0; i < 3; i += 1) {
+      connectToDraftRoom.mockRejectedValue(new Error("connect ECONNREFUSED"));
+      const runPromise = executeAutomatedDraftSelection(payload);
+      const settled = runPromise.catch((error) => error);
+      await jest.advanceTimersByTimeAsync(1000);
+      const error = await settled;
+      expect(error.permanent).toBeUndefined();
+      expect(error.message).toMatch(/ECONNREFUSED/);
+    }
+  });
+
   it("short-circuits on a pre-flight SessionExpiredError before connecting to the socket", async () => {
     process.env.DRY_RUN = "false";
     assertCookieSessionValid.mockRejectedValue(
