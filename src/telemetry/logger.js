@@ -30,6 +30,7 @@ function wrap(level) {
 }
 
 const logger = {
+  debug: wrap("debug"),
   info: wrap("info"),
   warn: wrap("warn"),
   error: wrap("error"),

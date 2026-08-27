@@ -26,6 +26,7 @@ const {
   parseSelectingFrame,
   parseAutodraftFrame,
   decideReconnectAction,
+  attachDraftListeners,
 } = require("../../src/bots/draft_sync");
 
 describe("parseSelectingFrame", () => {
@@ -314,6 +315,68 @@ describe("fetchDraftTotals", () => {
   });
 });
 
+// Diagnostics added for the "connector goes silent forever after a delegated pick" investigation
+// (see draft_sync.js's attachDraftListeners/connectAndStream) — these assert the new trace points
+// exist and report correct raw values, not that any bug is fixed (root cause isn't confirmed yet).
+describe("attachDraftListeners debug instrumentation", () => {
+  it("logs a debug line when the handle is created, and debugSnapshot() reflects real openSockets/idle state across open+close", () => {
+    const start = Date.now();
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const debugSpy = jest.spyOn(logger, "debug");
+      const pageListeners = {};
+      const page = {
+        url: () => "https://fantasy.espn.com/football/draft?x=1",
+        on: jest.fn((event, cb) => {
+          pageListeners[event] = cb;
+        }),
+      };
+      const state = createDraftState();
+
+      const handle = attachDraftListeners(page, {}, state);
+
+      expect(
+        debugSpy.mock.calls.some(
+          ([msg, fields]) =>
+            msg.includes("new handle created") &&
+            fields.page_url === "https://fantasy.espn.com/football/draft?x=1",
+        ),
+      ).toBe(true);
+
+      let snap = handle.debugSnapshot();
+      expect(snap).toEqual({
+        openSockets: 0,
+        lastActivityAt: start,
+        idleMs: 0,
+      });
+
+      const wsListeners = {};
+      pageListeners.websocket({
+        url: () => "wss://fake",
+        on: jest.fn((event, cb) => {
+          wsListeners[event] = cb;
+        }),
+      });
+      snap = handle.debugSnapshot();
+      expect(snap.openSockets).toBe(1);
+      expect(snap.idleMs).toBe(0);
+
+      jest.setSystemTime(start + 5000);
+      wsListeners.close();
+      snap = handle.debugSnapshot();
+      // close() doesn't touch lastActivityAt (only the last frame/open does) — idleMs should
+      // reflect the 5s that has actually elapsed since the socket opened, not 0.
+      expect(snap.openSockets).toBe(0);
+      expect(snap.idleMs).toBe(5000);
+
+      debugSpy.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
 describe("connectAndStream", () => {
   const ENV_KEYS = ["DRAFT_ROOM_URL", "ESPN_LEAGUE_ID", "ESPN_TEAM_ID"];
   let savedEnv;
@@ -510,6 +573,69 @@ describe("connectAndStream", () => {
 
     expect(result).toEqual({ terminal: false, newPicksThisCycle: 0 });
     expect(redisClient.del).not.toHaveBeenCalled();
+  });
+
+  it("logs the raw isDead() operands + delegated-command state on each reconnect-loop tick, and logs when context 'page' reassigns the handle (silent-forever-reconnect investigation)", async () => {
+    const contextListeners = {};
+    const { session, context } = buildSession({
+      requestGet: buildRequestGet(),
+    });
+    context.on = jest.fn((event, cb) => {
+      contextListeners[event] = cb;
+    });
+    const redisClient = buildRedisClient();
+    const state = createDraftState();
+
+    createAuthenticatedSession.mockResolvedValue(session);
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    const debugSpy = jest.spyOn(logger, "debug");
+    const infoSpy = jest.spyOn(logger, "info");
+
+    await connectAndStream(redisClient, state);
+
+    const tickLogs = debugSpy.mock.calls.filter(([msg]) =>
+      msg.includes("Reconnect-loop tick"),
+    );
+    expect(tickLogs.length).toBeGreaterThanOrEqual(1);
+    expect(tickLogs[0][1]).toEqual(
+      expect.objectContaining({
+        component: "draft_ingest",
+        open_sockets: expect.any(Number),
+        idle_ms: expect.any(Number),
+        ws_dead_grace_ms: expect.any(Number),
+        total_picks_reached: false,
+        draft_completed: false,
+        pending_command: null,
+        command_poll_in_flight: false,
+      }),
+    );
+
+    // Simulate a stray new Page appearing mid-draft — the theory under investigation is that this
+    // (previously silent) event resets the handle's isDead() clock out from under the reconnect
+    // loop. This just confirms it's now observable, not that it's the confirmed root cause.
+    expect(contextListeners.page).toBeInstanceOf(Function);
+    const otherPage = { url: () => "https://fantasy.espn.com/other", on: jest.fn() };
+    contextListeners.page(otherPage);
+
+    const reassignLogs = infoSpy.mock.calls.filter(([msg]) =>
+      msg.includes("reassigning WebSocket listener handle"),
+    );
+    expect(reassignLogs).toHaveLength(1);
+    expect(reassignLogs[0][1]).toEqual(
+      expect.objectContaining({
+        component: "draft_ws",
+        new_page_url: "https://fantasy.espn.com/other",
+      }),
+    );
+
+    debugSpy.mockRestore();
+    infoSpy.mockRestore();
   });
 
   it("never treats a stall streak alone as terminal, but escalates logging (PR review: silence isn't proof of completion)", async () => {

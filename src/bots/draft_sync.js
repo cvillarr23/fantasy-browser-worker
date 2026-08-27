@@ -870,6 +870,15 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
   let openSockets = 0;
   let lastActivityAt = Date.now();
 
+  // Diagnostic for the "connector goes silent forever" investigation: this closure (and its
+  // openSockets/lastActivityAt) is recreated every time this is called, including from the
+  // context.on("page", ...) reassignment below — a page that never opens a websocket of its own
+  // leaves this handle's isDead() clock silently running from here with no other trace of it.
+  logger.debug("[Draft Sync] attachDraftListeners: new handle created.", {
+    component: "draft_ws",
+    page_url: page.url(),
+  });
+
   page.on("websocket", (ws) => {
     const socketId = (state.health.ws.sockets_opened += 1);
     logger.info(`[Draft Sync] WebSocket opened: ${ws.url()}`, {
@@ -1053,6 +1062,13 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
     isDead: () =>
       openSockets === 0 && Date.now() - lastActivityAt > WS_DEAD_GRACE_MS,
     hasOpenSocket: () => openSockets > 0,
+    // Diagnostic for the "connector goes silent forever" investigation: exposes the raw operands
+    // isDead() computes from, so the reconnect loop can log them instead of just the boolean.
+    debugSnapshot: () => ({
+      openSockets,
+      lastActivityAt,
+      idleMs: Date.now() - lastActivityAt,
+    }),
   };
 }
 
@@ -1461,6 +1477,15 @@ async function connectAndStream(redisClient, state) {
     let handle = attachDraftListeners(session.page, redisClient, state, hooks);
     session.context.on("page", (newPage) => {
       if (newPage !== session.page) {
+        // Diagnostic for the "connector goes silent forever" investigation: this was previously
+        // completely silent, so there was no way to tell from logs whether a stray new Page ever
+        // fires mid-draft (resetting the isDead() handle/clock out from under the reconnect loop)
+        // versus not firing at all.
+        logger.info(
+          "[Draft Sync] context 'page' event fired — reassigning WebSocket listener handle to " +
+            "the new page.",
+          { component: "draft_ws", new_page_url: newPage.url() },
+        );
         handle = attachDraftListeners(newPage, redisClient, state, hooks);
       }
     });
@@ -1662,6 +1687,27 @@ async function connectAndStream(redisClient, state) {
       if (state.sessionExpiredError) {
         throw state.sessionExpiredError;
       }
+      // Diagnostic for the "connector goes silent forever" investigation: this loop was
+      // previously silent on every tick, so there was no way to distinguish "correctly waiting"
+      // from "stuck" — logs the raw operands behind isDead() (not just its boolean) plus the
+      // delegated-command state, since a stuck command is a candidate root cause worth ruling
+      // in/out from the same trace point.
+      const snap = handle.debugSnapshot();
+      logger.debug("[Draft Sync] Reconnect-loop tick.", {
+        component: "draft_ingest",
+        open_sockets: snap.openSockets,
+        idle_ms: snap.idleMs,
+        ws_dead_grace_ms: WS_DEAD_GRACE_MS,
+        total_picks_reached: totalPicksReached(),
+        draft_completed: state.draftCompleted,
+        pending_command: state.pendingCommand
+          ? {
+              player_id: state.pendingCommand.playerId,
+              team_id: state.pendingCommand.teamId,
+            }
+          : null,
+        command_poll_in_flight: commandPollInFlight,
+      });
       await session.page.waitForTimeout(5000);
     }
 
