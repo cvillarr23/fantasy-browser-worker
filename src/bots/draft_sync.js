@@ -866,6 +866,22 @@ async function handleDomRecords(records, redisClient, state, meta) {
  *   - Socket lifecycle (open/close, per-socket frame counts) is logged with structured fields, so
  *     an eviction gap can be located in pod logs after the fact rather than inferred.
  */
+/**
+ * Distinguishes the real ESPN draft-room feed socket from any other WebSocket the page happens to
+ * open — critically, Disney/BAM's identity-SDK socket (wss://espn.connections.edge.bamgrid.com/...),
+ * which the rendered fantasy.espn.com page opens and reconnects independently of the draft itself
+ * (observed reconnecting on its own ~30min cadence throughout a session with the draft-room socket
+ * long dead). page.on("websocket") fires for EVERY socket the page opens, not just the draft
+ * feed — attachDraftListeners must only count this one toward liveness/health, or the BAM socket's
+ * unrelated churn permanently masks a dead draft-room connection (confirmed root cause of the
+ * "connector goes silent forever" incident: isDead() and the ws_connected health field never
+ * reflected the real socket's death because the BAM socket kept openSockets > 0).
+ */
+function isDraftRoomSocketUrl(url) {
+  if (!url) return false;
+  return url.includes("fantasydraft.espn.com") && url.includes("/JOIN");
+}
+
 function attachDraftListeners(page, redisClient, state, hooks = {}) {
   let openSockets = 0;
   let lastActivityAt = Date.now();
@@ -1971,6 +1987,7 @@ module.exports = {
   emitHealthHeartbeat,
   decideReconnectAction,
   attachDraftListeners,
+  isDraftRoomSocketUrl,
   executeSubmitPickCommand,
   pollDraftCommands,
 };

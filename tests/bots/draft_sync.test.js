@@ -27,6 +27,7 @@ const {
   parseAutodraftFrame,
   decideReconnectAction,
   attachDraftListeners,
+  isDraftRoomSocketUrl,
 } = require("../../src/bots/draft_sync");
 
 describe("parseSelectingFrame", () => {
@@ -318,6 +319,29 @@ describe("fetchDraftTotals", () => {
 // Diagnostics added for the "connector goes silent forever after a delegated pick" investigation
 // (see draft_sync.js's attachDraftListeners/connectAndStream) — these assert the new trace points
 // exist and report correct raw values, not that any bug is fixed (root cause isn't confirmed yet).
+describe("isDraftRoomSocketUrl", () => {
+  it("recognizes the real ESPN draft-room JOIN socket", () => {
+    expect(
+      isDraftRoomSocketUrl(
+        "wss://fantasydraft.espn.com/game-1/league-156611456/JOIN?1=1&2=156611456",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects the unrelated BAM/Disney identity-SDK socket", () => {
+    expect(
+      isDraftRoomSocketUrl(
+        "wss://espn.connections.edge.bamgrid.com/5d3054/connection?X-Application-Version=0.0.1",
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects an unrecognized socket URL rather than throwing", () => {
+    expect(isDraftRoomSocketUrl("wss://example.com/socket")).toBe(false);
+    expect(isDraftRoomSocketUrl("")).toBe(false);
+  });
+});
+
 describe("attachDraftListeners debug instrumentation", () => {
   it("logs a debug line when the handle is created, and debugSnapshot() reflects real openSockets/idle state across open+close", () => {
     const start = Date.now();
