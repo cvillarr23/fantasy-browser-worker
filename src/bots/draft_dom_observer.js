@@ -102,6 +102,28 @@ const PICK_STRATEGIES = [
 ];
 
 /**
+ * Best-effort classifier for ESPN's Disney/BAM-SDK "Log in Required" gate on the rendered draft
+ * room — a full identity-SDK login wall this cookie-only bot cannot pass, documented in
+ * session_health.js's assertRenderedSessionValid. A selector miss with ZERO player-id nodes
+ * anywhere on the page (not just within a strategy's own selector) is otherwise indistinguishable
+ * in the logs from a genuinely stale CSS selector; this turns "which failure mode was this?" from
+ * a guess into a fact the next incident's logs can show directly. Not a verified selector of its
+ * own — ESPN's login-gate markup has never been captured any more than the board's has — but it
+ * costs nothing extra (same scan, same page).
+ *
+ * Pure (no DOM access) so it's directly unit-testable — scanInPage itself only runs inside a
+ * browser page and has no jsdom coverage in this project (see dedupeScanRecords's header comment
+ * for why). scanInPage below duplicates this exact one-line check inline, because a serialized
+ * page.evaluate function can't close over anything defined in this module — the two MUST be kept
+ * in sync if this logic ever changes.
+ */
+function detectLoginGate(playerIdNodeCount, bodyText) {
+  return (
+    playerIdNodeCount === 0 && /log\s*in\s*required/i.test(bodyText || "")
+  );
+}
+
+/**
  * Runs INSIDE the browser page. Must be fully self-contained — it's serialized and evaluated in
  * the page context, so it can close over nothing from this module.
  *
@@ -111,6 +133,7 @@ const PICK_STRATEGIES = [
  */
 /* istanbul ignore next -- executes in the browser, not under jest */
 function scanInPage({ strategies, sampleChars }) {
+
   const toNumber = (raw) => {
     if (raw == null) return null;
     const cleaned = String(raw).trim();
@@ -213,6 +236,15 @@ function scanInPage({ strategies, sampleChars }) {
     diagnostics,
     sample_html: sampleHtml,
     player_id_nodes: document.querySelectorAll("[data-player-id]").length,
+    // Duplicated inline (not called from detectLoginGate above) — see that function's header
+    // comment for why. Keep these two checks in sync.
+    page_gated:
+      document.querySelectorAll("[data-player-id]").length === 0 &&
+      /log\s*in\s*required/i.test(
+        document.body
+          ? document.body.innerText || document.body.textContent || ""
+          : "",
+      ),
     url: location.href,
   };
 }
@@ -271,6 +303,7 @@ async function attachDraftDomObserver(
     last_matched_strategy: null,
     last_record_count: 0,
     selector_miss_streak: 0,
+    login_gate_detected: false,
     observer_installed: false,
   };
 
@@ -298,6 +331,7 @@ async function attachDraftDomObserver(
 
       if (!result.matched_strategy) {
         health.selector_miss_streak += 1;
+        if (result.page_gated) health.login_gate_detected = true;
         // Escalating cadence: the first miss is worth seeing immediately, but a board that simply
         // has no picks yet (an empty board before pick 1) would otherwise log a warning every
         // poll for the whole pre-draft window. After the first, only every 12th (~1/min at the
@@ -308,12 +342,17 @@ async function attachDraftDomObserver(
         ) {
           log.warn(
             `[Draft DOM] Selector miss (streak ${health.selector_miss_streak}): no pick records ` +
-              `extracted from the draft board. WS remains the only live source until this is fixed.`,
+              `extracted from the draft board. WS remains the only live source until this is fixed.` +
+              (result.page_gated
+                ? " Page appears gated behind ESPN's login-required overlay — this is likely NOT " +
+                  "a stale selector; see session_health.js's assertRenderedSessionValid."
+                : ""),
             {
               component: "draft_dom_observer",
               trigger,
               diagnostics: result.diagnostics,
               player_id_nodes: result.player_id_nodes,
+              page_gated: result.page_gated,
               url: result.url,
               sample_html: result.sample_html,
             },
@@ -328,6 +367,7 @@ async function attachDraftDomObserver(
           );
         }
         health.selector_miss_streak = 0;
+        health.login_gate_detected = false;
       }
 
       if (records.length > 0 && onRecords) {
@@ -457,6 +497,7 @@ module.exports = {
   attachDraftDomObserver,
   dedupeScanRecords,
   scanInPage,
+  detectLoginGate,
   PICK_STRATEGIES,
   DEFAULT_POLL_INTERVAL_MS,
 };
