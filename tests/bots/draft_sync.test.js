@@ -189,6 +189,46 @@ describe("fetchDraftDetail", () => {
   });
 });
 
+describe("reconcileFromRest permanent-error handling", () => {
+  it("stores a PermanentError on state.permanentError instead of only counting it as a failed poll", async () => {
+    const state = {
+      leagueId: "156611456",
+      seasonId: "2026",
+      health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
+      permanentError: null,
+    };
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => false,
+          status: () => 404,
+          json: () => Promise.resolve({}),
+        }),
+      },
+    };
+    await reconcileFromRest(context, {}, state);
+    expect(state.health.rest.failed_polls).toBe(1);
+    expect(state.permanentError).toBeInstanceOf(PermanentError);
+  });
+
+  it("does not touch state.permanentError for an ordinary (transient) REST failure", async () => {
+    const state = {
+      leagueId: "156611456",
+      seasonId: "2026",
+      health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
+      permanentError: null,
+    };
+    const context = {
+      request: {
+        get: jest.fn().mockRejectedValue(new Error("network blip")),
+      },
+    };
+    await reconcileFromRest(context, {}, state);
+    expect(state.health.rest.failed_polls).toBe(1);
+    expect(state.permanentError).toBeNull();
+  });
+});
+
 describe("decideReconnectAction", () => {
   // Regression coverage for issue #62's actual fix: previously a clean-but-stalled
   // connectAndStream return was indistinguishable from real progress, so backoff/the reconnect

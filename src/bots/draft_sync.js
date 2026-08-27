@@ -632,6 +632,9 @@ async function reconcileFromRest(context, redisClient, state) {
     }
   } catch (err) {
     state.health.rest.failed_polls += 1;
+    if (err instanceof PermanentError) {
+      state.permanentError = err;
+    }
     logger.error(`[Draft Sync] REST reconciliation failed: ${err.message}`, {
       component: "draft_ingest",
       source: "rest",
@@ -1296,6 +1299,12 @@ function createDraftState() {
     // Serializes ingest so evaluate -> write -> commit is atomic per pick (see withIngestLock).
     ingestChain: Promise.resolve(),
     sessionExpiredError: null,
+    // Set when a definitively-unrecoverable error is observed from any ingest tier (REST 404s
+    // that will never resolve, ESPN confirming the room is gone) — parallel to
+    // sessionExpiredError, but for errors a session refresh can never fix. Checked by the same
+    // reconnect-loop guard; see connectAndStream's main while loop and streamLiveDraftRoom's
+    // outer catch for how the two differ in retry behavior.
+    permanentError: null,
     // Issue #62: consecutive connectAndStream cycles that produced zero new picks across every
     // tier. Persists across reconnects on purpose (like the ledger) — reset only on real progress
     // or a league change, never on a mere reconnect.
@@ -2016,4 +2025,5 @@ module.exports = {
   isDraftRoomSocketUrl,
   executeSubmitPickCommand,
   pollDraftCommands,
+  reconcileFromRest,
 };
