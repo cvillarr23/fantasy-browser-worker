@@ -4,7 +4,7 @@ const {
   assertCookieSessionValid,
   assertRenderedSessionValid,
 } = require("./session_health");
-const { SessionExpiredError } = require("../errors");
+const { PermanentError, SessionExpiredError } = require("../errors");
 const {
   DraftPickLedger,
   pickIdentity,
@@ -470,20 +470,27 @@ async function fetchDraftDetail(context, state) {
     try {
       const body = await response.json();
       if (body?.type === "LEAGUE_NOT_FOUND_DELETED") {
-        throw new Error(
+        throw new PermanentError(
           `Draft room league ${state.leagueId} no longer exists (LEAGUE_NOT_FOUND_DELETED). ` +
             "Set DRAFT_ROOM_URL to a newly joined active mock draft room URL and retry.",
         );
       }
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message.includes("LEAGUE_NOT_FOUND_DELETED")
-      ) {
+      if (error instanceof PermanentError) {
         throw error;
       }
     }
-    throw new Error(`mDraftDetail fetch failed: HTTP ${response.status()}`);
+    // Every other non-ok mDraftDetail response (404, 5xx, etc.) is treated as permanent for THIS
+    // league too: confirmed live (2026-08-27) that a room's mDraftDetail keeps 404ing identically
+    // on every ~15s reconcile tick once the room ends — there is no status code this endpoint
+    // returns that recovers on retry once the practice room itself is gone (see this function's
+    // header re: mDraftDetail's known behavior for ephemeral rooms). A transient network blip
+    // would throw before reaching this line (a rejected fetch, not an ok()-false response), so
+    // this branch is specifically "the server answered and said no" — which for this endpoint has
+    // no observed transient case.
+    throw new PermanentError(
+      `mDraftDetail fetch failed: HTTP ${response.status()}`,
+    );
   }
   const body = await response.json();
   const picks = body?.draftDetail?.picks ?? [];

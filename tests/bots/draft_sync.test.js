@@ -16,6 +16,7 @@ const { createAuthenticatedSession } = require("../../src/bots/auth");
 const { parseDraftRoomUrl } = require("../../src/bots/mock_draft");
 const { assertCookieSessionValid } = require("../../src/bots/session_health");
 const { logger } = require("../../src/telemetry/logger");
+const { PermanentError } = require("../../src/errors");
 const {
   fetchDraftDetail,
   fetchDraftTotals,
@@ -28,6 +29,7 @@ const {
   decideReconnectAction,
   attachDraftListeners,
   isDraftRoomSocketUrl,
+  reconcileFromRest,
 } = require("../../src/bots/draft_sync");
 
 describe("parseSelectingFrame", () => {
@@ -152,6 +154,38 @@ describe("fetchDraftDetail", () => {
     await expect(
       fetchDraftDetail(context, { leagueId: "1", seasonId: "2026" }),
     ).rejects.toThrow("mDraftDetail fetch failed: HTTP 503");
+  });
+
+  it("throws a PermanentError (not a plain Error) for LEAGUE_NOT_FOUND_DELETED", async () => {
+    const state = { leagueId: "156611456", seasonId: "2026" };
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => false,
+          status: () => 404,
+          json: () => Promise.resolve({ type: "LEAGUE_NOT_FOUND_DELETED" }),
+        }),
+      },
+    };
+    await expect(fetchDraftDetail(context, state)).rejects.toThrow(
+      PermanentError,
+    );
+  });
+
+  it("throws a PermanentError for any other non-ok HTTP status from mDraftDetail", async () => {
+    const state = { leagueId: "156611456", seasonId: "2026" };
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => false,
+          status: () => 404,
+          json: () => Promise.resolve({}),
+        }),
+      },
+    };
+    await expect(fetchDraftDetail(context, state)).rejects.toThrow(
+      PermanentError,
+    );
   });
 });
 
