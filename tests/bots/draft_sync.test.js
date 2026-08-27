@@ -27,6 +27,7 @@ const {
   parseSelectingFrame,
   parseAutodraftFrame,
   decideReconnectAction,
+  decideCrashRecoveryAction,
   attachDraftListeners,
   isDraftRoomSocketUrl,
   reconcileFromRest,
@@ -296,6 +297,38 @@ describe("decideReconnectAction", () => {
         newPicksThisCycle: 0,
         attempt: 10,
       }),
+    ).toEqual({ action: "exit_failed" });
+  });
+});
+
+describe("decideCrashRecoveryAction", () => {
+  it("exits without any retry/backoff when the thrown error is a PermanentError, regardless of attempt count", () => {
+    expect(
+      decideCrashRecoveryAction({
+        error: new PermanentError("league gone"),
+        attempt: 0,
+      }),
+    ).toEqual({ action: "exit_permanent" });
+    // Confirmed live 2026-08-27: previously this fell through to the generic retry path and
+    // burned through every remaining reconnect attempt (each with its own growing delay) against
+    // a room that had already 404'd — this must short-circuit at any attempt count, not just 0.
+    expect(
+      decideCrashRecoveryAction({
+        error: new PermanentError("league gone"),
+        attempt: 7,
+      }),
+    ).toEqual({ action: "exit_permanent" });
+  });
+
+  it("keeps the generic backoff-with-cap behavior for any other thrown error", () => {
+    expect(
+      decideCrashRecoveryAction({ error: new Error("boom"), attempt: 0 }),
+    ).toEqual({ action: "retry_after_delay", nextAttempt: 1, delayMs: 2000 });
+  });
+
+  it("gives up at the reconnect cap boundary for a non-permanent error, matching decideReconnectAction's boundary", () => {
+    expect(
+      decideCrashRecoveryAction({ error: new Error("boom"), attempt: 9 }),
     ).toEqual({ action: "exit_failed" });
   });
 });

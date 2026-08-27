@@ -1875,6 +1875,28 @@ async function connectAndStream(redisClient, state) {
  * always fell through as if attempt were reset to 0 — the actual root cause of #62's unbounded
  * loop).
  */
+/**
+ * Pure decision of what streamLiveDraftRoom should do after connectAndStream *throws* — extracted
+ * the same way decideReconnectAction was, so this is unit-testable without mocking Redis/browser.
+ *
+ * A PermanentError (room confirmed gone) can never resolve on any retry, at any delay — exit
+ * immediately rather than burning through the reconnect-attempt budget (and its backoff delays)
+ * on a doomed room. Any other thrown error keeps today's generic crash-retry-with-backoff
+ * behavior.
+ */
+function decideCrashRecoveryAction({ error, attempt }) {
+  if (error instanceof PermanentError) {
+    return { action: "exit_permanent" };
+  }
+  const nextAttempt = attempt + 1;
+  if (nextAttempt >= MAX_RECONNECT_ATTEMPTS) return { action: "exit_failed" };
+  const delayMs = Math.min(
+    RECONNECT_BASE_DELAY_MS * 2 ** (nextAttempt - 1),
+    RECONNECT_MAX_DELAY_MS,
+  );
+  return { action: "retry_after_delay", nextAttempt, delayMs };
+}
+
 function decideReconnectAction({ terminal, newPicksThisCycle, attempt }) {
   if (terminal) return { action: "exit_clean" };
   if (newPicksThisCycle > 0)
@@ -1918,24 +1940,34 @@ async function streamLiveDraftRoom() {
       try {
         result = await connectAndStream(redisClient, state);
       } catch (error) {
-        attempt += 1;
+        const crashDecision = decideCrashRecoveryAction({ error, attempt });
+        if (crashDecision.action === "exit_permanent") {
+          // Confirmed live 2026-08-27: without this branch, a thrown PermanentError fell into
+          // the generic retry-with-backoff path below and burned through all
+          // MAX_RECONNECT_ATTEMPTS (each with its own growing delay) against a room that had
+          // already 404'd — 17+ minutes of pointless retries in the incident this fixes.
+          logger.error(
+            `[Draft Sync] Unrecoverable condition, exiting without further reconnect attempts: ${error.message}`,
+            { err: error },
+          );
+          return;
+        }
+        attempt = crashDecision.nextAttempt ?? attempt + 1;
         // >= , not > — see decideReconnectAction's matching comment; keeps this path's boundary
         // consistent with it (both cap at exactly MAX_RECONNECT_ATTEMPTS connectAndStream calls).
-        if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        if (crashDecision.action === "exit_failed") {
           throw new Error(
             "Exceeded max reconnect attempts for live draft stream.",
           );
         }
-        const delay = Math.min(
-          RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
-          RECONNECT_MAX_DELAY_MS,
-        );
         logger.error(
           `[Draft Sync] Session crashed (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}): ` +
-            `${error.message}. Reconnecting in ${delay}ms...`,
+            `${error.message}. Reconnecting in ${crashDecision.delayMs}ms...`,
           { err: error, attempt },
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await new Promise((resolve) =>
+          setTimeout(resolve, crashDecision.delayMs),
+        );
         continue;
       }
 
@@ -2049,6 +2081,7 @@ module.exports = {
   createIngestHealth,
   emitHealthHeartbeat,
   decideReconnectAction,
+  decideCrashRecoveryAction,
   attachDraftListeners,
   isDraftRoomSocketUrl,
   executeSubmitPickCommand,
