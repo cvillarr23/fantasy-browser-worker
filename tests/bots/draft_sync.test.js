@@ -359,6 +359,7 @@ describe("connectAndStream", () => {
           json: async () => ({ draftDetail: { picks: [] } }),
         }),
       },
+      addInitScript: jest.fn().mockResolvedValue(undefined),
     };
     const browser = { close: jest.fn().mockResolvedValue(undefined) };
     const redisClient = {
@@ -447,7 +448,11 @@ describe("connectAndStream", () => {
         await jest.advanceTimersByTimeAsync(ms + 30000);
       }),
     };
-    const context = { on: jest.fn(), request: { get: requestGet } };
+    const context = {
+      on: jest.fn(),
+      request: { get: requestGet },
+      addInitScript: jest.fn().mockResolvedValue(undefined),
+    };
     const browser = { close: jest.fn().mockResolvedValue(undefined) };
     return {
       session: { page, context, browser, headless: true, swid: "{TEST-SWID}" },

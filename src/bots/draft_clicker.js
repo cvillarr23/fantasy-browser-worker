@@ -5,10 +5,20 @@ const { readDraftPicks } = require("./espn_api");
 const { connectToDraftRoom } = require("./draft_room_socket");
 const { clickPickViaDom } = require("./draft_room_dom");
 const { assertCookieSessionValid } = require("./session_health");
+const {
+  decideOwnership,
+  publishCommand,
+  awaitCommandResult,
+} = require("./session_registry");
 const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 const { recordDraftPickClick } = require("../db/execution_log");
+const redis = require("redis");
+
+const REDIS_HOST =
+  process.env.REDIS_HOST || "fantasy-cache.default.svc.cluster.local";
+const REDIS_PORT = process.env.REDIS_PORT || 6379;
 
 /**
  * 1-Click Automated Draft Execution Bot (WORKER-06)
@@ -25,6 +35,15 @@ const { recordDraftPickClick } = require("../db/execution_log");
  * already reads `SELECTED` broadcasts from — confirmed end-to-end 2026-08-16 by running this exact
  * WS path (draft_room_socket.js) against a real practice draft (scripts/practice-draft-test.js),
  * not just observed in a browser. See draft_room_socket.js's header for the full protocol writeup.
+ *
+ * ISSUE #70: opening this bot's own JOIN for that WS path evicts draft_sync.js's long-lived
+ * observer session for the same league (ESPN's draft room is confirmed single-session per
+ * league/team/member — see draft_room_socket.js's header). So this bot now checks
+ * session_registry.js's ownership lease FIRST: a live connector (draft_sync.js) owning this
+ * league gets the pick delegated to it via `draft_commands:{leagueId}` and executes it on its own
+ * already-open socket instead. Only when no live owner exists (a league with no active connector
+ * Job — e.g. a live, non-practice league without a dedicated connector) does this bot fall back to
+ * the direct-WS-then-DOM path below, exactly as it always has.
  *
  * KNOWN GAP, not fixed here: `player_id` in the payload is Sleeper-namespaced (players.player_id
  * per core-pipeline's crosswalk), but every ESPN draft API — and this bot's own idempotency check
@@ -318,6 +337,78 @@ async function executeAutomatedDraftSelection(payload) {
     }
 
     submissionAttempted = true;
+
+    // Issue #70: check the ownership lease before opening any new session. A live connector
+    // (draft_sync.js) already holds an open socket for this league — delegating to it instead of
+    // opening a second, colliding JOIN is what stops this bot from evicting it.
+    const registryRedis = redis.createClient({
+      url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
+    });
+    registryRedis.on("error", (err) =>
+      logger.error(
+        `[Draft Clicker][${tracking}] Session registry Redis client error: ${err.message}`,
+        { err },
+      ),
+    );
+    try {
+      await registryRedis.connect();
+      const decision = await decideOwnership(registryRedis, leagueId);
+      if (decision.action === "delegate") {
+        log(
+          `Live connector found (owner ${decision.ownerPod}) for league ${leagueId} — ` +
+            `delegating pick submission via draft_commands:${leagueId} instead of opening a ` +
+            "new session that would evict it.",
+        );
+        const commandId = await publishCommand(registryRedis, leagueId, {
+          command: "submit_pick",
+          team_id: teamId,
+          player_id: playerId,
+          name: targetName,
+          tracking_id: tracking,
+        });
+        const result = await awaitCommandResult(
+          registryRedis,
+          leagueId,
+          commandId,
+          CONFIRM_TIMEOUT_MS,
+        );
+        if (result && result.status === "success") {
+          log(
+            `SUCCESS (delegated): pick submitted and confirmed for ${targetName} ` +
+              `(lineup slot ${result.lineup_slot_id}).`,
+          );
+          await recordDraftPickClick({
+            leagueId,
+            season: seasonId,
+            playerId,
+            playerName: targetName,
+            roundNumber: null,
+            status: "success",
+          });
+          return;
+        }
+        if (result && result.status === "error") {
+          throw new PermanentError(
+            `[Draft Clicker][${tracking}] Delegated pick for player ${playerId} rejected by ` +
+              `server: ERROR ${result.error_code} ${result.error_message}`,
+          );
+        }
+        // No response within the confirm budget — the owner may be mid-reconnect. Falls through
+        // to the direct WS-then-DOM path below rather than treating an unanswered delegation as a
+        // definitive failure; that path is this bot's pre-#70 behavior and remains a safety net.
+        log(
+          "Delegated pick submission timed out with no result — falling back to a direct " +
+            "session for this attempt.",
+        );
+      } else {
+        log(
+          `No live connector found for league ${leagueId} — submitting directly (fallback path).`,
+        );
+      }
+    } finally {
+      await registryRedis.quit().catch(() => {});
+    }
+
     log("Connecting to draft room socket to submit pick...");
     await jitter(100, 400);
     const cookies = resolveEspnCookies();

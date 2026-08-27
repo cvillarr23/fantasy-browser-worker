@@ -75,7 +75,19 @@ const { logger } = require("../telemetry/logger");
  * which is fragile and doesn't need a full rendered draft-room page just to get a socket.
  * draft_clicker.js only needs cookies (from auth.js's resolveEspnCookies()) to authenticate the
  * raw socket — no browser context needed for this part, which is faster than launching Chromium
- * per queue message (matters against a 60-90s draft clock).
+ * per queue message (matters against a 60-90s draft clock). This remains draft_clicker.js's
+ * fallback path for a league with no active connector Job (see session_registry.js) — a brand new
+ * JOIN is exactly the right, and only, thing to do when nothing already owns the room.
+ *
+ * ISSUE #70 UPDATE: for a league WITH an active connector Job, a brand new JOIN is now exactly
+ * the wrong thing to do — it evicts draft_sync.js's own long-lived observer session (this is the
+ * whole incident #70 exists to fix). draft_sync.js instead submits a delegated pick through
+ * installDraftSocketSendHook()/sendPickViaPage() below: the "fragile" page.evaluate() monkeypatch
+ * this header used to rule out for draft_clicker.js's use case. The trade-off is different for
+ * draft_sync.js specifically — it already has a live rendered page open for the life of the
+ * draft, so there's no extra browser cost, and reaching into that existing socket is the *only*
+ * way to submit without a new JOIN. draft_clicker.js keeps this file's raw `ws` client as its own
+ * path (still faster, still no browser needed) for the no-owner fallback case.
  */
 
 // Constant across every observed capture regardless of league/session — see header comment.
@@ -262,10 +274,81 @@ function handleFor(ws) {
   };
 }
 
+/**
+ * Draft-room-socket send hook (issue #70, Option A).
+ *
+ * Patches window.WebSocket in the PAGE (via context.addInitScript, so it runs before any page
+ * script — including ESPN's own client — ever runs) to keep a live reference to whichever socket
+ * connects to the draft room's JOIN endpoint. draft_sync.js's own WebSocket handle
+ * (page.on("websocket")) is observation-only — no .send() — so this is the only way to submit a
+ * pick through the SAME already-open connection instead of opening a second, colliding JOIN (see
+ * this file's header for why a second JOIN is unacceptable for draft_sync.js specifically: it
+ * would evict its own observer socket, reproducing the incident this exists to fix).
+ *
+ * Must be registered on the browser CONTEXT (not a single page) and before enterDraftRoom
+ * navigates: an addInitScript added after the target page already started loading would miss the
+ * page's own WebSocket construction, which happens during that same script evaluation. Applying
+ * it at the context level also covers DRAFT_MODE=mock's lobby-click flow opening the draft room
+ * in a brand-new tab (see draft_sync.js's connectAndStream for the same reasoning about its own
+ * page.on("websocket") listener).
+ */
+async function installDraftSocketSendHook(context) {
+  await context.addInitScript(() => {
+    /* eslint-env browser */
+    // Runs inside the page, not this Node process — `window` here is the browser global.
+    const NativeWebSocket = window.WebSocket;
+    window.__espnDraftSocket = null;
+    window.WebSocket = new Proxy(NativeWebSocket, {
+      construct(target, args) {
+        const socket = new target(...args);
+        const url = String(args[0] || "");
+        if (url.includes("fantasydraft.espn.com") && url.includes("/JOIN")) {
+          window.__espnDraftSocket = socket;
+          socket.addEventListener("close", () => {
+            if (window.__espnDraftSocket === socket) {
+              window.__espnDraftSocket = null;
+            }
+          });
+        }
+        return socket;
+      },
+    });
+  });
+}
+
+/**
+ * Submits a pick through the page's own already-open draft-room socket (installed by
+ * installDraftSocketSendHook above) rather than opening a second, colliding connection. Throws a
+ * plain Error (not a PermanentError — a missing/not-yet-open socket is plausibly transient, e.g.
+ * a reconnect in progress) if no live socket is currently captured, so the caller reports a
+ * definitive failure rather than silently no-op'ing.
+ */
+async function sendPickViaPage(page, playerId) {
+  const sent = await page.evaluate((id) => {
+    /* eslint-env browser */
+    // Runs inside the page, not this Node process — `window` here is the browser global.
+    // readyState 1 === OPEN — matches the standard WebSocket constant without relying on it
+    // existing on whatever this environment's window.WebSocket happens to be.
+    if (!window.__espnDraftSocket || window.__espnDraftSocket.readyState !== 1) {
+      return false;
+    }
+    window.__espnDraftSocket.send(`SELECT ${id}\n`);
+    return true;
+  }, playerId);
+  if (!sent) {
+    throw new Error(
+      `[Draft Room Socket] No live draft-room socket captured in the page — cannot submit ` +
+        `pick ${playerId} via sendPickViaPage.`,
+    );
+  }
+}
+
 module.exports = {
   connectToDraftRoom,
   parseSelectedFrame,
   parseErrorFrame,
   buildDraftSocketUrl,
   normalizeSwid,
+  installDraftSocketSendHook,
+  sendPickViaPage,
 };

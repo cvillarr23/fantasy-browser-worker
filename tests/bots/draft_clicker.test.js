@@ -3,15 +3,23 @@ jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/draft_room_socket");
 jest.mock("../../src/bots/draft_room_dom");
 jest.mock("../../src/bots/session_health");
+jest.mock("../../src/bots/session_registry");
 jest.mock("../../src/db/execution_log");
+jest.mock("redis");
 
 const { createAuthenticatedSession, resolveEspnCookies } = require("../../src/bots/auth");
 const { readDraftPicks } = require("../../src/bots/espn_api");
 const { connectToDraftRoom } = require("../../src/bots/draft_room_socket");
 const { clickPickViaDom } = require("../../src/bots/draft_room_dom");
 const { assertCookieSessionValid } = require("../../src/bots/session_health");
+const {
+  decideOwnership,
+  publishCommand,
+  awaitCommandResult,
+} = require("../../src/bots/session_registry");
 const { SessionExpiredError } = require("../../src/errors");
 const { recordDraftPickClick } = require("../../src/db/execution_log");
+const redis = require("redis");
 const { executeAutomatedDraftSelection } = require("../../src/bots/draft_clicker");
 
 const ENV_KEYS = ["DRY_RUN", "ESPN_LEAGUE_ID"];
@@ -53,6 +61,18 @@ beforeEach(() => {
   readDraftPicks.mockResolvedValue([]);
   assertCookieSessionValid.mockResolvedValue(undefined);
   recordDraftPickClick.mockReset().mockResolvedValue(undefined);
+
+  // Issue #70: defaults to "become_owner" so every pre-existing test below (which exercises the
+  // direct WS/DOM fallback path) keeps exercising that path unchanged. Tests for the delegate
+  // branch override this per-case.
+  redis.createClient.mockReturnValue({
+    on: jest.fn(),
+    connect: jest.fn().mockResolvedValue(undefined),
+    quit: jest.fn().mockResolvedValue(undefined),
+  });
+  decideOwnership.mockReset().mockResolvedValue({ action: "become_owner" });
+  publishCommand.mockReset().mockResolvedValue("command-1");
+  awaitCommandResult.mockReset().mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -176,6 +196,118 @@ describe("executeAutomatedDraftSelection", () => {
     // No real submission was ever attempted for this conflict - it must not be recorded as
     // a click outcome.
     expect(recordDraftPickClick).not.toHaveBeenCalled();
+  });
+
+  describe("issue #70: session registry delegation", () => {
+    it("delegates via the command channel when a live connector owns the league, and never opens a direct WS session", async () => {
+      process.env.DRY_RUN = "false";
+      decideOwnership.mockResolvedValue({
+        action: "delegate",
+        ownerPod: "draft-sync-abc123",
+        ownerSessionId: "sess-1",
+      });
+      publishCommand.mockResolvedValue("cmd-1");
+      awaitCommandResult.mockResolvedValue({
+        command_id: "cmd-1",
+        status: "success",
+        lineup_slot_id: 10,
+      });
+
+      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      await jest.advanceTimersByTimeAsync(1000);
+      await runPromise;
+
+      expect(decideOwnership).toHaveBeenCalledWith(expect.anything(), "1248158344");
+      expect(publishCommand).toHaveBeenCalledWith(
+        expect.anything(),
+        "1248158344",
+        expect.objectContaining({
+          command: "submit_pick",
+          team_id: "8",
+          player_id: "4360438",
+          name: "Breece Hall",
+        }),
+      );
+      expect(awaitCommandResult).toHaveBeenCalledWith(
+        expect.anything(),
+        "1248158344",
+        "cmd-1",
+        expect.any(Number),
+      );
+      expect(connectToDraftRoom).not.toHaveBeenCalled();
+      expect(clickPickViaDom).not.toHaveBeenCalled();
+      expect(recordDraftPickClick).toHaveBeenCalledWith({
+        leagueId: "1248158344",
+        season: "2026",
+        playerId: "4360438",
+        playerName: "Breece Hall",
+        roundNumber: null,
+        status: "success",
+      });
+    });
+
+    it("treats a delegated ERROR result as a PermanentError, same as a direct-WS rejection", async () => {
+      process.env.DRY_RUN = "false";
+      decideOwnership.mockResolvedValue({ action: "delegate", ownerPod: "draft-sync-abc123" });
+      publishCommand.mockResolvedValue("cmd-1");
+      awaitCommandResult.mockResolvedValue({
+        command_id: "cmd-1",
+        status: "error",
+        error_code: 1,
+        error_message: "Invalid Selection.",
+      });
+
+      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      // Suppresses the unhandled-rejection warning that would otherwise fire the instant the
+      // rejection settles during the timer advance below, before the `.rejects` assertion has
+      // attached its own handler.
+      runPromise.catch(() => {});
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(runPromise).rejects.toMatchObject({
+        permanent: true,
+        message: /Delegated pick .* rejected by server: ERROR 1 Invalid Selection\./,
+      });
+      expect(connectToDraftRoom).not.toHaveBeenCalled();
+      expect(recordDraftPickClick).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "failure" }),
+      );
+    });
+
+    it("falls back to the direct WS session when delegation times out with no result", async () => {
+      process.env.DRY_RUN = "false";
+      decideOwnership.mockResolvedValue({ action: "delegate", ownerPod: "draft-sync-abc123" });
+      publishCommand.mockResolvedValue("cmd-1");
+      awaitCommandResult.mockResolvedValue(null);
+      const socket = makeFakeSocket();
+      connectToDraftRoom.mockResolvedValue(socket);
+
+      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      await jest.advanceTimersByTimeAsync(1000);
+      socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10, round: null });
+      await runPromise;
+
+      expect(socket.sendPick).toHaveBeenCalledWith("4360438");
+      expect(recordDraftPickClick).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "success" }),
+      );
+    });
+
+    it("submits directly without ever checking the command channel when no live owner exists", async () => {
+      process.env.DRY_RUN = "false";
+      decideOwnership.mockResolvedValue({ action: "become_owner" });
+      const socket = makeFakeSocket();
+      connectToDraftRoom.mockResolvedValue(socket);
+
+      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      await jest.advanceTimersByTimeAsync(1000);
+      socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10, round: null });
+      await runPromise;
+
+      expect(publishCommand).not.toHaveBeenCalled();
+      expect(awaitCommandResult).not.toHaveBeenCalled();
+      expect(connectToDraftRoom).toHaveBeenCalled();
+    });
   });
 
   it("sends the pick and resolves on a matching SELECTED confirmation", async () => {
