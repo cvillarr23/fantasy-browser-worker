@@ -1315,12 +1315,18 @@ function createDraftState() {
     // so this is a single slot rather than a map keyed by command_id.
     pendingCommand: null,
     // Issue #70: cursor into draft_commands:{leagueId}, shared across reconnects on purpose (like
-    // ledger/consecutiveEmptyCycles above) — starting a fresh connectAndStream() cycle from "$"
-    // would silently skip any command published during the reconnect window between the old
-    // socket dying and the new one coming up, permanently dropping that delegated pick. A plain
-    // `{ current: string }` box (not a bare string) so consumeCommandsOnce can mutate the cursor
-    // in place without this module reaching back into state after every poll.
-    commandLastIdRef: { current: "$" },
+    // ledger/consecutiveEmptyCycles above) — a fresh connectAndStream() cycle must not reset this,
+    // or it would silently skip any command published during the reconnect window between the old
+    // socket dying and the new one coming up, permanently dropping that delegated pick. Left unset
+    // (not primed with the literal string "$" as before) so consumeCommandsOnce's own
+    // resolveInitialCursor resolves a real starting cursor via XREVRANGE on its first poll — "$"
+    // only ever picks up new entries going forward inside a *blocking* XREAD; the non-blocking
+    // XREAD this codebase deliberately uses would resolve "$" to "now" and then return nothing,
+    // forever (this was a confirmed production bug: draft_sync.js never processed a single
+    // delegated command). A plain `{ current: string }` box (not a bare string) so
+    // consumeCommandsOnce can mutate the cursor in place without this module reaching back into
+    // state after every poll.
+    commandLastIdRef: { current: undefined },
   };
 }
 

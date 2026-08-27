@@ -618,6 +618,7 @@ describe("connectAndStream", () => {
       multi: jest.fn(() => multiChain),
       publish: jest.fn().mockResolvedValue(undefined),
       xRead: jest.fn().mockResolvedValue(null),
+      xRevRange: jest.fn().mockResolvedValue([]),
       ...overrides,
     };
   }
@@ -839,7 +840,10 @@ describe("connectAndStream", () => {
     });
     assertCookieSessionValid.mockResolvedValue(undefined);
 
-    expect(state.commandLastIdRef.current).toBe("$");
+    // Left unset until the consumer's first poll resolves a real cursor (session_registry.js's
+    // resolveInitialCursor via XREVRANGE) — no longer pre-seeded with the literal "$", which
+    // never actually consumed anything against a real (non-blocking) Redis XREAD.
+    expect(state.commandLastIdRef.current).toBeUndefined();
 
     const { session: sessionA } = buildSession({ requestGet: buildRequestGet() });
     createAuthenticatedSession.mockResolvedValueOnce(sessionA);

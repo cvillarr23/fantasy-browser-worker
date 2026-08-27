@@ -8,6 +8,7 @@ const {
   readOwnership,
   decideOwnership,
   publishCommand,
+  resolveInitialCursor,
   consumeCommandsOnce,
   publishCommandResult,
   awaitCommandResult,
@@ -20,6 +21,7 @@ function makeFakeRedisClient(overrides = {}) {
     set: jest.fn(),
     xAdd: jest.fn(),
     xRead: jest.fn(),
+    xRevRange: jest.fn().mockResolvedValue([]),
     publish: jest.fn(),
     subscribe: jest.fn(),
     connect: jest.fn().mockResolvedValue(undefined),
@@ -280,6 +282,7 @@ describe("session_registry", () => {
     it("consumes new stream entries, advancing lastIdRef.current across polls", async () => {
       const lastIdRef = { current: undefined };
       const client = makeFakeRedisClient({
+        xRevRange: jest.fn().mockResolvedValue([]), // empty stream at consumer start
         xRead: jest.fn().mockResolvedValueOnce([
           {
             name: "draft_commands:42",
@@ -293,9 +296,18 @@ describe("session_registry", () => {
 
       const commands = await consumeCommandsOnce(client, "42", lastIdRef);
 
-      // Defaults to "$" (only future entries) on a fresh consumer's first poll.
+      // A fresh consumer resolves a real starting cursor via resolveInitialCursor (XREVRANGE)
+      // rather than defaulting to the literal "$" (see resolveInitialCursor's own tests/comment
+      // for why "$" is wrong for a non-blocking XREAD like this one) — an empty stream resolves
+      // to "0" (from the very start, which is also "now" for a stream with nothing on it yet).
+      expect(client.xRevRange).toHaveBeenCalledWith(
+        "draft_commands:42",
+        "+",
+        "-",
+        { COUNT: 1 },
+      );
       expect(client.xRead).toHaveBeenCalledWith(
-        { key: "draft_commands:42", id: "$" },
+        { key: "draft_commands:42", id: "0" },
         { COUNT: 10 },
       );
       expect(commands).toEqual([
@@ -340,6 +352,74 @@ describe("session_registry", () => {
 
       expect(commands).toEqual([]);
       expect(lastIdRef.current).toBe("1-1");
+    });
+
+    it("consumes an entry that already exists in the stream on a fresh consumer's first poll (real non-blocking XREAD semantics: '$' alone would never see it)", async () => {
+      // Mirrors real Redis: `$` (no BLOCK) resolves to "current tail" at call time and returns
+      // nothing after it — a fake that actually respects `id` catches what the canned-response
+      // mocks above cannot.
+      const streamEntries = [
+        { id: "1-1", message: { payload: JSON.stringify({ command_id: "a", command: "submit_pick" }) } },
+      ];
+      const xRead = jest.fn().mockImplementation(({ id }) => {
+        if (id === "$") return Promise.resolve(null); // real Redis: always empty for non-blocking "$"
+        const afterId = streamEntries.filter((e) => e.id > id);
+        return afterId.length
+          ? Promise.resolve([{ name: "draft_commands:42", messages: afterId }])
+          : Promise.resolve(null);
+      });
+      const client = makeFakeRedisClient({
+        xRevRange: jest.fn().mockResolvedValue([]),
+        xRead,
+      });
+
+      const lastIdRef = { current: undefined };
+      const commands = await consumeCommandsOnce(client, "42", lastIdRef);
+
+      expect(commands).toEqual([{ command_id: "a", command: "submit_pick" }]);
+      expect(lastIdRef.current).toBe("1-1");
+    });
+
+    it("still catches a command published after polling starts (regression: literal '$' would silently drop it forever)", async () => {
+      const client = makeFakeRedisClient({
+        xRevRange: jest.fn().mockResolvedValue([]), // empty stream at consumer start
+        xRead: jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce([
+          {
+            name: "draft_commands:42",
+            messages: [{ id: "5-1", message: { payload: JSON.stringify({ command_id: "z", command: "submit_pick" }) } }],
+          },
+        ]),
+      });
+      const lastIdRef = { current: undefined };
+
+      const first = await consumeCommandsOnce(client, "42", lastIdRef); // primes cursor, nothing yet
+      expect(first).toEqual([]);
+
+      const second = await consumeCommandsOnce(client, "42", lastIdRef); // command arrives between polls
+      expect(second).toEqual([{ command_id: "z", command: "submit_pick" }]);
+      expect(lastIdRef.current).toBe("5-1");
+    });
+  });
+
+  describe("resolveInitialCursor", () => {
+    it("returns the most recent stream entry's id when the stream already has entries", async () => {
+      const client = makeFakeRedisClient({
+        xRevRange: jest.fn().mockResolvedValue([{ id: "9-3", message: {} }]),
+      });
+      await expect(resolveInitialCursor(client, "42")).resolves.toBe("9-3");
+      expect(client.xRevRange).toHaveBeenCalledWith("draft_commands:42", "+", "-", { COUNT: 1 });
+    });
+
+    it("returns '0' when the stream is empty", async () => {
+      const client = makeFakeRedisClient({ xRevRange: jest.fn().mockResolvedValue([]) });
+      await expect(resolveInitialCursor(client, "42")).resolves.toBe("0");
+    });
+
+    it("returns '0', without throwing, when xRevRange itself fails", async () => {
+      const client = makeFakeRedisClient({
+        xRevRange: jest.fn().mockRejectedValue(new Error("down")),
+      });
+      await expect(resolveInitialCursor(client, "42")).resolves.toBe("0");
     });
   });
 

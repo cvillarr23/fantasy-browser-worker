@@ -175,11 +175,51 @@ async function publishCommand(redisClient, leagueId, command) {
 }
 
 /**
+ * Resolves a real starting cursor for a fresh consumer of draft_commands:{leagueId}, via a plain
+ * non-blocking XREVRANGE for the single most recent entry (if any). A real message ID works
+ * correctly as a non-blocking XREAD starting cursor going forward — unlike the literal string
+ * "$", which consumeCommandsOnce used to prime lastIdRef.current with (see that function's
+ * comment for why that never actually consumed anything).
+ */
+async function resolveInitialCursor(redisClient, leagueId) {
+  try {
+    const latest = await redisClient.xRevRange(
+      commandStreamKey(leagueId),
+      "+",
+      "-",
+      { COUNT: 1 },
+    );
+    if (latest && latest.length > 0) return latest[0].id;
+  } catch (err) {
+    logger.warn(
+      `[Session Registry] Could not resolve an initial draft_commands:${leagueId} cursor — ` +
+        `defaulting to "0" (replays anything already on the stream once): ${err.message}`,
+      { component: "session_registry", err },
+    );
+  }
+  // No entries yet, or the lookup failed: "0" is a valid XREAD starting id meaning "from the very
+  // start of the stream" — safe here since a fresh draft's command stream is empty anyway, and on
+  // a lookup failure it trades a possible one-time replay of already-handled commands (idempotent:
+  // draft_sync.js's own SELECTED-frame correlation ignores anything that isn't its current
+  // state.pendingCommand) for the alternative of silently consuming nothing forever.
+  return "0";
+}
+
+/**
  * Non-blocking poll for new entries on the command stream, starting after `lastIdRef.current`
  * (a plain `{ current: string }` box the caller owns, so the cursor survives across polls without
- * this module holding any state of its own). Defaults to "$" (only commands published after this
- * call started polling) so a fresh consumer doesn't replay a whole draft's worth of already-handled
- * commands on its first poll.
+ * this module holding any state of its own). A fresh consumer (lastIdRef.current not yet set)
+ * resolves a real starting cursor via resolveInitialCursor before its first XREAD.
+ *
+ * IMPORTANT: this used to prime a fresh cursor with the literal string "$" and reuse it forever
+ * whenever no entries came back. That is a real-Redis footgun — "$" only picks up new entries
+ * *going forward* inside a **blocking** XREAD (`BLOCK <ms>`), where it's resolved once and the
+ * connection then waits. For a **non-blocking** XREAD (what this function deliberately uses, see
+ * below), "$" resolves to "the stream's current last ID" at the moment the command executes and
+ * then asks for entries after that ID — which, synchronously, can never exist yet. The result:
+ * consumeCommandsOnce returned [] on every single call, forever, for the life of the process —
+ * confirmed in production via zero component="draft_commands" log lines across an entire incident
+ * job despite draft_clicker.js correctly delegating a pick and timing out 5s later every time.
  *
  * Deliberately non-blocking (a bounded XREAD with no BLOCK option) rather than a blocking XREAD:
  * draft_sync.js's event loop is already juggling several setInterval-driven tasks (REST reconcile,
@@ -192,7 +232,9 @@ async function consumeCommandsOnce(
   lastIdRef,
   { count = 10 } = {},
 ) {
-  if (!lastIdRef.current) lastIdRef.current = "$";
+  if (!lastIdRef.current) {
+    lastIdRef.current = await resolveInitialCursor(redisClient, leagueId);
+  }
 
   let entries;
   try {
@@ -310,6 +352,7 @@ module.exports = {
   readOwnership,
   decideOwnership,
   publishCommand,
+  resolveInitialCursor,
   consumeCommandsOnce,
   publishCommandResult,
   awaitCommandResult,
