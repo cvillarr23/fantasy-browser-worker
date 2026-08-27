@@ -1681,6 +1681,17 @@ async function connectAndStream(redisClient, state) {
             { err },
           );
           state.sessionExpiredError = err;
+        } else if (err instanceof PermanentError) {
+          // Confirmed live 2026-08-27: without this branch, a room that has ended keeps 404ing
+          // this same check every REST_RECONCILE_INTERVAL_MS (15s) forever — logged 60+ times
+          // over 17+ minutes with zero effect, since only SessionExpiredError was ever escalated
+          // out of this catch. A PermanentError here can never resolve on retry (the room is
+          // gone), so it gets the same "stop looping, surface it" treatment.
+          logger.error(
+            `[Draft Sync] Periodic session check found an unrecoverable condition: ${err.message}`,
+            { err },
+          );
+          state.permanentError = err;
         } else {
           logger.error(
             `[Draft Sync] Periodic session check failed: ${err.message}`,
@@ -1738,6 +1749,13 @@ async function connectAndStream(redisClient, state) {
       if (state.sessionExpiredError) {
         throw state.sessionExpiredError;
       }
+      // A permanent error (room confirmed gone, e.g. HTTP 404 "LEAGUE_NOT_FOUND_DELETED") can
+      // never resolve on any retry — throw out immediately rather than waiting for isDead()'s
+      // 30s grace window or looping this check every 15s. streamLiveDraftRoom's outer catch
+      // recognizes PermanentError and exits without backoff/retry (see that function's changes).
+      if (state.permanentError) {
+        throw state.permanentError;
+      }
       // Diagnostic for the "connector goes silent forever" investigation: this loop was
       // previously silent on every tick, so there was no way to distinguish "correctly waiting"
       // from "stuck" — logs the raw operands behind isDead() (not just its boolean) plus the
@@ -1760,6 +1778,16 @@ async function connectAndStream(redisClient, state) {
         command_poll_in_flight: commandPollInFlight,
       });
       await session.page.waitForTimeout(5000);
+    }
+
+    // The while loop's own permanentError check only runs at the top of each iteration — if the
+    // periodic session-check interval sets state.permanentError during the loop's final
+    // iteration's waitForTimeout(), and that same tick also flips isDead() true (or reaches the
+    // learned total), the while condition ends the loop before the top-of-loop check runs again.
+    // Re-check here so a permanent error is never silently swallowed by a coincident isDead()/
+    // totalPicksReached() exit.
+    if (state.permanentError) {
+      throw state.permanentError;
     }
 
     const newPicksThisCycle = state.ledger.size() - picksAtCycleStart;

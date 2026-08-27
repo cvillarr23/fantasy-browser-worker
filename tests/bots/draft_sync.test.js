@@ -941,6 +941,35 @@ describe("connectAndStream", () => {
     );
   });
 
+  it("stores a PermanentError from the periodic session check on state.permanentError (not just sessionExpiredError), and connectAndStream propagates it instead of looping forever", async () => {
+    // Reuses this describe block's established buildSession/buildRequestGet harness. The main
+    // while loop's waitForTimeout(5000) mock advances fake timers by ms+30000=35000ms per call —
+    // comfortably past REST_RECONCILE_INTERVAL_MS (15000ms) — so the periodic session-check
+    // interval fires at least once before the loop's own isDead() check (30s WS_DEAD_GRACE_MS)
+    // ends the cycle.
+    const redisClient = buildRedisClient();
+    const state = createDraftState();
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockRejectedValueOnce(
+      new PermanentError(
+        "[Session Health] League 987 not found (HTTP 404) — the room no longer exists.",
+      ),
+    );
+
+    const { session } = buildSession({ requestGet: buildRequestGet() });
+    createAuthenticatedSession.mockResolvedValueOnce(session);
+
+    await expect(connectAndStream(redisClient, state)).rejects.toThrow(
+      PermanentError,
+    );
+    expect(state.permanentError).toBeInstanceOf(PermanentError);
+    expect(state.sessionExpiredError).toBeNull();
+  });
+
   it("resets the stall counter and the learned total when the league changes", async () => {
     const redisClient = buildRedisClient();
     const state = createDraftState();
