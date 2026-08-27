@@ -1661,6 +1661,17 @@ async function streamLiveDraftRoom() {
 }
 
 if (require.main === module) {
+  // fantasy-core-pipeline's teardown (_teardown_practice_run) deletes this Job and polls for it
+  // to actually disappear within a fixed budget before proceeding. Without this handler, Node
+  // running as container PID 1 does not get the default terminate-on-SIGTERM disposition, so
+  // Kubernetes' graceful SIGTERM here was being silently ignored and the pod only died once
+  // kubelet escalated to SIGKILL at the very end of the grace period — reliably racing (and
+  // usually losing against) that poll budget. Nothing here needs a graceful flush (see
+  // fantasy-core-pipeline#103's reasoning for the matching grace_period_seconds fix), so an
+  // immediate exit is sufficient — this just makes that exit happen on the graceful signal
+  // instead of waiting for the forceful one.
+  process.on("SIGTERM", () => process.exit(0));
+
   withInstrumentation(
     "draft_sync",
     { trackingId: require("crypto").randomUUID() },
