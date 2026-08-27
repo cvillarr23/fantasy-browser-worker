@@ -405,6 +405,18 @@ async function executeAutomatedDraftSelection(payload) {
           `No live connector found for league ${leagueId} — submitting directly (fallback path).`,
         );
       }
+    } catch (err) {
+      // A confirmed server-side rejection is a definitive failure — propagate it as-is rather
+      // than masking it with a retry against a target that's already gone.
+      if (err instanceof PermanentError) throw err;
+      // Anything else here (Redis connect failure, decideOwnership/publishCommand/
+      // awaitCommandResult throwing) is this delegation *optimization* breaking, not the pick
+      // itself failing — log and fall through to the pre-#70 direct WS-then-DOM path below,
+      // which remains this bot's safety net regardless of registry health.
+      log(
+        `Session registry delegation failed (${err.message}) — falling back to a direct ` +
+          "session for this attempt.",
+      );
     } finally {
       await registryRedis.quit().catch(() => {});
     }

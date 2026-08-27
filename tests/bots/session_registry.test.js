@@ -412,6 +412,18 @@ describe("session_registry", () => {
       }
     });
 
+    it("resolves null and still attempts cleanup when the subscriber connection itself fails", async () => {
+      const subscriber = makeFakeRedisClient({
+        connect: jest.fn().mockRejectedValue(new Error("ECONNREFUSED")),
+        subscribe: jest.fn(),
+      });
+      const client = makeFakeRedisClient({ duplicate: jest.fn().mockReturnValue(subscriber) });
+
+      await expect(awaitCommandResult(client, "42", "cmd-1", 5000)).resolves.toBeNull();
+      expect(subscriber.subscribe).not.toHaveBeenCalled();
+      expect(subscriber.quit).toHaveBeenCalled();
+    });
+
     it("resolves null and still cleans up when the subscribe call itself rejects", async () => {
       const subscriber = makeFakeRedisClient({
         subscribe: jest.fn().mockRejectedValue(new Error("subscribe failed")),

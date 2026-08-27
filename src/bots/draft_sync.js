@@ -1617,15 +1617,25 @@ async function connectAndStream(redisClient, state) {
     }, HEALTH_HEARTBEAT_INTERVAL_MS);
 
     // Issue #70: polls independently of the heartbeat above — a delegated pick is racing the
-    // draft clock, not the much coarser heartbeat cadence.
+    // draft clock, not the much coarser heartbeat cadence. Guarded by commandPollInFlight since a
+    // single delegated command can take up to COMMAND_CONFIRM_TIMEOUT_MS to resolve (longer than
+    // COMMAND_POLL_INTERVAL_MS) — without the guard, an overlapping tick could start a second
+    // pollDraftCommands() call that overwrites state.pendingCommand mid-flight and breaks
+    // SELECTED/ERROR correlation for the in-progress command.
+    let commandPollInFlight = false;
     commandPollInterval = setInterval(() => {
-      pollDraftCommands(redisClient, state, session, commandLastIdRef).catch(
-        (err) =>
+      if (commandPollInFlight) return;
+      commandPollInFlight = true;
+      pollDraftCommands(redisClient, state, session, commandLastIdRef)
+        .catch((err) =>
           logger.error(
             `[Draft Sync] Draft command poll failed: ${err.message}`,
             { component: "draft_commands", err },
           ),
-      );
+        )
+        .finally(() => {
+          commandPollInFlight = false;
+        });
     }, COMMAND_POLL_INTERVAL_MS);
 
     const totalPicksReached = () =>

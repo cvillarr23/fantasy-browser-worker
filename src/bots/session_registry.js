@@ -240,8 +240,17 @@ async function publishCommandResult(redisClient, leagueId, commandId, result) {
  */
 async function awaitCommandResult(redisClient, leagueId, commandId, timeoutMs) {
   const subscriber = redisClient.duplicate();
-  await subscriber.connect();
   try {
+    try {
+      await subscriber.connect();
+    } catch (err) {
+      logger.warn(
+        `[Session Registry] Could not open a result subscriber connection for ` +
+          `draft_commands:${leagueId}:results: ${err.message}`,
+        { component: "session_registry", err },
+      );
+      return null;
+    }
     return await new Promise((resolve) => {
       let settled = false;
       const timer = setTimeout(() => {

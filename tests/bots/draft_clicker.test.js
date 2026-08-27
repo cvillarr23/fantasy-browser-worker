@@ -308,6 +308,23 @@ describe("executeAutomatedDraftSelection", () => {
       expect(awaitCommandResult).not.toHaveBeenCalled();
       expect(connectToDraftRoom).toHaveBeenCalled();
     });
+
+    it("falls back to the direct WS session when the registry check itself throws (e.g. Redis down)", async () => {
+      process.env.DRY_RUN = "false";
+      decideOwnership.mockRejectedValue(new Error("ECONNREFUSED"));
+      const socket = makeFakeSocket();
+      connectToDraftRoom.mockResolvedValue(socket);
+
+      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      await jest.advanceTimersByTimeAsync(1000);
+      socket.handlers.onSelected({ player_id: "4360438", team_id: "8", lineup_slot_id: 10, round: null });
+      await runPromise;
+
+      expect(connectToDraftRoom).toHaveBeenCalled();
+      expect(recordDraftPickClick).toHaveBeenCalledWith(
+        expect.objectContaining({ status: "success" }),
+      );
+    });
   });
 
   it("sends the pick and resolves on a matching SELECTED confirmation", async () => {
