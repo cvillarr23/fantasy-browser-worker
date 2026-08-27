@@ -377,7 +377,7 @@ describe("attachDraftListeners debug instrumentation", () => {
 
       const wsListeners = {};
       pageListeners.websocket({
-        url: () => "wss://fake",
+        url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
         on: jest.fn((event, cb) => {
           wsListeners[event] = cb;
         }),
@@ -395,6 +395,59 @@ describe("attachDraftListeners debug instrumentation", () => {
       expect(snap.idleMs).toBe(5000);
 
       debugSpy.mockRestore();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("does NOT count an unrelated (non-draft-room) socket toward openSockets/lastActivityAt/isDead", () => {
+    const start = Date.now();
+    jest.useFakeTimers();
+    jest.setSystemTime(start);
+    try {
+      const pageListeners = {};
+      const page = {
+        url: () => "https://fantasy.espn.com/football/draft?x=1",
+        on: jest.fn((event, cb) => {
+          pageListeners[event] = cb;
+        }),
+      };
+      const state = createDraftState();
+      const handle = attachDraftListeners(page, {}, state);
+
+      // The real draft-room JOIN socket opens and immediately closes (an eviction) at t=0.
+      const draftWsListeners = {};
+      pageListeners.websocket({
+        url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
+        on: jest.fn((event, cb) => {
+          draftWsListeners[event] = cb;
+        }),
+      });
+      draftWsListeners.close();
+      expect(handle.debugSnapshot().openSockets).toBe(0);
+
+      // 40 seconds later (past WS_DEAD_GRACE_MS=30000), an unrelated BAM identity-SDK socket
+      // opens and (if the current code still registered its frame listener) would receive a
+      // frame — this must NOT resurrect openSockets or lastActivityAt for the purposes of
+      // isDead(), since it carries no draft picks. The fixed code returns early before ever
+      // calling ws.on(...) for a non-draft-room socket, so no listener is registered at all;
+      // guarded with `?.()` so this test fails cleanly (not with a TypeError) against the
+      // pre-fix code, which DOES register a "framereceived" listener here.
+      jest.setSystemTime(start + 40000);
+      const bamWsListeners = {};
+      pageListeners.websocket({
+        url: () => "wss://espn.connections.edge.bamgrid.com/5d3054/connection?X-Application-Version=0.0.1",
+        on: jest.fn((event, cb) => {
+          bamWsListeners[event] = cb;
+        }),
+      });
+      bamWsListeners.framereceived?.({
+        payload: Buffer.from("PING PING%201700000000000"),
+      });
+
+      expect(handle.debugSnapshot().openSockets).toBe(0);
+      expect(handle.isDead()).toBe(true);
+      expect(handle.hasOpenSocket()).toBe(false);
     } finally {
       jest.useRealTimers();
     }
@@ -926,7 +979,7 @@ describe("connectAndStream", () => {
       fired = true;
       const wsFrameListeners = {};
       pageListeners.websocket({
-        url: () => "wss://fake",
+        url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
         on: (event, cb) => {
           wsFrameListeners[event] = cb;
         },
@@ -973,7 +1026,7 @@ describe("connectAndStream", () => {
     // this works even though connectAndStream's own promise has already settled.
     const wsFrameListeners = {};
     pageListeners.websocket({
-      url: () => "wss://fake",
+      url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
       on: (event, cb) => {
         wsFrameListeners[event] = cb;
       },
@@ -1036,7 +1089,7 @@ describe("connectAndStream", () => {
       if (!injected && capturedPageListeners) {
         injected = true;
         capturedPageListeners.websocket({
-          url: () => "wss://fake",
+          url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
           on: (event, cb) => {
             wsFrameListeners[event] = cb;
           },

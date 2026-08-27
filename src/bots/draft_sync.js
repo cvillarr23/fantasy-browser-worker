@@ -896,8 +896,21 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
   });
 
   page.on("websocket", (ws) => {
+    const url = ws.url();
+    if (!isDraftRoomSocketUrl(url)) {
+      // Not the draft-room feed (e.g. Disney/BAM's identity-SDK socket, which the rendered page
+      // opens/reconnects independently of the draft) — logged at debug for visibility, but must
+      // NOT touch openSockets/lastActivityAt/state.health.ws.*, or its own reconnect churn masks
+      // a genuinely dead draft-room socket forever (confirmed root cause, see this function's
+      // header comment and isDraftRoomSocketUrl's).
+      logger.debug(`[Draft Sync] Ignoring non-draft-room WebSocket: ${url}`, {
+        component: "draft_ws",
+      });
+      return;
+    }
+
     const socketId = (state.health.ws.sockets_opened += 1);
-    logger.info(`[Draft Sync] WebSocket opened: ${ws.url()}`, {
+    logger.info(`[Draft Sync] WebSocket opened: ${url}`, {
       component: "draft_ws",
       socket_id: socketId,
     });
