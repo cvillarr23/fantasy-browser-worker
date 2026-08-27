@@ -21,6 +21,7 @@ const {
   fetchDraftTotals,
   connectAndStream,
   createDraftState,
+  pollDraftCommands,
   parseSelectedFrame,
   parseSelectingFrame,
   parseAutodraftFrame,
@@ -359,6 +360,7 @@ describe("connectAndStream", () => {
           json: async () => ({ draftDetail: { picks: [] } }),
         }),
       },
+      addInitScript: jest.fn().mockResolvedValue(undefined),
     };
     const browser = { close: jest.fn().mockResolvedValue(undefined) };
     const redisClient = {
@@ -447,7 +449,11 @@ describe("connectAndStream", () => {
         await jest.advanceTimersByTimeAsync(ms + 30000);
       }),
     };
-    const context = { on: jest.fn(), request: { get: requestGet } };
+    const context = {
+      on: jest.fn(),
+      request: { get: requestGet },
+      addInitScript: jest.fn().mockResolvedValue(undefined),
+    };
     const browser = { close: jest.fn().mockResolvedValue(undefined) };
     return {
       session: { page, context, browser, headless: true, swid: "{TEST-SWID}" },
@@ -471,6 +477,7 @@ describe("connectAndStream", () => {
       hGetAll: jest.fn().mockResolvedValue({}),
       multi: jest.fn(() => multiChain),
       publish: jest.fn().mockResolvedValue(undefined),
+      xRead: jest.fn().mockResolvedValue(null),
       ...overrides,
     };
   }
@@ -601,6 +608,56 @@ describe("connectAndStream", () => {
 
     expect(result.newPicksThisCycle).toBeGreaterThan(0);
     expect(state.consecutiveEmptyCycles).toBe(0);
+  });
+
+  it("issue #70: persists the draft_commands cursor across reconnects instead of resetting to \"$\"", async () => {
+    // A cursor reset to "$" on every connectAndStream() call (one per reconnect) would silently
+    // skip any command published during the reconnect gap between the old socket dying and the
+    // new one coming up — this proves state.commandLastIdRef survives across two calls sharing
+    // the same `state`, advancing rather than resetting.
+    const redisClient = buildRedisClient({
+      xRead: jest.fn().mockResolvedValue([
+        {
+          name: "draft_commands:987",
+          messages: [
+            {
+              id: "5-1",
+              message: { payload: JSON.stringify({ command_id: "a", command: "submit_pick" }) },
+            },
+          ],
+        },
+      ]),
+    });
+    const state = createDraftState();
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    expect(state.commandLastIdRef.current).toBe("$");
+
+    const { session: sessionA } = buildSession({ requestGet: buildRequestGet() });
+    createAuthenticatedSession.mockResolvedValueOnce(sessionA);
+    await connectAndStream(redisClient, state);
+    // The command-poll interval never fires within a single synchronous connectAndStream() call
+    // in this test harness (no fake timers advanced here), so directly exercise the cursor
+    // object connectAndStream hands to pollDraftCommands, mirroring what the real interval does.
+    await pollDraftCommands(redisClient, state, sessionA, state.commandLastIdRef);
+    expect(state.commandLastIdRef.current).toBe("5-1");
+
+    const { session: sessionB } = buildSession({ requestGet: buildRequestGet() });
+    createAuthenticatedSession.mockResolvedValueOnce(sessionB);
+    await connectAndStream(redisClient, state);
+
+    // A fresh connectAndStream() call (simulating a reconnect) must not have reset the cursor
+    // back to "$" — it should still read the same state.commandLastIdRef object, now advanced.
+    expect(state.commandLastIdRef.current).toBe("5-1");
+    expect(redisClient.xRead).toHaveBeenCalledWith(
+      { key: "draft_commands:987", id: "5-1" },
+      { COUNT: 10 },
+    );
   });
 
   it("resets the stall counter and the learned total when the league changes", async () => {

@@ -11,7 +11,19 @@ const {
   isUsablePlayerId,
 } = require("./draft_pick_ledger");
 const { attachDraftDomObserver } = require("./draft_dom_observer");
-const { normalizeSwid } = require("./draft_room_socket");
+const {
+  normalizeSwid,
+  parseErrorFrame,
+  installDraftSocketSendHook,
+  sendPickViaPage,
+} = require("./draft_room_socket");
+const {
+  buildOwnershipFields,
+  generateOwnerIdentity,
+  consumeCommandsOnce,
+  publishCommandResult,
+  DEFAULT_LEASE_GRACE_MULTIPLIER,
+} = require("./session_registry");
 const redis = require("redis");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -51,6 +63,24 @@ const PICK_SILENCE_WARN_MS = Number(
 const DRAFT_STALL_TERMINAL_CYCLES = Number(
   process.env.DRAFT_STALL_TERMINAL_CYCLES || 3,
 );
+// Issue #70: how often draft_sync.js polls draft_commands:{leagueId} for a delegated pick to
+// execute. Deliberately much faster than the health heartbeat — a delegated submission is racing
+// the same draft clock a direct WS submission would, so this can't wait out a 10s heartbeat tick.
+const COMMAND_POLL_INTERVAL_MS = Number(
+  process.env.DRAFT_COMMAND_POLL_INTERVAL_MS || 1000,
+);
+// Issue #70: how long draft_sync.js waits for its own SELECTED/ERROR echo after sending a
+// delegated pick via sendPickViaPage before reporting the command as timed out. Mirrors
+// draft_clicker.js's own CONFIRM_TIMEOUT_MS class of budget for the same SELECT/SELECTED round
+// trip, just through the page's socket instead of a raw ws client.
+const COMMAND_CONFIRM_TIMEOUT_MS = Number(
+  process.env.DRAFT_COMMAND_CONFIRM_TIMEOUT_MS || 5000,
+);
+// Issue #70: the ownership lease's apparent-freshness window, as a multiple of the heartbeat
+// cadence above — see session_registry.js's header for why this is deliberately much shorter
+// than the health key's own EX 3600.
+const OWNERSHIP_LEASE_TTL_MS =
+  HEALTH_HEARTBEAT_INTERVAL_MS * DEFAULT_LEASE_GRACE_MULTIPLIER;
 
 /**
  * Live Draft Room Network Interceptor Daemon
@@ -880,6 +910,21 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
         return;
       }
 
+      // Issue #70: a rejected delegated SELECT gets this frame (see draft_room_socket.js's header)
+      // instead of an ordinary SELECTED — checked before AUTOSUGGEST/SELECTING/AUTODRAFT since a
+      // pending delegated command needs a definitive answer as fast as any other frame here. Only
+      // short-circuits when a pending delegated command actually consumes it — an ERROR frame
+      // with nothing awaiting it (e.g. a rejection surfacing after this bot's own confirm timeout
+      // already gave up) falls through to the generic frame-type accounting below instead of
+      // vanishing with no trace, same as any other non-SELECTED frame.
+      if (line.startsWith("ERROR ")) {
+        const errorFrame = parseErrorFrame(line);
+        if (errorFrame && state.pendingCommand) {
+          state.pendingCommand.onError(errorFrame);
+          return;
+        }
+      }
+
       if (line.startsWith("AUTOSUGGEST ")) {
         const suggestion = parseAutosuggestFrame(line);
         if (!suggestion) return;
@@ -957,6 +1002,18 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       }
       picksOnThisSocket += 1;
 
+      // Issue #70: resolve a delegated command the instant its own SELECTED echo arrives, same
+      // as draft_clicker.js's waitForConfirmation correlates by player_id/team_id — regardless of
+      // state.ready, since a delegated pick is only ever sent once this socket is already fully
+      // up (the command consumer loop below never fires before then).
+      if (
+        state.pendingCommand &&
+        String(parsed.player_id) === String(state.pendingCommand.playerId) &&
+        String(parsed.team_id) === String(state.pendingCommand.teamId)
+      ) {
+        state.pendingCommand.onSelected(parsed);
+      }
+
       if (!state.ready) {
         state.pendingFrames.push(parsed);
         return;
@@ -997,6 +1054,86 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       openSockets === 0 && Date.now() - lastActivityAt > WS_DEAD_GRACE_MS,
     hasOpenSocket: () => openSockets > 0,
   };
+}
+
+/**
+ * Issue #70: executes exactly one delegated `submit_pick` command through the page's own
+ * already-open draft-room socket (sendPickViaPage — see draft_room_socket.js), and reports the
+ * outcome back over the command's result channel.
+ *
+ * Registers state.pendingCommand's onSelected/onError callbacks BEFORE calling sendPickViaPage,
+ * same ordering discipline as draft_clicker.js's waitForConfirmation/sendPick — the real capture
+ * that module's header documents showed a SELECTED confirmation land ~0.2s after SELECT, so the
+ * listener must already be attached when the frame goes out.
+ */
+async function executeSubmitPickCommand(session, redisClient, state, command) {
+  const { command_id: commandId, player_id: playerId, team_id: teamId } = command;
+  const result = await new Promise((resolve) => {
+    let settled = false;
+    const settle = (outcome) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      state.pendingCommand = null;
+      resolve(outcome);
+    };
+    const timer = setTimeout(
+      () => settle({ status: "timeout" }),
+      COMMAND_CONFIRM_TIMEOUT_MS,
+    );
+
+    state.pendingCommand = {
+      playerId,
+      teamId,
+      onSelected: (parsed) =>
+        settle({ status: "success", lineup_slot_id: parsed.lineup_slot_id }),
+      onError: (errorFrame) =>
+        settle({
+          status: "error",
+          error_code: errorFrame.code,
+          error_message: errorFrame.message,
+        }),
+    };
+
+    sendPickViaPage(session.page, playerId).catch((err) => {
+      settle({ status: "error", error_message: err.message });
+    });
+  });
+
+  logger.info(
+    `[Draft Sync] Delegated command ${commandId} (player ${playerId}, team ${teamId}) ` +
+      `resolved: ${result.status}.`,
+    { component: "draft_commands", command_id: commandId, ...result },
+  );
+
+  await publishCommandResult(redisClient, state.leagueId, commandId, result).catch(
+    (err) =>
+      logger.error(
+        `[Draft Sync] Could not publish result for delegated command ${commandId}: ${err.message}`,
+        { component: "draft_commands", err },
+      ),
+  );
+}
+
+/**
+ * Issue #70: polls draft_commands:{leagueId} for delegated pick submissions and executes them one
+ * at a time — a draft's pick clock only ever has one live submission in flight, so commands are
+ * handled sequentially rather than raced against each other.
+ */
+async function pollDraftCommands(redisClient, state, session, lastIdRef) {
+  if (!state.leagueId) return;
+  const commands = await consumeCommandsOnce(redisClient, state.leagueId, lastIdRef);
+  for (const command of commands) {
+    if (command.command !== "submit_pick") continue;
+    try {
+      await executeSubmitPickCommand(session, redisClient, state, command);
+    } catch (err) {
+      logger.error(
+        `[Draft Sync] Failed to execute delegated command ${command.command_id}: ${err.message}`,
+        { component: "draft_commands", err },
+      );
+    }
+  }
 }
 
 /** Gets us into a draft room and returns { leagueId, seasonId, teamId }, however DRAFT_MODE dictates. */
@@ -1124,6 +1261,21 @@ function createDraftState() {
     // display-ready suggestion. Null until loaded (or if the catalog fetch failed); per-draft, like
     // the ledger/health, so a league change (a fresh practice draft) must refetch it.
     playerPool: null,
+    // Issue #70: this process's ownership identity, generated once and kept stable across
+    // reconnects (a reconnect is still the same owning pod/session, not a new owner) — only a
+    // brand-new streamLiveDraftRoom() process (a pod restart) gets a fresh sessionId.
+    ...generateOwnerIdentity(),
+    // Issue #70: the delegated command currently awaiting its SELECTED/ERROR echo, or null.
+    // Exactly one at a time — a draft's pick clock only ever has one live submission in flight,
+    // so this is a single slot rather than a map keyed by command_id.
+    pendingCommand: null,
+    // Issue #70: cursor into draft_commands:{leagueId}, shared across reconnects on purpose (like
+    // ledger/consecutiveEmptyCycles above) — starting a fresh connectAndStream() cycle from "$"
+    // would silently skip any command published during the reconnect window between the old
+    // socket dying and the new one coming up, permanently dropping that delegated pick. A plain
+    // `{ current: string }` box (not a bare string) so consumeCommandsOnce can mutate the cursor
+    // in place without this module reaching back into state after every poll.
+    commandLastIdRef: { current: "$" },
   };
 }
 
@@ -1210,6 +1362,17 @@ async function emitHealthHeartbeat(
     expected_total_picks: state.expectedTotalPicks,
     terminal,
     terminal_reason: terminalReason,
+    // Issue #70: folded into this same existing heartbeat/key rather than a new parallel one —
+    // session_registry.js's decideOwnership() reads these fields back out of this exact snapshot.
+    // Cleared (not renewed) on a terminal heartbeat below: a finished draft must stop looking like
+    // it has a live owner immediately, not linger until lease_expires_at naturally lapses.
+    ...(terminal
+      ? { owner_pod: null, owner_session_id: null, lease_expires_at: null }
+      : buildOwnershipFields({
+          podName: state.podName,
+          sessionId: state.sessionId,
+          leaseTtlMs: OWNERSHIP_LEASE_TTL_MS,
+        })),
     emitted_at: new Date().toISOString(),
   };
 
@@ -1245,6 +1408,7 @@ async function connectAndStream(redisClient, state) {
   state.memberId = session.swid;
   let reconcileInterval;
   let heartbeatInterval;
+  let commandPollInterval;
   let domObserver = null;
   state.ready = false;
   state.pendingFrames = [];
@@ -1252,6 +1416,14 @@ async function connectAndStream(redisClient, state) {
   state.pendingSelecting = null;
   state.pendingAutodraft = null;
   state.sessionExpiredError = null;
+  // Issue #70: reuses state.commandLastIdRef (persisted across reconnects) rather than resetting
+  // to "$" here — see createDraftState's comment for why a per-reconnect reset would drop
+  // commands published during the reconnect window.
+
+  // Issue #70: installed on the CONTEXT, before enterDraftRoom navigates anywhere — see
+  // installDraftSocketSendHook's own header for why this ordering matters (a page that already
+  // started loading before the init script is registered would never get its WebSocket patched).
+  await installDraftSocketSendHook(session.context);
 
   // Recovery sweep, shared by every trigger that means "we may have missed picks": an INIT frame
   // (a room re-join) and a socket close. Re-scans the two sources that can see history the WS
@@ -1454,6 +1626,28 @@ async function connectAndStream(redisClient, state) {
       );
     }, HEALTH_HEARTBEAT_INTERVAL_MS);
 
+    // Issue #70: polls independently of the heartbeat above — a delegated pick is racing the
+    // draft clock, not the much coarser heartbeat cadence. Guarded by commandPollInFlight since a
+    // single delegated command can take up to COMMAND_CONFIRM_TIMEOUT_MS to resolve (longer than
+    // COMMAND_POLL_INTERVAL_MS) — without the guard, an overlapping tick could start a second
+    // pollDraftCommands() call that overwrites state.pendingCommand mid-flight and breaks
+    // SELECTED/ERROR correlation for the in-progress command.
+    let commandPollInFlight = false;
+    commandPollInterval = setInterval(() => {
+      if (commandPollInFlight) return;
+      commandPollInFlight = true;
+      pollDraftCommands(redisClient, state, session, state.commandLastIdRef)
+        .catch((err) =>
+          logger.error(
+            `[Draft Sync] Draft command poll failed: ${err.message}`,
+            { component: "draft_commands", err },
+          ),
+        )
+        .finally(() => {
+          commandPollInFlight = false;
+        });
+    }, COMMAND_POLL_INTERVAL_MS);
+
     const totalPicksReached = () =>
       state.expectedTotalPicks != null &&
       state.ledger.size() >= state.expectedTotalPicks;
@@ -1532,6 +1726,7 @@ async function connectAndStream(redisClient, state) {
   } finally {
     if (reconcileInterval) clearInterval(reconcileInterval);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
+    if (commandPollInterval) clearInterval(commandPollInterval);
     // Awaited so the in-page observer is actually disconnected before the browser closes — and
     // never allowed to throw, since this runs in a finally guarding the browser teardown.
     if (domObserver) {
@@ -1729,4 +1924,7 @@ module.exports = {
   createIngestHealth,
   emitHealthHeartbeat,
   decideReconnectAction,
+  attachDraftListeners,
+  executeSubmitPickCommand,
+  pollDraftCommands,
 };
