@@ -234,9 +234,16 @@ async function executeAutomatedDraftSelection(payload) {
       `(${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
   );
   if (defaulted) {
+    // resolveDryRun already flips this to FALSE for mode === "practice" - this log used to
+    // unconditionally claim "defaulting to TRUE" regardless of which way it actually resolved,
+    // which read as "nothing will happen" in every practice-run log right before a real
+    // WS/DOM submission was attempted.
     log(
-      "DRY_RUN is unset, defaulting to TRUE — no submission will be attempted. Set DRY_RUN=false to " +
-        "submit for real.",
+      dryRun
+        ? "DRY_RUN is unset, defaulting to TRUE — no submission will be attempted. Set DRY_RUN=false to " +
+            "submit for real."
+        : `DRY_RUN is unset but mode is "practice", defaulting to FALSE — a live submission WILL be ` +
+            "attempted. Set DRY_RUN=true to force a dry run.",
     );
   }
 
