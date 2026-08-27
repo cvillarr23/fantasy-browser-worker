@@ -10,6 +10,8 @@
 
 **Tech Stack:** Node.js, Playwright, Jest (existing test runner: `npm test` in `fantasy-browser-worker`), `ws`, `redis`.
 
+**Tracking issue:** cvillarr23/fantasy-browser-worker#72 (corrects the mis-filed cvillarr23/fantasy-core-pipeline#108, now closed).
+
 **Spec:** This plan is derived directly from a live production-log investigation (Grafana/Loki, `service_name="draft-sync"`), not a separate written spec. The evidence trail is reproduced in each task below so an implementer with zero prior context can verify every claim independently. Two runs were analyzed:
   - Incident run: `trackingId=13ccdbab-8717-4385-8656-f38f71323980`, league `156611456`, team 8, pod `practice-draft-sync-1787859146-jpr8f` (2026-08-27, ~19:32–21:16 UTC).
   - Fresh reproduction run (requested mid-investigation, still live when captured): `trackingId=ac341959-8c62-4700-a8e0-aef1171619a5`, league `1768748895`, team 8, pod `practice-draft-sync-1787866737-6d7kv` (2026-08-27, started ~21:38 UTC) — reproduced the *identical* failure signature: 7 picks published via WS in the first ~60s, then a `LEFT` frame, the JOIN socket closes, and the job spins "Reconnect-loop tick." indefinitely afterward with the DOM tier reporting a 100% selector-miss streak the whole time.
