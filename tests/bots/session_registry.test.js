@@ -3,6 +3,7 @@ const {
   healthKey,
   commandStreamKey,
   commandResultChannel,
+  pickRejectedChannel,
   buildOwnershipFields,
   generateOwnerIdentity,
   readOwnership,
@@ -11,6 +12,7 @@ const {
   resolveInitialCursor,
   consumeCommandsOnce,
   publishCommandResult,
+  publishPickRejection,
   awaitCommandResult,
 } = require("../../src/bots/session_registry");
 
@@ -433,6 +435,44 @@ describe("session_registry", () => {
         "draft_commands:42:results",
         JSON.stringify({ command_id: "cmd-1", status: "success", lineup_slot_id: 10 }),
       );
+    });
+  });
+
+  describe("publishPickRejection", () => {
+    it("publishes JSON with league_id and rejected_at to the per-league channel", async () => {
+      const client = makeFakeRedisClient({ publish: jest.fn().mockResolvedValue(1) });
+
+      await publishPickRejection(client, "999", {
+        pick_number: 3,
+        idempotency_key: "999:3:555",
+        team_id: "8",
+        player_id: "555",
+        error_code: "1",
+        error_message: "Invalid Selection.",
+      });
+
+      expect(client.publish).toHaveBeenCalledTimes(1);
+      const [channel, payload] = client.publish.mock.calls[0];
+      expect(channel).toBe(pickRejectedChannel("999"));
+      const parsed = JSON.parse(payload);
+      expect(parsed).toMatchObject({
+        league_id: "999",
+        pick_number: 3,
+        idempotency_key: "999:3:555",
+        error_code: "1",
+        error_message: "Invalid Selection.",
+      });
+      expect(typeof parsed.rejected_at).toBe("number");
+    });
+
+    it("swallows a Redis publish error and never throws", async () => {
+      const client = makeFakeRedisClient({
+        publish: jest.fn().mockRejectedValue(new Error("connection reset")),
+      });
+
+      await expect(
+        publishPickRejection(client, "999", { pick_number: 3 }),
+      ).resolves.toBeUndefined();
     });
 
     it("resolves with the matching result once the subscriber callback fires", async () => {

@@ -56,6 +56,19 @@ function commandResultChannel(leagueId) {
   return `draft_commands:${leagueId}:results`;
 }
 
+/** Builds the per-league pick-rejection pub/sub channel. fantasy-core-pipeline's
+ * hold_and_publish subscribes to this for the duration of its retry window, so it can
+ * react to a confirmed ESPN rejection (an "ERROR 1 Invalid Selection" WS frame) within
+ * the same pick clock instead of only finding out once the deadline expires or the next
+ * pick event lands for a different player. Issue #108: draft_clicker.js already learns
+ * this synchronously (see awaitCommandResult/executeSubmitPickCommand's result), but
+ * that knowledge previously died inside this process - fantasy-core-pipeline had no way
+ * to distinguish "our submission succeeded" from "ESPN autodrafted after our submission
+ * silently failed." */
+function pickRejectedChannel(leagueId) {
+  return `draft_pick_rejected:${leagueId}`;
+}
+
 /**
  * Computes the ownership fields draft_sync.js's emitHealthHeartbeat merges into its existing
  * health snapshot before its existing `redisClient.set(key, ..., {EX: 3600})` write. Kept as a
@@ -273,6 +286,24 @@ async function publishCommandResult(redisClient, leagueId, commandId, result) {
   await redisClient.publish(commandResultChannel(leagueId), payload);
 }
 
+/** Publishes a confirmed pick rejection. Best-effort: a publish failure here must not
+ * throw back into the caller's PermanentError path - the rejection is already being
+ * handled (logged, recorded to execution_log, retried/aborted) regardless of whether
+ * this notification lands. */
+async function publishPickRejection(redisClient, leagueId, rejection) {
+  try {
+    await redisClient.publish(
+      pickRejectedChannel(leagueId),
+      JSON.stringify({ ...rejection, league_id: leagueId, rejected_at: Date.now() / 1000 }),
+    );
+  } catch (err) {
+    logger.error(
+      `[Session Registry] Failed to publish pick rejection for league ${leagueId}: ${err.message}`,
+      { component: "session_registry", err },
+    );
+  }
+}
+
 /**
  * Subscribes to the result channel and resolves with the matching command's result, or `null` if
  * nothing matching arrives within `timeoutMs`. Uses a dedicated duplicate connection for the
@@ -347,6 +378,7 @@ module.exports = {
   healthKey,
   commandStreamKey,
   commandResultChannel,
+  pickRejectedChannel,
   buildOwnershipFields,
   generateOwnerIdentity,
   readOwnership,
@@ -355,5 +387,6 @@ module.exports = {
   resolveInitialCursor,
   consumeCommandsOnce,
   publishCommandResult,
+  publishPickRejection,
   awaitCommandResult,
 };

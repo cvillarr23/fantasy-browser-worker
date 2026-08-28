@@ -9,6 +9,7 @@ const {
   decideOwnership,
   publishCommand,
   awaitCommandResult,
+  publishPickRejection,
 } = require("./session_registry");
 const { PermanentError } = require("../errors");
 const { logger } = require("../telemetry/logger");
@@ -199,11 +200,14 @@ function waitForConfirmation(socket, playerId, teamId, timeoutMs) {
     });
     socket.onError((err) => {
       clearTimeout(timer);
-      reject(
-        new PermanentError(
-          `[Draft Clicker] Pick for player ${playerId} rejected by server: ERROR ${err.code} ${err.message}`,
-        ),
+      const rejection = new PermanentError(
+        `[Draft Clicker] Pick for player ${playerId} rejected by server: ERROR ${err.code} ${err.message}`,
       );
+      // Attached so the caller can publish a draft_pick_rejected notification (issue #108)
+      // without re-parsing the message string.
+      rejection.espnErrorCode = err.code;
+      rejection.espnErrorMessage = err.message;
+      reject(rejection);
     });
   });
 }
@@ -398,6 +402,19 @@ async function executeAutomatedDraftSelection(payload) {
           return;
         }
         if (result && result.status === "error") {
+          // Issue #108: publish the rejection so fantasy-core-pipeline's hold_and_publish can
+          // react within the same pick clock (retry the next-best candidate) instead of only
+          // finding out once the deadline expires or a different player's pick event lands.
+          // Best-effort and never throws — a failed notification must not mask the real,
+          // already-confirmed rejection below.
+          await publishPickRejection(registryRedis, leagueId, {
+            pick_number: payload.pick_number,
+            idempotency_key: payload.idempotency_key,
+            team_id: teamId,
+            player_id: playerId,
+            error_code: result.error_code,
+            error_message: result.error_message,
+          });
           throw new PermanentError(
             `[Draft Clicker][${tracking}] Delegated pick for player ${playerId} rejected by ` +
               `server: ERROR ${result.error_code} ${result.error_message}`,
@@ -487,6 +504,37 @@ async function executeAutomatedDraftSelection(payload) {
       // fallback can't change that outcome (clicking a pick ESPN just rejected won't succeed
       // either), so skip straight to reporting it rather than wasting a fallback attempt.
       if (wsError.permanent) {
+        // Issue #108: same notification as the delegated path above, but registryRedis is
+        // already closed by this point (this is the direct-session fallback, reached only
+        // after that connection's finally block ran) — a short-lived client is opened just
+        // for this best-effort publish.
+        const rejectionRedis = redis.createClient({
+          url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
+        });
+        rejectionRedis.on("error", (err) =>
+          logger.error(
+            `[Draft Clicker][${tracking}] Pick-rejection Redis client error: ${err.message}`,
+            { err },
+          ),
+        );
+        try {
+          await rejectionRedis.connect();
+          await publishPickRejection(rejectionRedis, leagueId, {
+            pick_number: payload.pick_number,
+            idempotency_key: payload.idempotency_key,
+            team_id: teamId,
+            player_id: playerId,
+            error_code: wsError.espnErrorCode,
+            error_message: wsError.espnErrorMessage,
+          });
+        } catch (publishErr) {
+          logger.error(
+            `[Draft Clicker][${tracking}] Failed to publish pick rejection: ${publishErr.message}`,
+            { err: publishErr },
+          );
+        } finally {
+          await rejectionRedis.quit().catch(() => {});
+        }
         throw wsError;
       }
 

@@ -16,6 +16,7 @@ const {
   decideOwnership,
   publishCommand,
   awaitCommandResult,
+  publishPickRejection,
 } = require("../../src/bots/session_registry");
 const { SessionExpiredError } = require("../../src/errors");
 const { recordDraftPickClick } = require("../../src/db/execution_log");
@@ -73,6 +74,7 @@ beforeEach(() => {
   decideOwnership.mockReset().mockResolvedValue({ action: "become_owner" });
   publishCommand.mockReset().mockResolvedValue("command-1");
   awaitCommandResult.mockReset().mockResolvedValue(null);
+  publishPickRejection.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -295,7 +297,11 @@ describe("executeAutomatedDraftSelection", () => {
         error_message: "Invalid Selection.",
       });
 
-      const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+      const runPromise = executeAutomatedDraftSelection({
+        ...BASE_PAYLOAD,
+        pick_number: 14,
+        idempotency_key: "1248158344:14:4360438",
+      });
       // Suppresses the unhandled-rejection warning that would otherwise fire the instant the
       // rejection settles during the timer advance below, before the `.rejects` assertion has
       // attached its own handler.
@@ -309,6 +315,20 @@ describe("executeAutomatedDraftSelection", () => {
       expect(connectToDraftRoom).not.toHaveBeenCalled();
       expect(recordDraftPickClick).toHaveBeenCalledWith(
         expect.objectContaining({ status: "failure" }),
+      );
+      // Issue #108: fantasy-core-pipeline's hold_and_publish subscribes to this channel to
+      // retry with the next-best candidate within the same pick clock.
+      expect(publishPickRejection).toHaveBeenCalledWith(
+        expect.anything(),
+        "1248158344",
+        expect.objectContaining({
+          pick_number: 14,
+          idempotency_key: "1248158344:14:4360438",
+          team_id: "8",
+          player_id: "4360438",
+          error_code: 1,
+          error_message: "Invalid Selection.",
+        }),
       );
     });
 
@@ -393,7 +413,11 @@ describe("executeAutomatedDraftSelection", () => {
     const socket = makeFakeSocket();
     connectToDraftRoom.mockResolvedValue(socket);
 
-    const runPromise = executeAutomatedDraftSelection(BASE_PAYLOAD);
+    const runPromise = executeAutomatedDraftSelection({
+      ...BASE_PAYLOAD,
+      pick_number: 14,
+      idempotency_key: "1248158344:14:4360438",
+    });
     await jest.advanceTimersByTimeAsync(1000);
     socket.handlers.onError({ code: 1, message: "Invalid Selection." });
 
@@ -411,6 +435,20 @@ describe("executeAutomatedDraftSelection", () => {
       status: "failure",
       errorMessage: expect.stringMatching(/rejected by server/),
     });
+    // Issue #108: same notification the delegated path publishes, so hold_and_publish reacts
+    // to a direct-path rejection identically to a delegated one.
+    expect(publishPickRejection).toHaveBeenCalledWith(
+      expect.anything(),
+      "1248158344",
+      expect.objectContaining({
+        pick_number: 14,
+        idempotency_key: "1248158344:14:4360438",
+        team_id: "8",
+        player_id: "4360438",
+        error_code: 1,
+        error_message: "Invalid Selection.",
+      }),
+    );
   });
 
   it("falls back to the DOM click path on a non-permanent WS failure", async () => {
