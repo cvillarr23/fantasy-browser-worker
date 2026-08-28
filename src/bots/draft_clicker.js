@@ -414,6 +414,12 @@ async function executeAutomatedDraftSelection(payload) {
             player_id: playerId,
             error_code: result.error_code,
             error_message: result.error_message,
+            // Forwarded straight through from the draft_targets message (see routes.py's
+            // trigger_draft_pick) so hold_and_publish's "Confirmed rejection" log line can be
+            // grepped directly against this pod's own [tracking]-tagged logs, instead of
+            // cross-referencing pick_number/timestamps across repos by hand.
+            tracking_id: payload.tracking_id,
+            traceparent: payload.traceparent,
           });
           throw new PermanentError(
             `[Draft Clicker][${tracking}] Delegated pick for player ${playerId} rejected by ` +
@@ -526,6 +532,9 @@ async function executeAutomatedDraftSelection(payload) {
             player_id: playerId,
             error_code: wsError.espnErrorCode,
             error_message: wsError.espnErrorMessage,
+            // See the delegated-path call site above for why these are forwarded.
+            tracking_id: payload.tracking_id,
+            traceparent: payload.traceparent,
           });
         } catch (publishErr) {
           logger.error(
