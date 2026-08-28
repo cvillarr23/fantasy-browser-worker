@@ -492,6 +492,24 @@ async function fetchDraftDetail(context, state) {
   const response = await context.request.get(
     buildDraftDetailUrl(state.leagueId, state.seasonId),
   );
+  // Full-fidelity REST capture - same LOG_LEVEL=debug gate as the WS capture above, same
+  // reasoning: raw wire evidence for anything not yet decoded, automatic on every practice
+  // run. Playwright buffers APIResponse bodies internally, so reading .text() here doesn't
+  // disturb the .json() calls below. Best-effort, like the DOM capture's own try/catch - a
+  // response object that can't produce .text() (or any other capture failure) must never
+  // block the actual mDraftDetail read this function exists for.
+  try {
+    logger.debug(`[Draft Sync] REST response: mDraftDetail (HTTP ${response.status()})`, {
+      component: "draft_rest_capture",
+      url: buildDraftDetailUrl(state.leagueId, state.seasonId),
+      status: response.status(),
+      body: await response.text(),
+    });
+  } catch (err) {
+    logger.debug(`[Draft Sync] mDraftDetail REST capture failed: ${err.message}`, {
+      component: "draft_rest_capture", err,
+    });
+  }
   if (!response.ok()) {
     try {
       const body = await response.json();
@@ -565,6 +583,21 @@ async function fetchDraftTotals(context, state) {
     const response = await context.request.get(
       buildLeagueSettingsUrl(state.leagueId, state.seasonId),
     );
+    // See fetchDraftDetail's identical capture above - same best-effort try/catch (isolated
+    // from the outer one below, which must only ever fire for a genuine mSettings/mTeam
+    // failure, not a capture-logging issue).
+    try {
+      logger.debug(`[Draft Sync] REST response: mSettings/mTeam (HTTP ${response.status()})`, {
+        component: "draft_rest_capture",
+        url: buildLeagueSettingsUrl(state.leagueId, state.seasonId),
+        status: response.status(),
+        body: await response.text(),
+      });
+    } catch (captureErr) {
+      logger.debug(`[Draft Sync] mSettings/mTeam REST capture failed: ${captureErr.message}`, {
+        component: "draft_rest_capture", err: captureErr,
+      });
+    }
     if (!response.ok()) {
       throw new Error(
         `mSettings/mTeam fetch failed: HTTP ${response.status()}`,
@@ -955,11 +988,36 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
     let framesOnThisSocket = 0;
     let picksOnThisSocket = 0;
 
+    // Full-fidelity WS capture, both directions — LOG_LEVEL=debug only, which every practice
+    // draft-sync Job already sets unconditionally (see draft.py's _start_practice_sync_job_locked;
+    // originally added for the #71 connector-silence investigation, kept as the standing capture
+    // gate rather than a one-off). Everything else in this file only logs *parsed*/classified
+    // frames (SELECTED, SELECTING, first-seen-per-type, etc.) - this is the raw wire content, the
+    // same kind of evidence draft_recon.js's websockets.jsonl captures by hand, but automatic on
+    // every practice run instead of requiring someone to remember to run a separate script. Exists
+    // for reverse-engineering anything not yet decoded (e.g. how to *send* an AUTODRAFT toggle -
+    // #108 follow-up) without needing to reproduce the exact frame live again.
+    ws.on("framesent", (frame) => {
+      const payload = frame.payload ? frame.payload.toString() : "";
+      logger.debug(`[Draft Sync] WS frame sent (${payload.length} bytes)`, {
+        component: "draft_ws_capture",
+        direction: "out",
+        socket_id: socketId,
+        payload,
+      });
+    });
+
     ws.on("framereceived", async (frame) => {
       lastActivityAt = Date.now();
       framesOnThisSocket += 1;
       state.health.ws.frames_received += 1;
       const line = frame.payload ? frame.payload.toString() : "";
+      logger.debug(`[Draft Sync] WS frame received (${line.length} bytes)`, {
+        component: "draft_ws_capture",
+        direction: "in",
+        socket_id: socketId,
+        payload: line,
+      });
 
       if (line.startsWith("INIT ")) {
         state.health.ws.init_frames += 1;

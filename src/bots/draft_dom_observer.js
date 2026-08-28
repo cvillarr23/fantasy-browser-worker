@@ -376,6 +376,27 @@ async function attachDraftDomObserver(
           matched_strategy: result.matched_strategy,
         });
       }
+      // Full-page DOM capture - LOG_LEVEL=debug only, same gate/reasoning as draft_sync.js's
+      // WS/REST capture (#108 follow-up): raw evidence for anything the existing PICK_STRATEGIES
+      // scanner isn't looking for (e.g. an autodraft-toggle control), automatic on every
+      // practice run instead of a one-off draft_recon.js session. First scan always (captures
+      // the room's starting state) then every 12th (~1/min at the default 5s poll interval) -
+      // every scan would be redundant log volume for a page that's mostly re-rendering the same
+      // board. A capture failure here must never take down the scan itself - it's purely
+      // observational, on top of everything above that already succeeded or failed on its own.
+      if (health.scans === 1 || health.scans % 12 === 0) {
+        try {
+          const html = await page.content();
+          log.debug(
+            `[Draft DOM] Full-page capture (scan #${health.scans}, ${html.length} chars, trigger=${trigger})`,
+            { component: "draft_dom_capture", trigger, scan_number: health.scans, url: page.url(), html },
+          );
+        } catch (err) {
+          log.debug(`[Draft DOM] Full-page capture failed: ${err.message}`, {
+            component: "draft_dom_capture", trigger, err,
+          });
+        }
+      }
       return records;
     } catch (err) {
       health.failed_scans += 1;

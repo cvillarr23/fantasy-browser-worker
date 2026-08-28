@@ -143,4 +143,54 @@ describe("attachDraftDomObserver", () => {
     expect(handle.getHealth().login_gate_detected).toBe(false);
     await handle.stop();
   });
+
+  // #108 follow-up: full-fidelity DOM/WS/REST capture on every practice draft, gated at
+  // LOG_LEVEL=debug (already set unconditionally on every practice-draft Job) - raw evidence
+  // for anything the pick-focused PICK_STRATEGIES scanner isn't looking for.
+  it("captures the full page on the very first scan at debug level", async () => {
+    const page = buildPage({
+      records: [],
+      matched_strategy: null,
+      diagnostics: [],
+      sample_html: null,
+      player_id_nodes: 0,
+      page_gated: false,
+      url: "https://fantasy.espn.com/football/draft?leagueId=1",
+    });
+    page.content = jest.fn().mockResolvedValue("<html>full page</html>");
+    page.url = jest.fn().mockReturnValue("https://fantasy.espn.com/football/draft?leagueId=1");
+    const debugSpy = jest.spyOn(logger, "debug");
+
+    const handle = await attachDraftDomObserver(page, { pollIntervalMs: 999999 });
+
+    const captureCall = debugSpy.mock.calls.find(
+      ([, fields]) => fields?.component === "draft_dom_capture",
+    );
+    expect(captureCall).toBeDefined();
+    expect(captureCall[1].html).toBe("<html>full page</html>");
+    expect(captureCall[1].scan_number).toBe(1);
+
+    debugSpy.mockRestore();
+    await handle.stop();
+  });
+
+  it("does not break the scan when the DOM capture itself fails", async () => {
+    const page = buildPage({
+      records: [{ player_id: 1, team_id: 2, round: 1, round_pick_number: 1 }],
+      matched_strategy: "generic-player-team-pair",
+      diagnostics: [],
+      sample_html: null,
+      player_id_nodes: 1,
+      page_gated: false,
+      url: "https://fantasy.espn.com/football/draft?leagueId=1",
+    });
+    page.content = jest.fn().mockRejectedValue(new Error("page navigated away"));
+    page.url = jest.fn().mockReturnValue("https://fantasy.espn.com/football/draft?leagueId=1");
+
+    const handle = await attachDraftDomObserver(page, { pollIntervalMs: 999999 });
+
+    expect(handle.getHealth().scans).toBe(1);
+    expect(handle.getHealth().last_record_count).toBe(1);
+    await handle.stop();
+  });
 });

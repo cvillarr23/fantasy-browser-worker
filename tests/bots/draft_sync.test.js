@@ -218,6 +218,28 @@ describe("fetchDraftDetail", () => {
       PermanentError,
     );
   });
+
+  // #108 follow-up: the debug-level raw-body capture must be best-effort, like the DOM
+  // capture's own try/catch - a response object that can't produce .text() (many existing
+  // test mocks in this file only implement .json(), matching what production Playwright
+  // objects always support but a bespoke fixture may not) must never block the real read.
+  it("still returns picks when the response object has no .text() method", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          status: () => 200,
+          json: async () => ({ draftDetail: { picks: [{ playerId: 1, overallPickNumber: 1, teamId: 8, roundId: 1, roundPickNumber: 1 }] } }),
+          // No .text() - the capture's own try/catch must swallow the resulting TypeError.
+        }),
+      },
+    };
+    await expect(
+      fetchDraftDetail(context, { leagueId: "1", seasonId: "2026" }),
+    ).resolves.toEqual([
+      expect.objectContaining({ player_id: 1, pick_number: 1, team_id: 8 }),
+    ]);
+  });
 });
 
 describe("reconcileFromRest permanent-error handling", () => {
@@ -367,6 +389,28 @@ describe("fetchDraftTotals", () => {
   const state = { leagueId: "987", seasonId: "2026" };
 
   it("computes teams x roster slots from mSettings/mTeam", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          status: () => 200,
+          json: async () => ({
+            teams: [{ id: 1 }, { id: 2 }],
+            settings: { rosterSettings: { lineupSlotCounts: { 0: 1, 2: 1 } } },
+          }),
+        }),
+      },
+    };
+
+    await expect(fetchDraftTotals(context, state)).resolves.toEqual({
+      teamCount: 2,
+      rosterSlotsPerTeam: 2,
+      totalExpectedPicks: 4,
+    });
+  });
+
+  // #108 follow-up: same resilience as fetchDraftDetail's capture - see that test's comment.
+  it("still computes totals when the response object has no .text() method", async () => {
     const context = {
       request: {
         get: jest.fn().mockResolvedValue({
@@ -693,6 +737,10 @@ describe("connectAndStream", () => {
           ok: () => true,
           status: () => 200,
           json: async () => ({ draftDetail: { picks } }),
+          // Real Playwright APIResponse objects support both - matches fetchDraftDetail's
+          // debug-level raw-body capture (#108 follow-up), which reads .text() unconditionally
+          // alongside the .json() calls the rest of this mock already exists for.
+          text: async () => JSON.stringify({ draftDetail: { picks } }),
         };
       }
       // mSettings/mTeam (fetchDraftTotals). Defaults to a body with no usable team/roster data,
@@ -701,6 +749,7 @@ describe("connectAndStream", () => {
         ok: () => true,
         status: () => 200,
         json: async () => settingsBody,
+        text: async () => JSON.stringify(settingsBody),
       };
     });
   }
@@ -1255,6 +1304,48 @@ describe("connectAndStream", () => {
     expect(state.health.ws.other_frames.CLOCK).toBeUndefined();
     const selectingPayload = lastSetPayload(redisClient, "draft:987:selecting");
     expect(selectingPayload).toMatchObject({ league_id: "987", team_id: 8, clock_ms: 45000 });
+  });
+
+  it("captures both inbound and outbound raw WS frames at debug level (issue #108 follow-up)", async () => {
+    // Full-fidelity capture on every practice draft - LOG_LEVEL=debug is already set
+    // unconditionally on every practice-draft Job (draft.py's _start_practice_sync_job_locked).
+    const { session, pageListeners } = buildSession({
+      requestGet: buildRequestGet(),
+    });
+    const redisClient = buildRedisClient();
+    const state = createDraftState();
+
+    createAuthenticatedSession.mockResolvedValue(session);
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    const debugSpy = jest.spyOn(logger, "debug");
+    await connectAndStream(redisClient, state);
+
+    const wsFrameListeners = {};
+    pageListeners.websocket({
+      url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
+      on: (event, cb) => {
+        wsFrameListeners[event] = cb;
+      },
+    });
+    await wsFrameListeners.framereceived({ payload: Buffer.from("PING PONG") });
+    wsFrameListeners.framesent({ payload: Buffer.from("SELECT 12345") });
+
+    const inCapture = debugSpy.mock.calls.find(
+      ([, fields]) => fields?.component === "draft_ws_capture" && fields?.direction === "in",
+    );
+    const outCapture = debugSpy.mock.calls.find(
+      ([, fields]) => fields?.component === "draft_ws_capture" && fields?.direction === "out",
+    );
+    expect(inCapture?.[1].payload).toBe("PING PONG");
+    expect(outCapture?.[1].payload).toBe("SELECT 12345");
+
+    debugSpy.mockRestore();
   });
 
   it("buffers an AUTOSUGGEST frame that arrives before ready, publishing it once ready flips (PR #65 review)", async () => {
