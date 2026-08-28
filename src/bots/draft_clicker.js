@@ -120,9 +120,19 @@ function resolveDryRun(mode) {
   return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
 }
 
+/**
+ * ESPN's playerId space is not purely positive — a team defense/special-teams (D/ST) "player" is
+ * represented by ESPN with a NEGATIVE id (e.g. -16030), one per NFL team, since there's no real
+ * individual player behind it. Confirmed live 2026-08-27: fantasy-core-pipeline's
+ * publish_draft_target forwards the crosswalk's real espn_id verbatim, so a D/ST recommendation's
+ * draft_targets payload legitimately carries a negative player_id — this is NOT malformed input,
+ * and rejecting it here silently discarded every D/ST recommendation (a PermanentError is never
+ * requeued) until ESPN's own pick clock ran out and autodrafted instead. `-?\d+` allows exactly
+ * one optional leading minus sign; still rejects non-numeric garbage, decimals, and a bare "-".
+ */
 function requirePlayerId(raw, tracking) {
   const id = String(raw ?? "").trim();
-  if (!/^\d+$/.test(id)) {
+  if (!/^-?\d+$/.test(id)) {
     throw new PermanentError(
       `[Draft Clicker][${tracking}] payload.player_id "${raw}" is not a valid numeric id.`,
     );

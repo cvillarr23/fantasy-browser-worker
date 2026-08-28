@@ -147,6 +147,44 @@ describe("executeAutomatedDraftSelection", () => {
     expect(recordDraftPickClick).toHaveBeenCalledWith(expect.objectContaining({ status: "success" }));
   });
 
+  // Confirmed live 2026-08-27: a real practice-draft recommendation for Team 8 was "Jacksonville
+  // Jaguars (D/ST)" with ESPN's own espn_id -16030 (fantasy-core-pipeline's publish_draft_target
+  // forwards target["espn_id"] verbatim — never Sleeper's internal player_id — so this is exactly
+  // what a real draft_targets payload for a D/ST recommendation looks like). requirePlayerId's
+  // `/^\d+$/` regex rejected it as "not a valid numeric id" every single time, so team 8's pick
+  // was silently discarded (a PermanentError is never requeued) and ESPN's own clock ran out and
+  // autodrafted instead. Negative playerIds are ESPN's OWN, correct convention for team defenses
+  // (confirmed against espn_api's own D/ST id scheme) — not malformed input.
+  it("accepts a negative player_id — ESPN's own convention for a D/ST (team defense) pick, not malformed input", async () => {
+    const socket = makeFakeSocket();
+    connectToDraftRoom.mockResolvedValue(socket);
+    const runPromise = executeAutomatedDraftSelection({
+      ...BASE_PAYLOAD,
+      player_id: "-16030",
+      name: "Jacksonville Jaguars",
+      mode: "practice",
+    });
+    await jest.advanceTimersByTimeAsync(1000);
+    socket.handlers.onSelected({ player_id: "-16030", team_id: "8", lineup_slot_id: 16 });
+    await runPromise;
+    expect(socket.sendPick).toHaveBeenCalledWith("-16030");
+    expect(recordDraftPickClick).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "success" }),
+    );
+  });
+
+  it("still rejects genuinely non-numeric player_id payloads (unlike a legitimate negative D/ST id)", async () => {
+    await expect(
+      executeAutomatedDraftSelection({ ...BASE_PAYLOAD, player_id: "abc" }),
+    ).rejects.toMatchObject({ permanent: true, message: /player_id/ });
+    await expect(
+      executeAutomatedDraftSelection({ ...BASE_PAYLOAD, player_id: "12.5" }),
+    ).rejects.toMatchObject({ permanent: true, message: /player_id/ });
+    await expect(
+      executeAutomatedDraftSelection({ ...BASE_PAYLOAD, player_id: "-" }),
+    ).rejects.toMatchObject({ permanent: true, message: /player_id/ });
+  });
+
   it("an explicit DRY_RUN env var still wins over mode: practice", async () => {
     process.env.DRY_RUN = "true";
     const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, mode: "practice" });
