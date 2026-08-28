@@ -220,6 +220,32 @@ function parseSelectingFrame(raw) {
 }
 
 /**
+ * Parses ESPN's own periodic countdown broadcast — `CLOCK <slot> <msRemaining> <teamId>`,
+ * documented in docs/espn-reverse-engineering.md. Confirmed live 2026-08-28 (league
+ * 1986717528): this room never sent a single SELECTING frame for its whole session (checked
+ * against 287 log lines) - CLOCK ticks roughly once a second and was the ONLY on-the-clock
+ * signal this room ever emitted, so relying on SELECTING alone left fantasy-core-pipeline
+ * with zero real clock visibility here, falling back to DRAFT_PICK_CLOCK_SECONDS's
+ * hardcoded per-mode guess instead of ESPN's own authoritative remaining-time value. Returns
+ * the exact same {team_id, clock_ms} shape parseSelectingFrame does, deliberately, so both
+ * frame types can feed the identical downstream handler/Redis key - "whoever's turn it
+ * really is, and how much real time is left" is the same fact regardless of which of ESPN's
+ * two frame types happened to carry it in a given room.
+ */
+function parseClockFrame(raw) {
+  const line = raw.toString().trim();
+  if (!line.startsWith("CLOCK ")) return null;
+
+  const [, , msRemaining, teamId] = line.split(/\s+/);
+  if (!teamId || !/^\d+$/.test(teamId)) return null;
+
+  return {
+    team_id: Number(teamId),
+    clock_ms: msRemaining && /^\d+$/.test(msRemaining) ? Number(msRemaining) : null,
+  };
+}
+
+/**
  * Parses ESPN's own autodraft-toggle broadcast — `AUTODRAFT <teamId> <bool>`, documented in
  * docs/espn-reverse-engineering.md but previously discarded as noise (scripts/practice-draft-test.js's
  * KNOWN_NOISE regex). This is the only live signal for "this team's autodraft is currently
@@ -992,8 +1018,12 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
         return;
       }
 
-      if (line.startsWith("SELECTING ")) {
-        const selecting = parseSelectingFrame(line);
+      if (line.startsWith("SELECTING ") || line.startsWith("CLOCK ")) {
+        // Same handler/Redis key either way - see parseClockFrame's header for why some
+        // rooms only ever emit one of these two frame types for on-the-clock state.
+        const selecting = line.startsWith("SELECTING ")
+          ? parseSelectingFrame(line)
+          : parseClockFrame(line);
         if (!selecting) return;
         if (!state.ready) {
           state.pendingSelecting = selecting;
@@ -2061,6 +2091,7 @@ module.exports = {
   parseSelectedFrame,
   parseAutosuggestFrame,
   parseSelectingFrame,
+  parseClockFrame,
   parseAutodraftFrame,
   buildDraftUrl,
   buildDraftDetailUrl,

@@ -25,6 +25,7 @@ const {
   pollDraftCommands,
   parseSelectedFrame,
   parseSelectingFrame,
+  parseClockFrame,
   parseAutodraftFrame,
   decideReconnectAction,
   decideCrashRecoveryAction,
@@ -54,6 +55,35 @@ describe("parseSelectingFrame", () => {
 
   it("returns null when the team id token is missing or malformed", () => {
     expect(parseSelectingFrame("SELECTING abc 45000")).toBeNull();
+  });
+});
+
+describe("parseClockFrame", () => {
+  // Confirmed live 2026-08-28 (league 1986717528): some rooms never send a single SELECTING
+  // frame for their whole session - CLOCK is the only on-the-clock signal they emit. Token
+  // order is CLOCK <slot> <msRemaining> <teamId>, deliberately different from SELECTING's
+  // <teamId> <clockMs> - both must resolve to the identical {team_id, clock_ms} shape so they
+  // can share one downstream handler.
+  it("reads the team on the clock and the remaining clock in ms, in CLOCK's own token order", () => {
+    expect(parseClockFrame("CLOCK 3 45000 8")).toEqual({
+      team_id: 8,
+      clock_ms: 45000,
+    });
+  });
+
+  it("degrades to a null clock rather than dropping the frame when the ms token is malformed", () => {
+    expect(parseClockFrame("CLOCK 3 abc 8")).toEqual({
+      team_id: 8,
+      clock_ms: null,
+    });
+  });
+
+  it("returns null for a non-CLOCK frame", () => {
+    expect(parseClockFrame("SELECTING 8 45000")).toBeNull();
+  });
+
+  it("returns null when the team id token is missing or malformed", () => {
+    expect(parseClockFrame("CLOCK 3 45000 abc")).toBeNull();
   });
 });
 
@@ -1172,20 +1202,59 @@ describe("connectAndStream", () => {
       },
     });
     const infoCallsBefore = infoSpy.mock.calls.length;
+    // DRAFT_LIST ("add to queue", per docs/espn-reverse-engineering.md) - unlike CLOCK, this
+    // one is genuinely never parsed anywhere, so it stays a valid example of the generic
+    // unknown-frame path this test covers.
     await wsFrameListeners.framereceived({
-      payload: Buffer.from("CLOCK 3 90"),
+      payload: Buffer.from("DRAFT_LIST 3 90"),
     });
     await wsFrameListeners.framereceived({
-      payload: Buffer.from("CLOCK 3 91"),
+      payload: Buffer.from("DRAFT_LIST 3 91"),
     });
 
-    expect(state.health.ws.other_frames.CLOCK).toBe(2);
-    // First-seen-only logging: exactly one new info line for the CLOCK type across both frames.
+    expect(state.health.ws.other_frames.DRAFT_LIST).toBe(2);
+    // First-seen-only logging: exactly one new info line for the DRAFT_LIST type across both frames.
     const newInfoCalls = infoSpy.mock.calls
       .slice(infoCallsBefore)
       .filter(([msg]) => msg.includes("First-seen frame type"));
     expect(newInfoCalls).toHaveLength(1);
     infoSpy.mockRestore();
+  });
+
+  it("routes a CLOCK frame to the same on-the-clock handler as SELECTING, not the generic unknown-frame counter (issue #108 follow-up)", async () => {
+    // Confirmed live 2026-08-28 (league 1986717528): some rooms only ever send CLOCK, never
+    // SELECTING, for on-the-clock state - CLOCK must therefore update
+    // draft:{leagueId}:selecting the same way SELECTING does, not be silently discarded.
+    const { session, pageListeners } = buildSession({
+      requestGet: buildRequestGet(),
+    });
+    const redisClient = buildRedisClient();
+    const state = createDraftState();
+
+    createAuthenticatedSession.mockResolvedValue(session);
+    parseDraftRoomUrl.mockReturnValue({
+      leagueId: "987",
+      seasonId: "2026",
+      teamId: "4",
+    });
+    assertCookieSessionValid.mockResolvedValue(undefined);
+
+    await connectAndStream(redisClient, state);
+
+    const wsFrameListeners = {};
+    pageListeners.websocket({
+      url: () => "wss://fantasydraft.espn.com/game-1/league-1/JOIN?1=1",
+      on: (event, cb) => {
+        wsFrameListeners[event] = cb;
+      },
+    });
+    await wsFrameListeners.framereceived({
+      payload: Buffer.from("CLOCK 3 45000 8"),
+    });
+
+    expect(state.health.ws.other_frames.CLOCK).toBeUndefined();
+    const selectingPayload = lastSetPayload(redisClient, "draft:987:selecting");
+    expect(selectingPayload).toMatchObject({ league_id: "987", team_id: 8, clock_ms: 45000 });
   });
 
   it("buffers an AUTOSUGGEST frame that arrives before ready, publishing it once ready flips (PR #65 review)", async () => {
