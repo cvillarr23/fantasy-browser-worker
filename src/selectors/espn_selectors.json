@@ -13,16 +13,29 @@
     "a positional index. That is why lineup_bot.js and waiver_sniper.js drive ESPN's REST API",
     "instead of clicking (see src/bots/espn_api.js).",
     "",
-    "`roster_table` was `.roster-table`, which matched nothing; it is now the verified `.Table`."
+    "`roster_table` was `.roster-table`, which matched nothing; it is now the verified `.Table`.",
+    "",
+    "Live capture on 2026-09-12 (a real FLEX/Bench swap against league 1248158344 team 8, confirmed",
+    "and then reverted) drove `move_button` and `here_button` end-to-end and both worked as written:",
+    "clicking `move_button` on a player puts the row into move mode, then `here_button` on the target",
+    "row's own `.Table__TR` completes the move. There is NO separate save_button click needed for a",
+    "single move/swap — clicking `here_button` fires the `transactions/` POST immediately (confirmed",
+    "via network capture); `button:has-text(\"Save\")` matched zero elements throughout. This is still",
+    "just a documented record for any future DOM-driven UI work — espn_api.js's REST path (verified",
+    "against this same capture) remains the only production write path; nothing wires these up."
   ],
 
   "_verified": {
-    "source": "lineup_recon.js against league 1248158344 team 8, 2026-08-11",
-    "keys": ["roster_table", "roster_row", "player_column"]
+    "source": "lineup_recon.js + a live driven swap against league 1248158344 team 8, 2026-08-11 / 2026-09-12",
+    "keys": ["roster_table", "roster_row", "player_column", "move_button", "here_button"]
   },
   "_unverified": {
     "warning": "Never matched against a real page. Do not assume these work.",
-    "keys": ["move_button", "here_button", "save_button", "search_input", "draft_button", "waiver_confirm_button"]
+    "keys": ["search_input", "draft_button", "waiver_confirm_button"]
+  },
+  "_confirmed_absent": {
+    "note": "No separate Save control exists for a single move — here_button alone commits it.",
+    "keys": ["save_button"]
   },
 
   "roster_table": ".Table",

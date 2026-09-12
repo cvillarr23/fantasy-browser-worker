@@ -13,10 +13,38 @@
  * requirement, while this API is keyed on real playerId/lineupSlotId values.
  */
 
+const fs = require("fs");
+const path = require("path");
 const { PermanentError } = require("../errors");
+const { isEnabled: isDebugCaptureEnabled } = require("./debug_capture");
+const { logger } = require("../telemetry/logger");
 
 const READS_HOST = "https://lm-api-reads.fantasy.espn.com";
 const WRITES_HOST = "https://lm-api-writes.fantasy.espn.com";
+
+const WRITE_CAPTURE_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
+
+/**
+ * Appends one JSONL record of a real write's request/response to recon-output/espn-write-log.jsonl
+ * — on by default (DEBUG_CAPTURE=0/false/no to disable), since this is the only ongoing empirical
+ * evidence of ESPN's actual write-endpoint behavior. A single growing log, not one file per call
+ * (unlike lineup_bot.js's captureFailure, which fires only on failure) — this fires on every write.
+ * Never includes cookies: those live on the BrowserContext, not in the headers object built below.
+ */
+function captureWriteArtifact(record) {
+  if (!isDebugCaptureEnabled()) return;
+  try {
+    fs.mkdirSync(WRITE_CAPTURE_DIR, { recursive: true });
+    fs.appendFileSync(
+      path.join(WRITE_CAPTURE_DIR, "espn-write-log.jsonl"),
+      JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n",
+    );
+  } catch (err) {
+    logger.error(`[ESPN API] Could not capture write artifact: ${err.message}`, { err });
+  }
+}
 
 function buildLeagueReadUrl(leagueId, seasonId, views) {
   const query = views.map((v) => `view=${encodeURIComponent(v)}`).join("&");
@@ -80,15 +108,17 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
 /**
  * Submits a roster transaction (a batch of LINEUP moves) to ESPN.
  *
- * UNVERIFIED REQUEST SHAPE — this body matches ESPN's documented/observed transactions format, but
- * unlike draft_sync.js's read protocol it has NOT been confirmed against a real capture: doing so
- * requires saving a lineup by hand with actual players on the roster, and league 1248158344 had not
- * drafted as of 2026-08-11 (mRoster returned entries: []). Re-verify post-draft by running
- * `node src/bots/lineup_recon.js --watch-save` and diffing the captured body against this one.
+ * VERIFIED against a real captured save (2026-09-12, league 1248158344 team 8, a FLEX/Bench swap
+ * confirmed live and then reverted): this body and header shape match ESPN's real web client
+ * exactly, including `memberId`'s brace-wrapped SWID format. The one correction from the original
+ * guess: `x-fantasy-platform` is `"espn-fantasy-web"`, not `"kona-PROD"` (`x-fantasy-source: "kona"`
+ * was already correct). The real request also carried a `?platformVersion=<hash>` query param — a
+ * frontend build id that appears unstable across ESPN deploys, so it's deliberately not replicated
+ * here; the capture succeeded without evidence the server requires it from a non-browser client.
  */
 async function submitLineup(
   context,
-  { leagueId, seasonId, teamId, memberId, scoringPeriodId, items },
+  { leagueId, seasonId, teamId, memberId, scoringPeriodId, items, trackingId },
 ) {
   const url = buildTransactionsUrl(leagueId, seasonId);
   const payload = {
@@ -100,18 +130,30 @@ async function submitLineup(
     executionType: "EXECUTE",
     items,
   };
+  const headers = {
+    "Content-Type": "application/json",
+    "x-fantasy-source": "kona",
+    "x-fantasy-platform": "espn-fantasy-web",
+  };
 
-  const response = await context.request.post(url, {
-    headers: {
-      "Content-Type": "application/json",
-      // ESPN's own client stamps these; some write endpoints reject requests without them.
-      "x-fantasy-source": "kona",
-      "x-fantasy-platform": "kona-PROD",
-    },
-    data: payload,
+  const startedAt = Date.now();
+  const response = await context.request.post(url, { headers, data: payload });
+  const text = await response.text();
+
+  captureWriteArtifact({
+    kind: "lineup",
+    trackingId,
+    leagueId,
+    teamId,
+    url,
+    requestHeaders: headers,
+    requestBody: payload,
+    responseStatus: response.status(),
+    responseOk: response.ok(),
+    responseBodySnippet: text.slice(0, 500),
+    durationMs: Date.now() - startedAt,
   });
 
-  const text = await response.text();
   if (!response.ok()) {
     throw new Error(
       `[ESPN API] Lineup submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
@@ -124,12 +166,13 @@ async function submitLineup(
 /**
  * Submits a free-agent/waiver claim (add, optionally paired with a drop) to ESPN.
  *
- * UNVERIFIED REQUEST SHAPE — same caveat as submitLineup() above, and for the same reason: this
- * body has not been confirmed against a real captured save. It's modeled on submitLineup's
- * verified-working `transactions/` shape (same host, same URL, same isLeagueManager/teamId/
- * memberId/scoringPeriodId/executionType envelope) plus the ADD/DROP item `type` values and
- * top-level `type: "FREEAGENT"` documented by prior community reverse-engineering of this same
- * endpoint family — but neither has been checked against this league's actual traffic.
+ * PARTIALLY VERIFIED: the shared envelope (host, URL, isLeagueManager/teamId/memberId/
+ * scoringPeriodId/executionType, and both headers — `x-fantasy-platform` is now
+ * `"espn-fantasy-web"`, confirmed via submitLineup()'s real 2026-09-12 capture) is confirmed by
+ * inheritance from that same `transactions/` endpoint. STILL UNVERIFIED: the ADD/DROP item shape and
+ * top-level `type: "FREEAGENT"` below, documented only by prior community reverse-engineering of
+ * this endpoint family — no real free-agent/waiver capture has been taken yet. `waiver_recon.js
+ * --watch-save` exists for that; treat it as a fast-follow.
  *
  * One thing this does NOT attempt to distinguish, open until a real capture exists: an immediate
  * free-agent pickup (outside the waiver period, processed instantly — what `executionType:
@@ -157,7 +200,16 @@ async function submitLineup(
  */
 async function submitWaiverClaim(
   context,
-  { leagueId, seasonId, teamId, memberId, scoringPeriodId, addPlayerId, dropPlayerId },
+  {
+    leagueId,
+    seasonId,
+    teamId,
+    memberId,
+    scoringPeriodId,
+    addPlayerId,
+    dropPlayerId,
+    trackingId,
+  },
 ) {
   const url = buildTransactionsUrl(leagueId, seasonId);
   const items = [];
@@ -173,17 +225,30 @@ async function submitWaiverClaim(
     executionType: "EXECUTE",
     items,
   };
+  const headers = {
+    "Content-Type": "application/json",
+    "x-fantasy-source": "kona",
+    "x-fantasy-platform": "espn-fantasy-web",
+  };
 
-  const response = await context.request.post(url, {
-    headers: {
-      "Content-Type": "application/json",
-      "x-fantasy-source": "kona",
-      "x-fantasy-platform": "kona-PROD",
-    },
-    data: payload,
+  const startedAt = Date.now();
+  const response = await context.request.post(url, { headers, data: payload });
+  const text = await response.text();
+
+  captureWriteArtifact({
+    kind: "waiver",
+    trackingId,
+    leagueId,
+    teamId,
+    url,
+    requestHeaders: headers,
+    requestBody: payload,
+    responseStatus: response.status(),
+    responseOk: response.ok(),
+    responseBodySnippet: text.slice(0, 500),
+    durationMs: Date.now() - startedAt,
   });
 
-  const text = await response.text();
   if (!response.ok()) {
     const status = response.status();
     const message = `[ESPN API] Waiver claim submit failed with HTTP ${status} — ${text.slice(0, 500)}`;

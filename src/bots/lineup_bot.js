@@ -25,7 +25,8 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * positional `data-idx`, which WORKER-03 explicitly forbids depending on.
  *
  * Safety rails, all on by default:
- *   - DRY_RUN        — defaults to TRUE; only an explicit DRY_RUN=false submits anything.
+ *   - DRY_RUN        — defaults to FALSE (live writes) now that #15's write shape is verified;
+ *                      set DRY_RUN=true to plan without submitting.
  *   - idempotency    — swaps already satisfied are dropped; a requeued message can't double-apply.
  *   - verification   — after submitting, re-read the roster and assert every player actually landed.
  *   - failure capture — dump roster state + a screenshot to DEBUG_OUTPUT_DIR before rethrowing.
@@ -41,18 +42,16 @@ const VERIFY_ATTEMPTS = 4;
 const VERIFY_DELAY_MS = 1000;
 
 /**
- * Live writes are OPT-IN, not opt-out.
+ * Live writes are the default.
  *
- * submitLineup()'s request body has never been confirmed against a real capture (see espn_api.js
- * and issue #15), so an unset DRY_RUN must not mean "write to the live lineup" — the production
- * queue path sets no env var of its own, and that default would have made every consumed message a
- * live, unverified transaction. Only an explicit DRY_RUN=false opts in.
- *
- * Flip this default once #15 closes and the write shape is verified.
+ * submitLineup()'s request body was confirmed against a real capture and live-tested end-to-end
+ * (2026-09-12, see espn_api.js and issue #15) — an unset DRY_RUN now means "write for real," matching
+ * the production queue path's own lack of an env var. Set DRY_RUN=true explicitly to plan without
+ * submitting.
  */
 function resolveDryRun() {
   const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return { dryRun: true, defaulted: true };
+  if (raw === "") return { dryRun: false, defaulted: true };
   return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
 }
 
@@ -347,11 +346,11 @@ async function executeLineupAdjustments(payload) {
     `Starting realignment for team ${teamId} in league ${leagueId} (${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
   );
   if (defaulted) {
-    // Say this loudly: a silent no-op is its own failure mode, and someone deploying this and
-    // wondering why nothing changed deserves to see the reason in the logs.
+    // Say this loudly: someone expecting the old dry-by-default behavior deserves to see in the
+    // logs that this message is about to write for real.
     log(
-      "DRY_RUN is unset, defaulting to TRUE — no changes will be written. Set DRY_RUN=false to " +
-        "submit for real (only once the write shape is verified, see issue #15).",
+      "DRY_RUN is unset, defaulting to FALSE — this will submit for real. Set DRY_RUN=true to " +
+        "plan without submitting.",
     );
   }
 
@@ -412,6 +411,7 @@ async function executeLineupAdjustments(payload) {
       memberId: session.swid,
       scoringPeriodId: roster.scoringPeriodId,
       items,
+      trackingId: tracking,
     });
     log(
       "Transaction accepted by ESPN. Verifying against a fresh roster read...",

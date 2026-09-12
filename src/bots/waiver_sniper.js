@@ -184,6 +184,7 @@ async function executeInstantWaiverClaim(payload) {
       scoringPeriodId: roster.scoringPeriodId,
       addPlayerId: needsAdd ? addPlayerId : null,
       dropPlayerId: needsDrop ? dropPlayerId : null,
+      trackingId: tracking,
     });
 
     // Best-effort only: if this league is mid-waiver-period, a genuine waiver claim (as opposed to
