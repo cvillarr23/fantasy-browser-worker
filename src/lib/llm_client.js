@@ -1,4 +1,6 @@
 const { execFileSync } = require("child_process");
+const http = require("node:http");
+const https = require("node:https");
 const { Pool } = require("pg");
 const { trace, SpanStatusCode } = require("@opentelemetry/api");
 const { logger } = require("../telemetry/logger");
@@ -244,19 +246,75 @@ async function callGemini(model, prompt, opts, apiKey) {
   return text;
 }
 
+// The WHATWG Fetch spec (and therefore Node's global `fetch`/undici) treats `Host` as a
+// forbidden request header and silently drops it instead of sending it -- confirmed empirically
+// against this exact Node version, not just from the spec text. That makes `fetch` unusable for
+// routing through the KEDA HTTP Add-on interceptor, which dispatches purely on the request's
+// Host header (see http-scaled-object.yaml in fantasy-infra). Node's lower-level `http`/`https`
+// modules have no such restriction, so callOllama uses this instead.
+function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === "https:" ? https : http;
+    const payload = Buffer.from(JSON.stringify(body));
+
+    const req = transport.request(
+      {
+        hostname: target.hostname,
+        port: target.port || (target.protocol === "https:" ? 443 : 80),
+        path: `${target.pathname}${target.search}`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": payload.length,
+          ...(hostHeader ? { Host: hostHeader } : {}),
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            text: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
+    );
+
+    req.on("timeout", () => {
+      const err = new Error(`Request timed out after ${timeoutMs}ms`);
+      err.name = "TimeoutError"; // matches AbortSignal.timeout's error shape, which the
+      // errorType classification in completeWithFallback keys off of.
+      req.destroy(err);
+    });
+    req.on("error", (err) => reject(err));
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function callOllama(model, prompt, opts) {
   const baseUrl = process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
-  const hostHeader = process.env.OLLAMA_HOST_HEADER || DEFAULT_OLLAMA_HOST_HEADER;
+  // Only default the Host header when OLLAMA_URL itself is also at its default (the
+  // interceptor's address): a manually configured OLLAMA_URL pointing at a real, directly
+  // reachable Ollama instance (e.g. local dev) shouldn't get a stale interceptor-routing Host
+  // header stamped onto it unless that's explicitly asked for via OLLAMA_HOST_HEADER.
+  const hostHeader =
+    process.env.OLLAMA_HOST_HEADER ||
+    (process.env.OLLAMA_URL ? undefined : DEFAULT_OLLAMA_HOST_HEADER);
 
   // No manual scale-up call here anymore: the KEDA HTTP Add-on interceptor (see
   // base/ollama/http-scaled-object.yaml) does this itself on any request that reaches it,
-  // queuing this fetch until the Ollama pod is ready instead of us polling readiness beforehand.
-  // The Host header is what tells the interceptor which HTTPScaledObject (and therefore which
-  // Deployment/Service) this request is for -- it has nothing to do with baseUrl's own hostname.
-  const response = await fetch(`${baseUrl}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Host: hostHeader },
-    body: JSON.stringify({
+  // queuing this request until the Ollama pod is ready instead of us polling readiness
+  // beforehand. The Host header is what tells the interceptor which HTTPScaledObject (and
+  // therefore which Deployment/Service) this request is for -- it has nothing to do with
+  // baseUrl's own hostname.
+  const response = await postJsonWithHostHeader(
+    `${baseUrl}/api/generate`,
+    {
       model,
       prompt: opts.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt,
       stream: false,
@@ -266,16 +324,15 @@ async function callOllama(model, prompt, opts) {
           : {}),
         ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
       },
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs("ollama")),
-  });
+    },
+    { hostHeader, timeoutMs: requestTimeoutMs("ollama") },
+  );
 
   if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    throw classifyHttpError(response.status, errorBody);
+    throw classifyHttpError(response.status, response.text);
   }
 
-  const data = await response.json();
+  const data = JSON.parse(response.text);
   if (!data?.response)
     throw new Error("Ollama response missing 'response' field");
   return data.response;
