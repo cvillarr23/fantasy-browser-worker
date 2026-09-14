@@ -15,7 +15,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { PermanentError } = require("../errors");
+const { classifyHttpStatusError } = require("../errors");
 const { isEnabled: isDebugCaptureEnabled } = require("./debug_capture");
 const { logger } = require("../telemetry/logger");
 
@@ -252,10 +252,7 @@ async function submitWaiverClaim(
   if (!response.ok()) {
     const status = response.status();
     const message = `[ESPN API] Waiver claim submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
-    if (status >= 400 && status < 500 && status !== 429) {
-      throw new PermanentError(message);
-    }
-    throw new Error(message);
+    throw classifyHttpStatusError(status, message);
   }
 
   return text ? JSON.parse(text) : {};
