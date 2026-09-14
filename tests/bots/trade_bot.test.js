@@ -1,4 +1,17 @@
-const { requireEvaluationPayload, classifyEvaluateError } = require("../../src/bots/trade_bot");
+const {
+  requireEvaluationPayload,
+  classifyEvaluateError,
+  executeTradeEvaluation,
+} = require("../../src/bots/trade_bot");
+
+function mockFetchResponse({ ok, status = 200, json, text = "" }) {
+  return {
+    ok,
+    status,
+    json: json !== undefined ? async () => json : async () => { throw new SyntaxError("Unexpected end of JSON input"); },
+    text: async () => text,
+  };
+}
 
 function validPayload(overrides = {}) {
   return {
@@ -86,5 +99,94 @@ describe("classifyEvaluateError", () => {
   it("treats 5xx as transient", () => {
     const error = classifyEvaluateError(500, "internal error");
     expect(error.permanent).toBeUndefined();
+  });
+
+  it("gives a transient error a retry delay", () => {
+    expect(classifyEvaluateError(500, "internal error").retryDelayMs).toBeGreaterThan(0);
+  });
+
+  it("does not give a permanent error a retry delay", () => {
+    expect(classifyEvaluateError(422, "bad payload").retryDelayMs).toBeUndefined();
+  });
+});
+
+describe("executeTradeEvaluation", () => {
+  let fetchSpy;
+
+  beforeEach(() => {
+    fetchSpy = jest.spyOn(global, "fetch");
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+  });
+
+  it("rejects a malformed payload without calling fetch", async () => {
+    await expect(executeTradeEvaluation(null)).rejects.toMatchObject({ permanent: true });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("posts the evaluation request and returns the parsed result", async () => {
+    const body = {
+      incoming_total: 12.5,
+      outgoing_total: 8.0,
+      delta_vorp: 4.5,
+      missing_player_ids: [],
+    };
+    fetchSpy.mockResolvedValue(mockFetchResponse({ ok: true, json: body }));
+
+    const result = await executeTradeEvaluation(validPayload());
+
+    expect(result).toEqual(body);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/trade/evaluate"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          incoming_player_ids: ["101"],
+          outgoing_player_ids: ["202"],
+          season: 2026,
+          week: 3,
+        }),
+      }),
+    );
+  });
+
+  it("throws PermanentError on a 422 without a retry delay", async () => {
+    fetchSpy.mockResolvedValue(
+      mockFetchResponse({ ok: false, status: 422, text: "duplicate player_id(s)" }),
+    );
+
+    let caught;
+    await executeTradeEvaluation(validPayload()).catch((e) => (caught = e));
+    expect(caught.permanent).toBe(true);
+    expect(caught.retryDelayMs).toBeUndefined();
+  });
+
+  it("throws a retryable error on a 500", async () => {
+    fetchSpy.mockResolvedValue(
+      mockFetchResponse({ ok: false, status: 500, text: "internal error" }),
+    );
+
+    let caught;
+    await executeTradeEvaluation(validPayload()).catch((e) => (caught = e));
+    expect(caught.permanent).not.toBe(true);
+    expect(caught.retryDelayMs).toEqual(expect.any(Number));
+  });
+
+  it("throws a retryable error when the request itself fails", async () => {
+    fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
+
+    await expect(executeTradeEvaluation(validPayload())).rejects.toMatchObject({
+      retryDelayMs: expect.any(Number),
+    });
+  });
+
+  it("throws a retryable error on a 200 with a non-JSON body instead of an unhandled SyntaxError", async () => {
+    fetchSpy.mockResolvedValue(mockFetchResponse({ ok: true }));
+
+    await expect(executeTradeEvaluation(validPayload())).rejects.toMatchObject({
+      retryDelayMs: expect.any(Number),
+    });
   });
 });

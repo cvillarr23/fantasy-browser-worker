@@ -82,6 +82,11 @@ async function initializeQueueConsumer(messageProcessorCallback) {
   );
 
   // 2. Declare and align standard system tracking exchange queues
+  // trade_evaluations (added for #74) is a plain REST call, not a Chromium-driven job like the
+  // other three — but it still shares this channel-wide prefetch(1), so a slow lineup/waiver/draft
+  // job holding the single slot blocks a lightweight trade evaluation behind it for a memory
+  // constraint that doesn't apply to it. Giving non-browser queues their own channel/prefetch is a
+  // real improvement, just a bigger change than this fix; left as a follow-up.
   const targetQueues = [
     "lineup_updates",
     "waiver_actions",

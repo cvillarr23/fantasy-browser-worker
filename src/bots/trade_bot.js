@@ -2,7 +2,11 @@
 // The page.evaluate() callback below runs inside the browser page, not Node — document/window
 // are real globals there, hence the browser env for this file.
 const { createAuthenticatedSession } = require("./auth");
-const { PermanentError } = require("../errors");
+const {
+  PermanentError,
+  requirePlainObjectPayload,
+  classifyHttpStatusError,
+} = require("../errors");
 const { logger } = require("../telemetry/logger");
 
 // Same cluster-DNS-default convention as OLLAMA_URL in src/lib/llm_client.js — verified against
@@ -13,6 +17,23 @@ const CORE_PIPELINE_URL =
   "http://fantasy-core-pipeline.default.svc.cluster.local:8000";
 
 const DEFAULT_EVALUATE_TIMEOUT_MS = 10000;
+
+function evaluateTimeoutMs() {
+  return Number(process.env.TRADE_EVALUATE_TIMEOUT_MS) || DEFAULT_EVALUATE_TIMEOUT_MS;
+}
+
+// Applied to a transient (non-permanent) failure from executeTradeEvaluation before it's thrown.
+// Without this, connection.js's default nack(msg, false, true) requeues instantly with no delay —
+// since prefetch(1) is channel-wide, a persistently unreachable/degraded core-pipeline would
+// otherwise hot-loop retries and block lineup_updates/waiver_actions/draft_targets too, hammering
+// the dependency the whole time. Shorter than SessionExpiredError's 30s (src/errors.js): that
+// case waits out a credential fix, which takes longer than a REST call recovering from a blip.
+const TRANSIENT_RETRY_DELAY_MS = 5000;
+
+function withRetryDelay(error) {
+  if (!error.permanent) error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
+  return error;
+}
 
 /**
  * Automated Trade Proposal Scraper
@@ -73,13 +94,7 @@ async function scrapePendingTradeProposals() {
  * plus a season/week to score them against — anything short of that can never succeed on
  * redelivery, so it's rejected as a PermanentError before any network call is made. */
 function requireEvaluationPayload(payload) {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new PermanentError(
-      `[Trade Evaluator] Payload must be a JSON object, got ${
-        payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
-      }.`,
-    );
-  }
+  requirePlainObjectPayload(payload, "[Trade Evaluator]");
 
   const { incoming_player_ids: incoming, outgoing_player_ids: outgoing, season, week } = payload;
 
@@ -120,10 +135,7 @@ function requireEvaluationPayload(payload) {
  * 5xx, or network/timeout failure is transient and should requeue as-is. */
 function classifyEvaluateError(status, body) {
   const message = `[Trade Evaluator] POST /v1/trade/evaluate failed with HTTP ${status} — ${body.slice(0, 500)}`;
-  if (status >= 400 && status < 500 && status !== 429) {
-    return new PermanentError(message);
-  }
-  return new Error(message);
+  return withRetryDelay(classifyHttpStatusError(status, message));
 }
 
 /**
@@ -135,7 +147,9 @@ function classifyEvaluateError(status, body) {
  */
 async function executeTradeEvaluation(payload) {
   const { incoming, outgoing, season, week } = requireEvaluationPayload(payload);
-  const tracking = payload.tracking_id || "no-tracking-id";
+  // Nullish, not falsy: an empty string or a literal 0 is still a real tracking id worth keeping
+  // in logs, unlike no tracking_id field at all.
+  const tracking = payload.tracking_id ?? "no-tracking-id";
 
   logger.info(
     `[Trade Evaluator][${tracking}] Evaluating ${incoming.length} incoming / ${outgoing.length} ` +
@@ -153,12 +167,17 @@ async function executeTradeEvaluation(payload) {
         season,
         week,
       }),
-      signal: AbortSignal.timeout(DEFAULT_EVALUATE_TIMEOUT_MS),
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
     });
   } catch (networkError) {
     // fetch itself throws on a network failure or an aborted/timed-out request — both transient.
-    throw new Error(
-      `[Trade Evaluator][${tracking}] Request to ${CORE_PIPELINE_URL} failed: ${networkError.message}`,
+    // Distinct causes (DNS/ECONNREFUSED vs a timeout AbortError) collapse to the same Error shape
+    // here, but `cause` keeps the original error/stack available to anyone inspecting the reject.
+    throw withRetryDelay(
+      new Error(
+        `[Trade Evaluator][${tracking}] Request to ${CORE_PIPELINE_URL} failed: ${networkError.message}`,
+        { cause: networkError },
+      ),
     );
   }
 
@@ -167,7 +186,20 @@ async function executeTradeEvaluation(payload) {
     throw classifyEvaluateError(response.status, body);
   }
 
-  const result = await response.json();
+  let result;
+  try {
+    result = await response.json();
+  } catch (parseError) {
+    // A 200 with a truncated/empty/non-JSON body (proxy hiccup, ingress default-backend page
+    // mid-rollout) must not bypass classification as an unhandled SyntaxError — treat it as the
+    // same transient condition an ordinary 5xx would be.
+    throw withRetryDelay(
+      new Error(
+        `[Trade Evaluator][${tracking}] Response body was not valid JSON: ${parseError.message}`,
+        { cause: parseError },
+      ),
+    );
+  }
   logger.info(
     `[Trade Evaluator][${tracking}] delta_vorp=${result.delta_vorp} ` +
       `(incoming=${result.incoming_total}, outgoing=${result.outgoing_total})` +

@@ -50,4 +50,43 @@ class SessionExpiredError extends Error {
   }
 }
 
-module.exports = { PermanentError, SessionExpiredError };
+/**
+ * Guards against a syntactically valid queue message that parses to null, an array, or a bare
+ * scalar. Dereferencing a field on any of those throws a plain TypeError before any
+ * PermanentError classification exists, which connection.js treats as transient and requeues
+ * forever under its channel-wide prefetch(1), starving every consumer — so this must be the
+ * first thing a payload-shaped queue handler checks. Shared by waiver_sniper.js,
+ * draft_clicker.js, and trade_bot.js, which each need the identical check on their own payload.
+ */
+function requirePlainObjectPayload(payload, label) {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new PermanentError(
+      `${label} payload must be a JSON object, got ${
+        payload === null ? "null" : Array.isArray(payload) ? "array" : typeof payload
+      }.`,
+    );
+  }
+  return payload;
+}
+
+/**
+ * Coarse HTTP-status-only retry classification, shared by every bot that submits a request to a
+ * REST API and wants the same rule: a 4xx (except 429, a rate limit) means this exact request is
+ * doomed and retrying it is pointless, so it's a PermanentError connection.js drops instead of
+ * hot-looping forever under its channel-wide prefetch(1). 429/5xx/network failures stay ordinary
+ * Errors so connection.js retries them. Originated in espn_api.js's submitWaiverClaim; kept here
+ * so a future change to the threshold (e.g. carving out 408/409) only needs to happen once.
+ */
+function classifyHttpStatusError(status, message) {
+  if (status >= 400 && status < 500 && status !== 429) {
+    return new PermanentError(message);
+  }
+  return new Error(message);
+}
+
+module.exports = {
+  PermanentError,
+  SessionExpiredError,
+  requirePlainObjectPayload,
+  classifyHttpStatusError,
+};

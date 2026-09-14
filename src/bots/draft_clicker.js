@@ -11,7 +11,7 @@ const {
   awaitCommandResult,
   publishPickRejection,
 } = require("./session_registry");
-const { PermanentError } = require("../errors");
+const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 const { recordDraftPickClick } = require("../db/execution_log");
@@ -238,15 +238,7 @@ async function executeAutomatedDraftSelection(payload) {
   // any PermanentError classification exists — which connection.js treats as transient and
   // requeues forever under its channel-wide prefetch(1), starving every consumer. Must be the
   // very first thing checked.
-  if (
-    typeof payload !== "object" ||
-    payload === null ||
-    Array.isArray(payload)
-  ) {
-    throw new PermanentError(
-      `[Draft Clicker] draft_targets payload is not an object: ${JSON.stringify(payload)}`,
-    );
-  }
+  requirePlainObjectPayload(payload, "[Draft Clicker]");
 
   const tracking = payload.tracking_id || "no-tracking-id";
   const log = logger.info;

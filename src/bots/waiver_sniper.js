@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitWaiverClaim } = require("./espn_api");
-const { PermanentError } = require("../errors");
+const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { logger } = require("../telemetry/logger");
 
 /**
@@ -67,21 +67,7 @@ async function executeInstantWaiverClaim(payload) {
   // those are throwable as an ordinary Error here without the whole payload.xxx dereference below
   // throwing a plain TypeError instead, which connection.js requeues forever (only PermanentError
   // and the JSON-parse-failure case are treated as unretryable).
-  if (
-    payload === null ||
-    typeof payload !== "object" ||
-    Array.isArray(payload)
-  ) {
-    throw new PermanentError(
-      `[Sniper Bot] Payload must be a JSON object, got ${
-        payload === null
-          ? "null"
-          : Array.isArray(payload)
-            ? "array"
-            : typeof payload
-      }.`,
-    );
-  }
+  requirePlainObjectPayload(payload, "[Sniper Bot]");
 
   const tracking = payload.tracking_id || payload.player_id || "no-tracking-id";
   const log = logger.info;
