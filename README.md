@@ -31,6 +31,29 @@ flowchart TD
     selectors --> espn["ESPN fantasy site\n(Playwright/Chromium)"]
 ```
 
+### WORKER-12: LLM client provider fallback chain
+
+`src/lib/llm_client.js`'s `completeWithFallback` tries each configured provider in order,
+falling through on a rate limit, quota exhaustion, or any other request failure. Ollama is the
+last resort and is reached only through `fantasy-infra`'s KEDA HTTP Add-on interceptor, never
+called or scaled directly:
+
+```mermaid
+flowchart TD
+    caller["trade_bot.js / rumor digest bot\n(WORKER-04, WORKER-13)"] --> fallback["completeWithFallback()"]
+
+    fallback -->|1st: LLM_PROVIDER_PRIORITY| groq["Groq\n(fetch + AbortSignal.timeout)"]
+    groq -->|rate limited / failed| gemini["Gemini\n(fetch + AbortSignal.timeout)"]
+    gemini -->|rate limited / failed| ollama["Ollama\n(node:http/https, NOT fetch --\nfetch silently drops the Host\nheader the interceptor needs)"]
+
+    ollama -->|"Host: ollama.default.svc.cluster.local\n+ wall-clock timeout"| interceptor["KEDA HTTP Add-on interceptor\n(fantasy-infra / homelab-deployment)"]
+    interceptor -.->|"scales 0-to-1,\nqueues request"| pod["ollama Deployment"]
+```
+
+Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for CORE-14's
+Grafana dashboard — see `CLAUDE.md`'s WORKER-12 notes for the metrics schema and rate-limiter
+details.
+
 ## Image release + Argo CD Image Updater contract
 - Pushes to `main` publish:
   - `ghcr.io/cvillarr23/fantasy-browser-worker:latest`
