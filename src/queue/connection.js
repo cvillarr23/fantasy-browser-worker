@@ -73,16 +73,21 @@ async function initializeQueueConsumer(messageProcessorCallback) {
 
   // 1. Enforce strict resource boundaries to limit processing to 1 message at a time
   // This safeguards our 1200MiB pod limits by blocking concurrent Chromium execution cycles.
-  // `global: true` is required here — plain prefetch(1) applies per-consumer, and two consumers
-  // get registered below (lineup_updates, waiver_actions), which would allow 2 unacked messages
-  // (and 2 concurrent Chromium instances) at once instead of 1.
+  // `global: true` is required here — plain prefetch(1) applies per-consumer, and multiple
+  // consumers get registered below (one per queue in targetQueues), which would allow that many
+  // unacked messages (and that many concurrent Chromium instances) at once instead of 1.
   await channel.prefetch(1, true);
   logger.info(
     "[Queue Bridge] Resource concurrency limits locked successfully (Prefetch: 1, channel-wide).",
   );
 
   // 2. Declare and align standard system tracking exchange queues
-  const targetQueues = ["lineup_updates", "waiver_actions", "draft_targets"];
+  const targetQueues = [
+    "lineup_updates",
+    "waiver_actions",
+    "draft_targets",
+    "trade_evaluations",
+  ];
   for (const queue of targetQueues) {
     await channel.assertQueue(queue, { durable: true });
     logger.info(
