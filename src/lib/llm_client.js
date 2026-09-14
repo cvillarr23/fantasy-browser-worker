@@ -258,6 +258,29 @@ function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
     const transport = target.protocol === "https:" ? https : http;
     const payload = Buffer.from(JSON.stringify(body));
 
+    let settled = false;
+    const timeoutError = () => {
+      const err = new Error(`Request timed out after ${timeoutMs}ms`);
+      err.name = "TimeoutError"; // matches AbortSignal.timeout's error shape, which the
+      // errorType classification in completeWithFallback keys off of.
+      return err;
+    };
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wallClockTimer);
+      fn(arg);
+    };
+
+    // `timeout` in the request options below is a socket-inactivity timeout: it's only armed
+    // once a socket connects, so a hung DNS lookup or a TCP handshake that never completes (e.g.
+    // the interceptor Service having no ready endpoint) would leave this Promise pending forever
+    // without it. This wall-clock timer covers the whole request lifecycle -- connect included --
+    // and is the one that actually bounds worst-case latency.
+    const wallClockTimer = setTimeout(() => {
+      req.destroy(timeoutError());
+    }, timeoutMs);
+
     const req = transport.request(
       {
         hostname: target.hostname,
@@ -274,8 +297,9 @@ function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
+        res.on("error", (err) => settle(reject, err));
         res.on("end", () => {
-          resolve({
+          settle(resolve, {
             ok: res.statusCode >= 200 && res.statusCode < 300,
             status: res.statusCode,
             text: Buffer.concat(chunks).toString("utf8"),
@@ -284,13 +308,8 @@ function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
       },
     );
 
-    req.on("timeout", () => {
-      const err = new Error(`Request timed out after ${timeoutMs}ms`);
-      err.name = "TimeoutError"; // matches AbortSignal.timeout's error shape, which the
-      // errorType classification in completeWithFallback keys off of.
-      req.destroy(err);
-    });
-    req.on("error", (err) => reject(err));
+    req.on("timeout", () => req.destroy(timeoutError()));
+    req.on("error", (err) => settle(reject, err));
     req.write(payload);
     req.end();
   });
