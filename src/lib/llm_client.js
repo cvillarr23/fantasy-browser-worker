@@ -1,7 +1,8 @@
 const { execFileSync } = require("child_process");
+const http = require("node:http");
+const https = require("node:https");
 const { Pool } = require("pg");
 const { trace, SpanStatusCode } = require("@opentelemetry/api");
-const k8s = require("@kubernetes/client-node");
 const { logger } = require("../telemetry/logger");
 
 const tracer = trace.getTracer("fantasy-browser-worker");
@@ -38,18 +39,24 @@ const DEFAULT_PROVIDER_PRIORITY =
 const DEFAULT_RPM_LIMITS = { groq: 30, gemini: 15 };
 
 const DEFAULT_TIMEOUT_MS = 15000;
-// Ollama gets a longer default timeout than the cloud providers -- a cold local model load can
-// take well past 15s, and this is the last-resort tier anyway, so a slower response beats none.
-const DEFAULT_OLLAMA_TIMEOUT_MS = 30000;
-const DEFAULT_OLLAMA_URL = "http://ollama.default.svc.cluster.local:11434";
-
-const DEFAULT_OLLAMA_K8S_NAMESPACE = "default";
-const DEFAULT_OLLAMA_K8S_DEPLOYMENT = "ollama";
-// Cold model load, not just container start -- an 8B model's first request after a scale-up
-// from 0 can genuinely take this long. Polling below returns as soon as it's actually ready,
-// this is only the ceiling.
-const DEFAULT_OLLAMA_SCALE_UP_TIMEOUT_MS = 90000;
-const OLLAMA_SCALE_UP_POLL_INTERVAL_MS = 2000;
+// Ollama gets a much longer default timeout than the cloud providers: requests now go through
+// the KEDA HTTP Add-on interceptor (see base/ollama/http-scaled-object.yaml), which itself
+// scales the Deployment 0->1 and holds the request until it's ready -- a cold model load can
+// genuinely take well past 30s, and this is the last-resort tier anyway, so a slower response
+// beats none. Keep this at or above the interceptor's own request-wait-timeout configuration so
+// the interceptor times out first with a clearer error, rather than this client aborting mid-scale-up.
+const DEFAULT_OLLAMA_TIMEOUT_MS = 100000;
+// Points at the KEDA HTTP Add-on interceptor's proxy Service, NOT the `ollama` Service directly
+// -- the interceptor is what actually triggers Ollama's on-demand scale-up (and, symmetrically,
+// scales it back to 0 after an idle period, see http-scaled-object.yaml's scaledownPeriod). A
+// direct-to-Service URL here would bypass that entirely and race a cold pod.
+const DEFAULT_OLLAMA_URL =
+  "http://keda-add-ons-http-interceptor-proxy.keda.svc.cluster.local:8080";
+// Host header the interceptor uses to look up which HTTPScaledObject (and therefore which
+// Deployment/Service) a request is for -- must match a `hosts` entry in
+// base/ollama/http-scaled-object.yaml exactly. This is deliberately the same hostname
+// DEFAULT_OLLAMA_URL used to point at directly, before routing through the interceptor.
+const DEFAULT_OLLAMA_HOST_HEADER = "ollama.default.svc.cluster.local";
 
 // provider -> array of request timestamps (ms), used for the in-memory sliding-window rate
 // limiter below. Process-local by design: each pod/job instance guards its own budget slice
@@ -239,90 +246,94 @@ async function callGemini(model, prompt, opts, apiKey) {
   return text;
 }
 
-// Lazily resolved once per process, not per call -- loadFromCluster() throws immediately when
-// not running inside a pod (no local dev cluster access), and there's no point re-attempting
-// that on every single Ollama call. `undefined` means "not yet attempted", `null` means "tried
-// and it's unavailable, stop trying" (e.g. local dev against a manually-run Ollama instance).
-let cachedAppsV1Api;
+// The WHATWG Fetch spec (and therefore Node's global `fetch`/undici) treats `Host` as a
+// forbidden request header and silently drops it instead of sending it -- confirmed empirically
+// against this exact Node version, not just from the spec text. That makes `fetch` unusable for
+// routing through the KEDA HTTP Add-on interceptor, which dispatches purely on the request's
+// Host header (see http-scaled-object.yaml in fantasy-infra). Node's lower-level `http`/`https`
+// modules have no such restriction, so callOllama uses this instead.
+function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === "https:" ? https : http;
+    const payload = Buffer.from(JSON.stringify(body));
 
-function getAppsV1ApiOrNull() {
-  if (cachedAppsV1Api !== undefined) return cachedAppsV1Api;
-  try {
-    const kc = new k8s.KubeConfig();
-    kc.loadFromCluster();
-    cachedAppsV1Api = kc.makeApiClient(k8s.AppsV1Api);
-  } catch (err) {
-    logger.info(
-      `[LLM Client] Not running in-cluster (or no cluster access) -- skipping Ollama on-demand scale-up: ${err.message}`,
+    let settled = false;
+    const timeoutError = () => {
+      const err = new Error(`Request timed out after ${timeoutMs}ms`);
+      err.name = "TimeoutError"; // matches AbortSignal.timeout's error shape, which the
+      // errorType classification in completeWithFallback keys off of.
+      return err;
+    };
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wallClockTimer);
+      fn(arg);
+    };
+
+    // `timeout` in the request options below is a socket-inactivity timeout: it's only armed
+    // once a socket connects, so a hung DNS lookup or a TCP handshake that never completes (e.g.
+    // the interceptor Service having no ready endpoint) would leave this Promise pending forever
+    // without it. This wall-clock timer covers the whole request lifecycle -- connect included --
+    // and is the one that actually bounds worst-case latency.
+    const wallClockTimer = setTimeout(() => {
+      req.destroy(timeoutError());
+    }, timeoutMs);
+
+    const req = transport.request(
+      {
+        hostname: target.hostname,
+        port: target.port || (target.protocol === "https:" ? 443 : 80),
+        path: `${target.pathname}${target.search}`,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": payload.length,
+          ...(hostHeader ? { Host: hostHeader } : {}),
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("error", (err) => settle(reject, err));
+        res.on("end", () => {
+          settle(resolve, {
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            text: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+      },
     );
-    cachedAppsV1Api = null;
-  }
-  return cachedAppsV1Api;
-}
 
-// Scales the Ollama Deployment from 0 to 1 replicas on first use and waits for it to become
-// ready, so callOllama's actual HTTP request lands on a warm pod instead of racing a cold
-// scale-up. Deliberately never scales back down -- see the WORKER-12 follow-up plan: with ~16GB
-// of headroom on the homelab node, leaving an 8B model resident is an acceptable tradeoff
-// against building a second idle-timeout/scale-down mechanism.
-async function ensureOllamaScaledUp() {
-  const appsApi = getAppsV1ApiOrNull();
-  if (!appsApi) return; // not in-cluster -- assume OLLAMA_URL already points at something running
-
-  const namespace =
-    process.env.OLLAMA_K8S_NAMESPACE || DEFAULT_OLLAMA_K8S_NAMESPACE;
-  const name =
-    process.env.OLLAMA_K8S_DEPLOYMENT || DEFAULT_OLLAMA_K8S_DEPLOYMENT;
-  const timeoutMs =
-    Number(process.env.OLLAMA_SCALE_UP_TIMEOUT_MS) ||
-    DEFAULT_OLLAMA_SCALE_UP_TIMEOUT_MS;
-
-  const scale = await appsApi.readNamespacedDeploymentScale(name, namespace);
-  if ((scale.spec?.replicas || 0) > 0) {
-    // Already scaled up (either from a prior call in this or another worker instance) -- if
-    // it's not actually Ready yet, the poll loop below will still catch that.
-  } else {
-    logger.info(
-      `[LLM Client] Scaling Ollama deployment "${name}" up from 0 replicas...`,
-    );
-    await appsApi.replaceNamespacedDeploymentScale(name, namespace, {
-      metadata: scale.metadata,
-      spec: { replicas: 1 },
-    });
-  }
-
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const status = await appsApi.readNamespacedDeploymentStatus(
-      name,
-      namespace,
-    );
-    if ((status.status?.readyReplicas || 0) >= 1) {
-      logger.info(`[LLM Client] Ollama deployment "${name}" is ready.`);
-      return;
-    }
-    if (Date.now() >= deadline) {
-      const err = new Error(
-        `Timed out after ${timeoutMs}ms waiting for Ollama deployment "${name}" to become ready.`,
-      );
-      err.scaleUpTimeout = true;
-      throw err;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, OLLAMA_SCALE_UP_POLL_INTERVAL_MS),
-    );
-  }
+    req.on("timeout", () => req.destroy(timeoutError()));
+    req.on("error", (err) => settle(reject, err));
+    req.write(payload);
+    req.end();
+  });
 }
 
 async function callOllama(model, prompt, opts) {
-  await ensureOllamaScaledUp();
-
   const baseUrl = process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
+  // Only default the Host header when OLLAMA_URL itself is also at its default (the
+  // interceptor's address): a manually configured OLLAMA_URL pointing at a real, directly
+  // reachable Ollama instance (e.g. local dev) shouldn't get a stale interceptor-routing Host
+  // header stamped onto it unless that's explicitly asked for via OLLAMA_HOST_HEADER.
+  const hostHeader =
+    process.env.OLLAMA_HOST_HEADER ||
+    (process.env.OLLAMA_URL ? undefined : DEFAULT_OLLAMA_HOST_HEADER);
 
-  const response = await fetch(`${baseUrl}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  // No manual scale-up call here anymore: the KEDA HTTP Add-on interceptor (see
+  // base/ollama/http-scaled-object.yaml) does this itself on any request that reaches it,
+  // queuing this request until the Ollama pod is ready instead of us polling readiness
+  // beforehand. The Host header is what tells the interceptor which HTTPScaledObject (and
+  // therefore which Deployment/Service) this request is for -- it has nothing to do with
+  // baseUrl's own hostname.
+  const response = await postJsonWithHostHeader(
+    `${baseUrl}/api/generate`,
+    {
       model,
       prompt: opts.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt,
       stream: false,
@@ -332,16 +343,15 @@ async function callOllama(model, prompt, opts) {
           : {}),
         ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
       },
-    }),
-    signal: AbortSignal.timeout(requestTimeoutMs("ollama")),
-  });
+    },
+    { hostHeader, timeoutMs: requestTimeoutMs("ollama") },
+  );
 
   if (!response.ok) {
-    const errorBody = await response.text().catch(() => "");
-    throw classifyHttpError(response.status, errorBody);
+    throw classifyHttpError(response.status, response.text);
   }
 
-  const data = await response.json();
+  const data = JSON.parse(response.text);
   if (!data?.response)
     throw new Error("Ollama response missing 'response' field");
   return data.response;
@@ -521,11 +531,9 @@ async function completeWithFallback(prompt, opts = {}) {
           const latencyMs = Date.now() - startedAt;
           const errorType = error.rateLimited
             ? "rate_limited"
-            : error.scaleUpTimeout
-              ? "ollama_scale_up_timeout"
-              : error.name === "TimeoutError"
-                ? "timeout"
-                : "request_failed";
+            : error.name === "TimeoutError"
+              ? "timeout"
+              : "request_failed";
 
           logger.error(
             `[LLM Client] "${provider}:${model}" attempt ${attemptNumber} failed: ${error.message}`,
