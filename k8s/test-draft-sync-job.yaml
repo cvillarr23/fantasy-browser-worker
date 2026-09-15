@@ -2,6 +2,12 @@
 # auto-deploys via Argo CD. Apply/delete this by hand whenever you want to test the pipeline
 # end-to-end against a live ESPN mock draft.
 #
+# For a real live league, prefer fantasy-core-pipeline's POST /v1/draft/start instead of this
+# file — it now launches draft_sync.js itself as a per-league-labeled (app=live-draft-sync)
+# Job that POST /v1/draft/stop can discover and tear down automatically (issue #66). A
+# publisher started by hand from this manifest carries no such label, so /stop can't safely
+# auto-clear its pick ledger/Stream for it — see CLAUDE.md's WORKER-06 section.
+#
 # Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
 # locally-built image — the repo is private, so the package stays private too, pulled via the
 # ghcr-pull-secret ExternalSecret (fantasy-infra: overlays/production/externalsecrets.yaml).
