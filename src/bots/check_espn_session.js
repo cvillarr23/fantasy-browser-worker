@@ -36,7 +36,7 @@ async function checkEspnSession() {
     });
 
     logger.info(
-      `[Session Check] ESPN session is healthy — roster table rendered for league ${leagueId}, team ${teamId}.`,
+      `ESPN session is healthy — roster table rendered for league ${leagueId}, team ${teamId}.`,
     );
   } catch (error) {
     logger.error(error.message, { err: error });

@@ -13,6 +13,7 @@ const {
 } = require("./session_registry");
 const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { logger } = require("../telemetry/logger");
+const { updateContext } = require("../telemetry/context");
 const { withInstrumentation } = require("../telemetry/instrument");
 const { recordDraftPickClick } = require("../db/execution_log");
 const redis = require("redis");
@@ -221,12 +222,10 @@ function captureFailure(tracking, details) {
       `draft-pick-fail-${tracking}-${stamp}.json`,
     );
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    logger.error(
-      `[Draft Clicker][${tracking}] Failure context written to: ${file}`,
-    );
+    logger.error(`Failure context written to: ${file}`);
   } catch (captureError) {
     logger.error(
-      `[Draft Clicker][${tracking}] Could not capture failure context: ${captureError.message}`,
+      `Could not capture failure context: ${captureError.message}`,
       { err: captureError },
     );
   }
@@ -261,6 +260,10 @@ async function executeAutomatedDraftSelection(payload) {
     );
   }
   const teamId = requireTeamId(payload.team_id, tracking);
+  // Bound once here (mirroring connection.js's trackingId binding) so every subsequent log
+  // line in this transaction carries league/team context automatically via pino's mixin,
+  // instead of hand-interpolating it into each message.
+  updateContext({ leagueId, teamId });
   const playerId = requirePlayerId(payload.player_id, tracking);
   if (!targetName) {
     throw new PermanentError(
@@ -351,10 +354,9 @@ async function executeAutomatedDraftSelection(payload) {
       url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
     });
     registryRedis.on("error", (err) =>
-      logger.error(
-        `[Draft Clicker][${tracking}] Session registry Redis client error: ${err.message}`,
-        { err },
-      ),
+      logger.error(`Session registry Redis client error: ${err.message}`, {
+        err,
+      }),
     );
     try {
       await registryRedis.connect();
@@ -510,10 +512,9 @@ async function executeAutomatedDraftSelection(payload) {
           url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
         });
         rejectionRedis.on("error", (err) =>
-          logger.error(
-            `[Draft Clicker][${tracking}] Pick-rejection Redis client error: ${err.message}`,
-            { err },
-          ),
+          logger.error(`Pick-rejection Redis client error: ${err.message}`, {
+            err,
+          }),
         );
         try {
           await rejectionRedis.connect();
@@ -530,7 +531,7 @@ async function executeAutomatedDraftSelection(payload) {
           });
         } catch (publishErr) {
           logger.error(
-            `[Draft Clicker][${tracking}] Failed to publish pick rejection: ${publishErr.message}`,
+            `Failed to publish pick rejection: ${publishErr.message}`,
             { err: publishErr },
           );
         } finally {
@@ -590,7 +591,7 @@ async function executeAutomatedDraftSelection(payload) {
     }
   } catch (error) {
     logger.error(
-      `[Draft Clicker][${tracking}] Selection failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      `Selection failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
       { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {
