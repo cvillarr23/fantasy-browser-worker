@@ -91,4 +91,48 @@ async function recordDraftPickClick({
   }
 }
 
-module.exports = { recordExecution, recordDraftPickClick };
+// Per-negotiation confirmation for trade_bot.js's negotiateTradeProposal (WORKER-04/#4), same
+// rationale and never-throw contract as recordDraftPickClick: recordExecution/withInstrumentation
+// only knows "the trade_negotiations message succeeded or failed" as a whole, not which manager
+// or counter-offer it was for. counterOffer is stored as JSON text (jsonb column) so a Grafana
+// panel or ad-hoc query can inspect what was actually proposed, including on a dry-run.
+//
+// CROSS-REPO DEPENDENCY, same category as trade_bot.js's fetchRosterDeficits: offering_team_id,
+// counter_offer, and dry_run are NEW columns on execution_log, whose DDL lives in
+// fantasy-core-pipeline (this repo has no migrations of its own — see CLAUDE.md). They do not
+// exist there as of this change. Until that migration lands, every insert here fails — silently,
+// per this function's own never-throws contract, so there's no loud signal that it's happening.
+// Confirm the migration is in place before relying on this in production.
+async function recordTradeNegotiation({
+  leagueId,
+  season,
+  offeringTeamId,
+  counterOffer,
+  dryRun,
+  status,
+  errorMessage,
+}) {
+  try {
+    await pool.query(
+      `INSERT INTO execution_log (transaction_type, bot_name, status, error_message, league_id, season, offering_team_id, counter_offer, dry_run)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        "trade_negotiation",
+        "trade_bot",
+        status,
+        errorMessage || null,
+        leagueId || null,
+        season || null,
+        offeringTeamId || null,
+        counterOffer ? JSON.stringify(counterOffer) : null,
+        dryRun === null || dryRun === undefined ? null : dryRun,
+      ],
+    );
+  } catch (err) {
+    logger.error("[Execution Log] Failed to record trade negotiation outcome", {
+      err,
+    });
+  }
+}
+
+module.exports = { recordExecution, recordDraftPickClick, recordTradeNegotiation };

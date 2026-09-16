@@ -2,7 +2,7 @@ const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
-const { executeTradeEvaluation } = require("./bots/trade_bot");
+const { executeTradeEvaluation, negotiateTradeProposal } = require("./bots/trade_bot");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
 const { shutdownTelemetry } = require("./telemetry/init");
@@ -27,6 +27,10 @@ async function dispatch(queueName, payload) {
     case "trade_evaluations":
       logger.info("Invoking Trade Evaluation Engine...");
       return executeTradeEvaluation(payload);
+
+    case "trade_negotiations":
+      logger.info("Invoking Trade Negotiation Engine...");
+      return negotiateTradeProposal(payload);
 
     default:
       logger.warn(

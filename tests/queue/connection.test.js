@@ -65,11 +65,17 @@ describe("initializeQueueConsumer", () => {
     );
   });
 
-  it("registers all three target queues", async () => {
+  it("registers all target queues", async () => {
     const processor = jest.fn().mockResolvedValue(undefined);
     await initializeQueueConsumer(processor);
 
-    for (const queue of ["lineup_updates", "waiver_actions", "draft_targets"]) {
+    for (const queue of [
+      "lineup_updates",
+      "waiver_actions",
+      "draft_targets",
+      "trade_evaluations",
+      "trade_negotiations",
+    ]) {
       expect(channel.assertQueue).toHaveBeenCalledWith(queue, { durable: true });
       expect(channel.consumers[queue]).toBeInstanceOf(Function);
     }

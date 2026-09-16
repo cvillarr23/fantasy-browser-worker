@@ -1,12 +1,18 @@
 /* eslint-env browser */
 // The page.evaluate() callback below runs inside the browser page, not Node — document/window
 // are real globals there, hence the browser env for this file.
-const { createAuthenticatedSession } = require("./auth");
+const {
+  createAuthenticatedSession,
+  createSessionFromStoredState,
+} = require("./auth");
+const { captureDebugSnapshot } = require("./debug_capture");
 const {
   PermanentError,
   requirePlainObjectPayload,
   classifyHttpStatusError,
 } = require("../errors");
+const { completeWithFallback } = require("../lib/llm_client");
+const { recordTradeNegotiation } = require("../db/execution_log");
 const { logger } = require("../telemetry/logger");
 
 // Same cluster-DNS-default convention as OLLAMA_URL in src/lib/llm_client.js — verified against
@@ -35,14 +41,73 @@ function withRetryDelay(error) {
   return error;
 }
 
+function buildTradePortalUrl(leagueId, seasonId) {
+  return `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${seasonId}`;
+}
+
+// Cross-origin iframe hosting the entire "Fantasy Chat" widget (room list, message feed, compose
+// box) — confirmed live 2026-09-16 against a real league (see the plan's recon findings). Neither
+// a top-level page.locator() nor page.evaluate() can reach inside it; Playwright's frameLocator
+// is required.
+const CHAT_IFRAME_SELECTOR = "iframe.chat--container--iframe";
+
+/**
+ * Page-level scrape shared by scrapePendingTradeProposals (standalone read-only entrypoint) and
+ * negotiateTradeProposal (WORKER-04's queue entrypoint), so both draw on the same selectors
+ * instead of duplicating them. Assumes `page` is already navigated to the trade portal URL.
+ *
+ * The `.trade-container`/`.no-pending-trades`/`.trade-card-wrapper` selectors are still
+ * UNVERIFIED — recon 2026-09-16 confirmed the auth surface and the chat mechanism live, but found
+ * no pending trade in the test league to check these against. captureDebugSnapshot calls below
+ * exist so the first live run against a real trade can correct them from the captured DOM.
+ */
+async function scrapeTradePortalContent(page) {
+  await page.waitForSelector(".trade-container, .no-pending-trades", {
+    timeout: 10000,
+  });
+  await captureDebugSnapshot(page, "trade-portal-loaded");
+
+  const proposals = await page.evaluate(() => {
+    const tradeCards = document.querySelectorAll(".trade-card-wrapper");
+    if (tradeCards.length === 0) return "NO_PENDING_PROPOSALS";
+
+    return Array.from(tradeCards)
+      .map((card) => card.innerText.replace(/\s+/g, " ").trim())
+      .join(" | ");
+  });
+
+  // UNVERIFIED — recon pending: the chat widget is collapsed by default and its toggle's
+  // selector wasn't confirmed live (only its rough screen position was, via a coordinate click,
+  // which isn't something automation should rely on). Text-based, matching the role-locator
+  // lesson mock_draft.js already learned the hard way for a similarly ambiguous button.
+  let chatLog = "CHAT_LOG_UNAVAILABLE";
+  try {
+    await page
+      .getByText(/fantasy chat/i)
+      .first()
+      .click({ timeout: 5000 });
+    chatLog = await page
+      .frameLocator(CHAT_IFRAME_SELECTOR)
+      .locator("body")
+      .innerText({ timeout: 5000 });
+  } catch (chatError) {
+    logger.warn(
+      `[Trade Scraper] Could not read the league chat feed — leaving proposals-only: ${chatError.message}`,
+    );
+  }
+
+  return { proposals, chatLog };
+}
+
 /**
  * Automated Trade Proposal Scraper
- * Extracts unstructured transaction text to feed into the cloud LLM strategy brain.
+ * Extracts unstructured transaction text (plus recent league chat) to feed into the cloud LLM
+ * strategy brain.
  */
 async function scrapePendingTradeProposals() {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const currentYear = process.env.CURRENT_YEAR || "2026";
-  const tradeUrl = `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${currentYear}`;
+  const tradeUrl = buildTradePortalUrl(leagueId, currentYear);
 
   logger.info(
     `[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`,
@@ -50,31 +115,22 @@ async function scrapePendingTradeProposals() {
 
   let session = null;
   try {
-    session = await createAuthenticatedSession();
+    // Cookie-only auth (createAuthenticatedSession) shows ESPN's client-side "Log in Required"
+    // gate on a rendered page like this one — see docs/espn-reverse-engineering.md's auth-surface
+    // split — so prefer a real stored login session first, same as draft_room_dom.js.
+    session =
+      (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     await session.page.goto(tradeUrl, {
       waitUntil: "networkidle",
       timeout: 20000,
     });
 
-    // Wait for the main trade transaction layout overview component to render
-    await session.page.waitForSelector(".trade-container, .no-pending-trades", {
-      timeout: 10000,
-    });
-
-    // Extract raw block text entries directly from active elements to pass down to Claude over MCP
-    const proposalContentText = await session.page.evaluate(() => {
-      const tradeCards = document.querySelectorAll(".trade-card-wrapper");
-      if (tradeCards.length === 0) return "NO_PENDING_PROPOSALS";
-
-      return Array.from(tradeCards)
-        .map((card) => card.innerText.replace(/\s+/g, " ").trim())
-        .join(" | ");
-    });
+    const content = await scrapeTradePortalContent(session.page);
 
     logger.info(
-      `[Trade Scraper] Extraction loop finished cleanly. Payload: "${proposalContentText}"`,
+      `[Trade Scraper] Extraction loop finished cleanly. Payload: "${content.proposals}"`,
     );
-    return proposalContentText;
+    return content;
   } catch (error) {
     logger.error(
       `[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`,
@@ -82,6 +138,9 @@ async function scrapePendingTradeProposals() {
         err: error,
       },
     );
+    if (session && session.page) {
+      await captureDebugSnapshot(session.page, "trade-portal-failure");
+    }
     return null;
   } finally {
     if (session && session.browser) {
@@ -90,52 +149,251 @@ async function scrapePendingTradeProposals() {
   }
 }
 
-/** A queue message here is only useful once it names two non-overlapping sets of player ids
- * plus a season/week to score them against — anything short of that can never succeed on
- * redelivery, so it's rejected as a PermanentError before any network call is made. */
-function requireEvaluationPayload(payload) {
-  requirePlainObjectPayload(payload, "[Trade Evaluator]");
+const isNonEmptyIdArray = (value) =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every((id) => typeof id === "string" && id.trim() !== "");
 
+/** Shared by requireEvaluationPayload and requireNegotiationPayload: both need a non-overlapping
+ * incoming/outgoing player id pair plus a season/week, and this validation can never succeed on
+ * redelivery if it fails once, so both callers throw PermanentError with the given label. */
+function requireTradeIdFields(payload, label) {
   const { incoming_player_ids: incoming, outgoing_player_ids: outgoing, season, week } = payload;
-
-  const isNonEmptyIdArray = (value) =>
-    Array.isArray(value) &&
-    value.length > 0 &&
-    value.every((id) => typeof id === "string" && id.trim() !== "");
 
   if (!isNonEmptyIdArray(incoming)) {
     throw new PermanentError(
-      "[Trade Evaluator] incoming_player_ids must be a non-empty array of string player ids.",
+      `${label} incoming_player_ids must be a non-empty array of string player ids.`,
     );
   }
   if (!isNonEmptyIdArray(outgoing)) {
     throw new PermanentError(
-      "[Trade Evaluator] outgoing_player_ids must be a non-empty array of string player ids.",
+      `${label} outgoing_player_ids must be a non-empty array of string player ids.`,
     );
   }
   const overlap = incoming.filter((id) => outgoing.includes(id));
   if (overlap.length > 0) {
     throw new PermanentError(
-      `[Trade Evaluator] player_id(s) ${overlap.join(", ")} cannot appear on both sides of a trade.`,
+      `${label} player_id(s) ${overlap.join(", ")} cannot appear on both sides of a trade.`,
     );
   }
   if (!Number.isInteger(season)) {
-    throw new PermanentError("[Trade Evaluator] season must be an integer.");
+    throw new PermanentError(`${label} season must be an integer.`);
   }
   if (!Number.isInteger(week)) {
-    throw new PermanentError("[Trade Evaluator] week must be an integer.");
+    throw new PermanentError(`${label} week must be an integer.`);
   }
 
   return { incoming, outgoing, season, week };
 }
 
+/** A queue message here is only useful once it names two non-overlapping sets of player ids
+ * plus a season/week to score them against — anything short of that can never succeed on
+ * redelivery, so it's rejected as a PermanentError before any network call is made. */
+function requireEvaluationPayload(payload) {
+  requirePlainObjectPayload(payload, "[Trade Evaluator]");
+  return requireTradeIdFields(payload, "[Trade Evaluator]");
+}
+
+/** Same id-pair/season/week validation as requireEvaluationPayload, plus offering_team_id —
+ * negotiateTradeProposal needs it to know which manager's chat DM to open, so a message missing
+ * it can never succeed on redelivery either. */
+function requireNegotiationPayload(payload) {
+  requirePlainObjectPayload(payload, "[Trade Negotiator]");
+  const fields = requireTradeIdFields(payload, "[Trade Negotiator]");
+
+  const { offering_team_id: offeringTeamId } = payload;
+  if (typeof offeringTeamId !== "string" || offeringTeamId.trim() === "") {
+    throw new PermanentError(
+      "[Trade Negotiator] offering_team_id must be a non-empty string.",
+    );
+  }
+
+  return { ...fields, offeringTeamId };
+}
+
 /** Maps a POST /v1/trade/evaluate failure to PermanentError vs plain Error, mirroring
  * espn_api.js's submitWaiverClaim convention: a 4xx (except 429) means this exact payload is
  * doomed (trade.py's 422 covers duplicate/overlapping ids), so redelivery can never help; a 429,
- * 5xx, or network/timeout failure is transient and should requeue as-is. */
-function classifyEvaluateError(status, body) {
-  const message = `[Trade Evaluator] POST /v1/trade/evaluate failed with HTTP ${status} — ${body.slice(0, 500)}`;
+ * 5xx, or network/timeout failure is transient and should requeue as-is. `label` defaults to this
+ * function's original caller (executeTradeEvaluation); postTradeEvaluation's other caller,
+ * negotiateTradeProposal, passes its own so a failure there isn't mislabeled "[Trade Evaluator]"
+ * in logs even though it happened on the trade_negotiations queue. */
+function classifyEvaluateError(status, body, label = "[Trade Evaluator]") {
+  const message = `${label} POST /v1/trade/evaluate failed with HTTP ${status} — ${body.slice(0, 500)}`;
   return withRetryDelay(classifyHttpStatusError(status, message));
+}
+
+/** The actual POST /v1/trade/evaluate call, shared by executeTradeEvaluation (the
+ * "trade_evaluations" queue entrypoint) and negotiateTradeProposal (WORKER-04's grounding-data
+ * fetch) — pulled out so the negotiator doesn't duplicate this fetch/classify logic. */
+async function postTradeEvaluation({ incoming, outgoing, season, week }, label = "[Trade Evaluator]") {
+  let response;
+  try {
+    response = await fetch(`${CORE_PIPELINE_URL}/v1/trade/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        incoming_player_ids: incoming,
+        outgoing_player_ids: outgoing,
+        season,
+        week,
+      }),
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
+    });
+  } catch (networkError) {
+    // fetch itself throws on a network failure or an aborted/timed-out request — both transient.
+    // Distinct causes (DNS/ECONNREFUSED vs a timeout AbortError) collapse to the same Error shape
+    // here, but `cause` keeps the original error/stack available to anyone inspecting the reject.
+    throw withRetryDelay(
+      new Error(
+        `${label} Request to ${CORE_PIPELINE_URL} failed: ${networkError.message}`,
+        { cause: networkError },
+      ),
+    );
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw classifyEvaluateError(response.status, body, label);
+  }
+
+  try {
+    return await response.json();
+  } catch (parseError) {
+    // A 200 with a truncated/empty/non-JSON body (proxy hiccup, ingress default-backend page
+    // mid-rollout) must not bypass classification as an unhandled SyntaxError — treat it as the
+    // same transient condition an ordinary 5xx would be.
+    throw withRetryDelay(
+      new Error(
+        `${label} Response body was not valid JSON: ${parseError.message}`,
+        { cause: parseError },
+      ),
+    );
+  }
+}
+
+/** Maps a GET /v1/league/roster-deficits failure the same way classifyEvaluateError does for
+ * /v1/trade/evaluate: a 4xx (except 429) means this league/season can never resolve on
+ * redelivery, everything else is transient. */
+function classifyRosterDeficitsError(status, body) {
+  const message = `[Trade Negotiator] GET /v1/league/roster-deficits failed with HTTP ${status} — ${body.slice(0, 500)}`;
+  return withRetryDelay(classifyHttpStatusError(status, message));
+}
+
+/** Grounding data for negotiateTradeProposal's LLM prompt: which roster positions a league's
+ * teams are thin at, so the model can judge leverage instead of guessing. New endpoint on
+ * fantasy-core-pipeline (not yet built there as of WORKER-04) — same REST convention as
+ * postTradeEvaluation rather than a new MCP client, per the decision recorded in the plan. */
+async function fetchRosterDeficits({ leagueId, season }) {
+  const url = `${CORE_PIPELINE_URL}/v1/league/roster-deficits?leagueId=${encodeURIComponent(leagueId)}&season=${encodeURIComponent(season)}`;
+
+  let response;
+  try {
+    response = await fetch(url, { signal: AbortSignal.timeout(evaluateTimeoutMs()) });
+  } catch (networkError) {
+    throw withRetryDelay(
+      new Error(
+        `[Trade Negotiator] Request to ${CORE_PIPELINE_URL} failed: ${networkError.message}`,
+        { cause: networkError },
+      ),
+    );
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw classifyRosterDeficitsError(response.status, body);
+  }
+
+  try {
+    return await response.json();
+  } catch (parseError) {
+    throw withRetryDelay(
+      new Error(
+        `[Trade Negotiator] Response body was not valid JSON: ${parseError.message}`,
+        { cause: parseError },
+      ),
+    );
+  }
+}
+
+/** Builds the system prompt for negotiateTradeProposal's completeWithFallback call.
+ * completeWithFallback (src/lib/llm_client.js) has no native JSON-mode opts field, so strict-JSON
+ * output can only be enforced by instruction — parseNegotiationResponse below is the other half
+ * of that contract, defensively handling a model that ignores it anyway. */
+function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog }) {
+  return [
+    "You are a fantasy football trade negotiation assistant. You will be given a pending trade",
+    "proposal, recent league chat, this league's roster deficits by team, and a VORP-based",
+    "evaluation of the proposed trade. Use the roster deficits to judge how much leverage the",
+    "offering manager has (a team with a severe deficit at a position is more likely to accept a",
+    "lopsided deal to fill it), and use the evaluation's delta_vorp to judge whether the proposal",
+    "already favors us or needs to be countered.",
+    "",
+    "Respond with STRICT JSON ONLY — no markdown code fences, no commentary before or after — in",
+    'exactly this shape: {"counter_offer": {"incoming_player_ids": ["..."], ' +
+      '"outgoing_player_ids": ["..."]}, "message": "..."}.',
+    "counter_offer.incoming_player_ids and counter_offer.outgoing_player_ids are the player ids",
+    "for the counter-trade you propose. message is a natural-language message to send the",
+    "offering manager persuading them to accept it.",
+    "",
+    `Roster deficits: ${JSON.stringify(deficits)}`,
+    `Trade evaluation: ${JSON.stringify(evaluation)}`,
+    `Pending trade proposal(s): ${proposals}`,
+    `Recent league chat: ${chatLog}`,
+  ].join("\n");
+}
+
+// Strips a ```json ... ``` or ``` ... ``` fence some models wrap JSON output in despite being
+// told not to — parseNegotiationResponse tries the raw text first, this is only a fallback.
+function stripCodeFence(text) {
+  const match = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1] : text;
+}
+
+/** Defensive counterpart to buildNegotiationSystemPrompt's strict-JSON instruction: a model can
+ * ignore that instruction, so this parses defensively and throws a plain (non-permanent) Error on
+ * any failure — a different attempt or provider might produce a parseable response, so this is a
+ * flaky-output problem for connection.js to requeue, not a doomed-payload PermanentError. */
+function parseNegotiationResponse(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stripCodeFence(text));
+  } catch (parseError) {
+    throw new Error(
+      `[Trade Negotiator] LLM response was not valid JSON: ${parseError.message}`,
+      { cause: parseError },
+    );
+  }
+
+  const counterOffer = parsed && parsed.counter_offer;
+  if (!counterOffer || typeof counterOffer !== "object") {
+    throw new Error(
+      "[Trade Negotiator] LLM response missing a counter_offer object.",
+    );
+  }
+  if (!isNonEmptyIdArray(counterOffer.incoming_player_ids)) {
+    throw new Error(
+      "[Trade Negotiator] LLM response's counter_offer.incoming_player_ids must be a non-empty array of string player ids.",
+    );
+  }
+  if (!isNonEmptyIdArray(counterOffer.outgoing_player_ids)) {
+    throw new Error(
+      "[Trade Negotiator] LLM response's counter_offer.outgoing_player_ids must be a non-empty array of string player ids.",
+    );
+  }
+  if (typeof parsed.message !== "string" || parsed.message.trim() === "") {
+    throw new Error(
+      "[Trade Negotiator] LLM response missing a non-empty message string.",
+    );
+  }
+
+  return {
+    counterOffer: {
+      incomingPlayerIds: counterOffer.incoming_player_ids,
+      outgoingPlayerIds: counterOffer.outgoing_player_ids,
+    },
+    message: parsed.message,
+  };
 }
 
 /**
@@ -156,50 +414,8 @@ async function executeTradeEvaluation(payload) {
       `outgoing player(s) for season ${season} week ${week}...`,
   );
 
-  let response;
-  try {
-    response = await fetch(`${CORE_PIPELINE_URL}/v1/trade/evaluate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        incoming_player_ids: incoming,
-        outgoing_player_ids: outgoing,
-        season,
-        week,
-      }),
-      signal: AbortSignal.timeout(evaluateTimeoutMs()),
-    });
-  } catch (networkError) {
-    // fetch itself throws on a network failure or an aborted/timed-out request — both transient.
-    // Distinct causes (DNS/ECONNREFUSED vs a timeout AbortError) collapse to the same Error shape
-    // here, but `cause` keeps the original error/stack available to anyone inspecting the reject.
-    throw withRetryDelay(
-      new Error(
-        `[Trade Evaluator][${tracking}] Request to ${CORE_PIPELINE_URL} failed: ${networkError.message}`,
-        { cause: networkError },
-      ),
-    );
-  }
+  const result = await postTradeEvaluation({ incoming, outgoing, season, week });
 
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw classifyEvaluateError(response.status, body);
-  }
-
-  let result;
-  try {
-    result = await response.json();
-  } catch (parseError) {
-    // A 200 with a truncated/empty/non-JSON body (proxy hiccup, ingress default-backend page
-    // mid-rollout) must not bypass classification as an unhandled SyntaxError — treat it as the
-    // same transient condition an ordinary 5xx would be.
-    throw withRetryDelay(
-      new Error(
-        `[Trade Evaluator][${tracking}] Response body was not valid JSON: ${parseError.message}`,
-        { cause: parseError },
-      ),
-    );
-  }
   logger.info(
     `[Trade Evaluator][${tracking}] delta_vorp=${result.delta_vorp} ` +
       `(incoming=${result.incoming_total}, outgoing=${result.outgoing_total})` +
@@ -210,9 +426,209 @@ async function executeTradeEvaluation(payload) {
   return result;
 }
 
+// Same resolver shape as draft_clicker.js/lineup_bot.js/waiver_sniper.js: env DRY_RUN, explicit
+// 0/false/no (case-insensitive) means live. Defaults TRUE — this bot's live action is a real
+// message into a real human's inbox, at least as consequential as a live draft pick or waiver
+// claim, so it gets at least as conservative a default as those, never lineup_bot.js's
+// default-false.
+function resolveDryRun() {
+  const raw = process.env.DRY_RUN;
+  if (raw === undefined || raw === "") {
+    return { dryRun: true, defaulted: true };
+  }
+  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
+}
+
+/** Maps an offering_team_id to the manager's display name so the chat DM room (keyed by name in
+ * the UI, not id — see the plan's recon findings) can be opened. Reads it from the host-page
+ * "Opposing Teams" list: recon's accessibility-tree dump confirmed a real `a[href="/football/team
+ * ?leagueId=...&teamId=<id>"]` per team, each wrapping the team name and manager name as two
+ * stacked lines (e.g. "Michael Penix come back" / "Emily Wentorf") — the last non-empty line is
+ * the manager's name, which is what the chat room list is keyed by.
+ *
+ * Matches the href's `teamId` query param exactly (via URL/URLSearchParams), not a CSS substring
+ * selector — `a[href*="teamId=7"]` would also match `teamId=17`/`teamId=70`, and would even match
+ * the unrelated "Propose Trade" link (`/football/team/trade?...&teamId=<id>&...`, confirmed live —
+ * see the plan), which carries the *same* teamId but isn't a name at all. Restricting to
+ * pathname `/football/team` rules that link out too. Exact-DOM-rendering of `.innerText()` here
+ * (vs. what the accessibility tree showed) is still unverified — best-effort, not guaranteed.
+ */
+async function resolveManagerDisplayName(page, teamId) {
+  const text = await page
+    .evaluate((wantedTeamId) => {
+      const links = Array.from(document.querySelectorAll('a[href*="teamId="]'));
+      const match = links.find((a) => {
+        try {
+          const url = new URL(a.getAttribute("href"), window.location.href);
+          return (
+            url.pathname === "/football/team" && url.searchParams.get("teamId") === wantedTeamId
+          );
+        } catch {
+          return false;
+        }
+      });
+      return match ? match.innerText : null;
+    }, teamId)
+    .catch(() => null);
+  if (!text) return null;
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.length > 0 ? lines[lines.length - 1] : null;
+}
+
+/**
+ * Queue-shaped entrypoint for WORKER-04/#4: scrapes the pending trade + league chat, grounds it
+ * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, asks the LLM (via
+ * WORKER-12's completeWithFallback) for a structured counter-offer + message, and — unless
+ * DRY_RUN is set — pastes that message into the offering manager's ESPN chat DM.
+ */
+async function negotiateTradeProposal(payload) {
+  const { incoming, outgoing, season, week, offeringTeamId } =
+    requireNegotiationPayload(payload);
+  const tracking = payload.tracking_id ?? "no-tracking-id";
+  const leagueId = process.env.ESPN_LEAGUE_ID;
+
+  logger.info(
+    `[Trade Negotiator][${tracking}] Negotiating trade from team ${offeringTeamId} ` +
+      `for season ${season} week ${week}...`,
+  );
+
+  let session = null;
+  // null = never reached resolveDryRun() (failed before we knew); true/false once it has.
+  // Keeping this three-valued (rather than defaulting to false) matters because dry_run is a
+  // safety-relevant field in execution_log — collapsing "unknown" into "false" would make a
+  // pre-scrape failure indistinguishable from a genuine live attempt that failed.
+  let dryRun = null;
+  let counterOffer;
+  let status = "failure";
+  let errorMessage;
+  try {
+    session =
+      (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
+    await session.page.goto(buildTradePortalUrl(leagueId, season), {
+      waitUntil: "networkidle",
+      timeout: 20000,
+    });
+
+    const { proposals, chatLog } = await scrapeTradePortalContent(session.page);
+
+    const [deficits, evaluation] = await Promise.all([
+      fetchRosterDeficits({ leagueId, season }),
+      postTradeEvaluation({ incoming, outgoing, season, week }, "[Trade Negotiator]"),
+    ]);
+
+    const systemPrompt = buildNegotiationSystemPrompt({
+      deficits,
+      evaluation,
+      proposals,
+      chatLog,
+    });
+    const { text } = await completeWithFallback(
+      "Propose a counter-offer and negotiation message for the pending trade described above.",
+      { systemPrompt, callSite: "trade_negotiation" },
+    );
+    const negotiation = parseNegotiationResponse(text);
+    counterOffer = negotiation.counterOffer;
+
+    ({ dryRun } = resolveDryRun());
+    if (dryRun) {
+      logger.info(
+        `[Trade Negotiator][${tracking}] DRY_RUN set — would send counter-offer ` +
+          `${JSON.stringify(counterOffer)} message: '${negotiation.message}'`,
+      );
+      await captureDebugSnapshot(session.page, "trade-negotiation-dry-run");
+      status = "skipped_dry_run";
+      return negotiation;
+    }
+
+    const managerName = await resolveManagerDisplayName(session.page, offeringTeamId);
+    if (!managerName) {
+      // offering_team_id doesn't map to any team link on the page — no amount of redelivery of
+      // this exact payload fixes that (PermanentError, not a retryable Error).
+      throw new PermanentError(
+        `[Trade Negotiator][${tracking}] Could not resolve a manager name for offering_team_id ${offeringTeamId}.`,
+      );
+    }
+
+    // UNVERIFIED — recon pending (see plan): opening the chat widget and selecting a DM room by
+    // clicking the manager's name was confirmed live at a UI level, but not the exact selector,
+    // since the widget's toggle position was only confirmed by coordinate, not a stable locator.
+    await session.page
+      .getByText(/fantasy chat/i)
+      .first()
+      .click({ timeout: 5000 })
+      .catch(() => {});
+    const chatFrame = session.page.frameLocator(CHAT_IFRAME_SELECTOR);
+    await chatFrame.getByText(managerName, { exact: false }).first().click({ timeout: 5000 });
+    await captureDebugSnapshot(session.page, "trade-chat-before-send");
+
+    const messageBox = chatFrame.getByPlaceholder("Message");
+    await messageBox.click();
+    await messageBox.fill(negotiation.message);
+    await chatFrame.getByRole("button", { name: "Send" }).click();
+
+    // Best-effort confirmation, not a hard verify — if the feed doesn't show the sent text within
+    // the timeout, log a caveat rather than failing a message that may well have landed anyway
+    // (same soft-verify posture as waiver_sniper.js's post-submit confirmation).
+    const posted = await chatFrame
+      .getByText(negotiation.message, { exact: false })
+      .first()
+      .waitFor({ state: "visible", timeout: 5000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!posted) {
+      logger.warn(
+        `[Trade Negotiator][${tracking}] Could not confirm the message appeared in the chat feed — it may still have sent.`,
+      );
+    }
+    await captureDebugSnapshot(session.page, "trade-chat-after-send");
+
+    logger.info(`[Trade Negotiator][${tracking}] Counter-offer message sent.`);
+    status = "success";
+    return negotiation;
+  } catch (error) {
+    errorMessage = error.message;
+    if (session && session.page) {
+      await captureDebugSnapshot(session.page, "trade-negotiation-failure");
+    }
+    // Every throw site above this point — session/navigation, the scrape, completeWithFallback
+    // exhausting every provider, a flaky non-JSON LLM response, a chat-DOM timeout — is a novel
+    // failure mode this function introduces beyond the two REST calls that already opt into
+    // withRetryDelay individually. Without this, any of them nacks with an instant requeue under
+    // connection.js's channel-wide prefetch(1), hot-looping a fresh Chromium launch exactly the
+    // way PR #42 already fixed once for SessionExpiredError — and since the trade-card/chat
+    // selectors are still UNVERIFIED (see scrapeTradePortalContent), a selector miss on the first
+    // live run is a realistic trigger, not just a rare edge case.
+    if (!error.permanent && error.retryDelayMs === undefined) {
+      withRetryDelay(error);
+    }
+    throw error;
+  } finally {
+    await recordTradeNegotiation({
+      leagueId,
+      season,
+      offeringTeamId,
+      counterOffer,
+      dryRun,
+      status,
+      errorMessage,
+    });
+    if (session && session.browser) {
+      await session.browser.close();
+    }
+  }
+}
+
 module.exports = {
   scrapePendingTradeProposals,
   executeTradeEvaluation,
   requireEvaluationPayload,
   classifyEvaluateError,
+  requireNegotiationPayload,
+  fetchRosterDeficits,
+  buildNegotiationSystemPrompt,
+  parseNegotiationResponse,
+  negotiateTradeProposal,
 };
