@@ -87,13 +87,13 @@ async function waitForLoginSuccess(page, context) {
           }
         }
         logger.info(
-          "[Remote Login] Auth cookies present but roster page didn't confirm login yet, still polling...",
+          "Auth cookies present but roster page didn't confirm login yet, still polling...",
         );
       } catch (err) {
         // Transient nav errors are expected here too (redirects, interstitial pages) — log and
         // keep polling rather than failing on the first one.
         logger.info(
-          `[Remote Login] Roster confirmation check failed, still polling: ${err.message}`,
+          `Roster confirmation check failed, still polling: ${err.message}`,
         );
       }
     }
@@ -115,7 +115,7 @@ function saveSessionStateToOpenBao(storageState) {
   const tokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token";
 
   logger.info(
-    `[Remote Login] Authenticating to OpenBao via Kubernetes auth (role=${process.env.OPENBAO_K8S_ROLE || "fantasy-browser-worker"})...`,
+    `Authenticating to OpenBao via Kubernetes auth (role=${process.env.OPENBAO_K8S_ROLE || "fantasy-browser-worker"})...`,
   );
   try {
     const jwt = fs.readFileSync(tokenPath, "utf8");
@@ -133,7 +133,7 @@ function saveSessionStateToOpenBao(storageState) {
     ]);
   } catch (err) {
     logger.error(
-      `[Remote Login] Failed to write session state to OpenBao at "${OPENBAO_ESPN_SESSION_STATE_PATH}" — ` +
+      `Failed to write session state to OpenBao at "${OPENBAO_ESPN_SESSION_STATE_PATH}" — ` +
         "is OpenBao's Kubernetes auth method + a role/policy for this ServiceAccount provisioned yet? " +
         `(${err.message})`,
       { err },
@@ -141,7 +141,7 @@ function saveSessionStateToOpenBao(storageState) {
     throw err;
   }
   logger.info(
-    `[Remote Login] Saved full session state to OpenBao at "${OPENBAO_ESPN_SESSION_STATE_PATH}".`,
+    `Saved full session state to OpenBao at "${OPENBAO_ESPN_SESSION_STATE_PATH}".`,
   );
 }
 
@@ -153,7 +153,7 @@ function saveSessionStateToOpenBao(storageState) {
  */
 async function performLoginAndSaveState(page, context) {
   logger.info(
-    "[Remote Login] Navigating to the ESPN login page — drive this from your phone over VNC.",
+    "Navigating to the ESPN login page — drive this from your phone over VNC.",
   );
   await page.goto("https://www.espn.com/login", {
     waitUntil: "load",
@@ -166,9 +166,7 @@ async function performLoginAndSaveState(page, context) {
       `[Remote Login] Timed out after ${LOGIN_WAIT_TIMEOUT_MS}ms waiting for a successful login.`,
     );
   }
-  logger.info(
-    "[Remote Login] Login detected — roster page rendered successfully.",
-  );
+  logger.info("Login detected — roster page rendered successfully.");
 
   const storageState = await context.storageState();
   saveSessionStateToOpenBao(storageState);

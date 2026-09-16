@@ -110,9 +110,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
         runWithContext({ queueName: queue }, async () => {
           if (msg !== null) {
             const payloadString = msg.content.toString();
-            logger.info(
-              `[Queue Bridge] Inbound message captured from queue "${queue}"`,
-            );
+            logger.info(`Inbound message captured from queue "${queue}"`);
 
             // Malformed JSON can never succeed on retry — requeuing it would redeliver the same
             // unparseable message forever, permanently blocking this queue under prefetch(1).
@@ -120,10 +118,9 @@ async function initializeQueueConsumer(messageProcessorCallback) {
             try {
               parsedPayload = JSON.parse(payloadString);
             } catch (parseError) {
-              logger.error(
-                "[Queue Bridge] Discarding unparseable message (not requeued)",
-                { err: parseError },
-              );
+              logger.error("Discarding unparseable message (not requeued)", {
+                err: parseError,
+              });
               channel.nack(msg, false, false);
               return;
             }
@@ -143,13 +140,12 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               // Acknowledge transaction safely strictly AFTER execution finishes cleanly
               channel.ack(msg);
               logger.info(
-                `[Queue Bridge] Transaction acknowledged cleanly for message ID: ${msg.fields.deliveryTag}`,
+                `Transaction acknowledged cleanly for message ID: ${msg.fields.deliveryTag}`,
               );
             } catch (error) {
-              logger.error(
-                "[Queue Bridge] Execution error encountered handling payload",
-                { err: error },
-              );
+              logger.error("Execution error encountered handling payload", {
+                err: error,
+              });
 
               // A permanent error can never succeed on redelivery, so requeuing it would redeliver the
               // same doomed message forever with no backoff — and because prefetch is channel-wide,
@@ -157,7 +153,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               // unparseable JSON is dropped above.
               if (error && error.permanent) {
                 logger.error(
-                  `[Queue Bridge] Permanent failure on message ID ${msg.fields.deliveryTag} — ` +
+                  `Permanent failure on message ID ${msg.fields.deliveryTag} — ` +
                     "discarding (not requeued). Fix the payload or configuration and republish.",
                 );
                 channel.nack(msg, false, false);
@@ -172,7 +168,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               // — blocks every consumer on this channel until someone intervenes (PR #42 review).
               if (typeof error?.retryDelayMs === "number" && error.retryDelayMs > 0) {
                 logger.info(
-                  `[Queue Bridge] Delaying ${error.retryDelayMs}ms before re-queuing message ID ` +
+                  `Delaying ${error.retryDelayMs}ms before re-queuing message ID ` +
                     `${msg.fields.deliveryTag} (${error.name || "Error"}) — avoids hot-looping ` +
                     "against a condition that a fixed backoff, not instant redelivery, should wait out.",
                 );
@@ -183,7 +179,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
 
               // Re-queue message if processing fails due to unexpected transient errors
               logger.info(
-                `[Queue Bridge] Rejecting message ID ${msg.fields.deliveryTag}. Triggering cluster re-queue logic...`,
+                `Rejecting message ID ${msg.fields.deliveryTag}. Triggering cluster re-queue logic...`,
               );
               channel.nack(msg, false, true);
             }

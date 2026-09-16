@@ -26,6 +26,7 @@ const {
 } = require("./session_registry");
 const redis = require("redis");
 const { logger } = require("../telemetry/logger");
+const { updateContext } = require("../telemetry/context");
 const { withInstrumentation } = require("../telemetry/instrument");
 
 const REDIS_HOST =
@@ -320,7 +321,7 @@ async function ingestPickEvent(redisClient, rawEvent, state) {
       // already-published pick.
       if (decision.action !== "duplicate") {
         logger.warn(
-          `[Draft Sync] Dropped ${decision.action} pick (${identity}): ${decision.reason}`,
+          `Dropped ${decision.action} pick (${identity}): ${decision.reason}`,
           {
             component: "draft_ingest",
             decision: decision.action,
@@ -378,7 +379,7 @@ async function ingestPickEvent(redisClient, rawEvent, state) {
       (state.health.published_by_source[rawEvent.source] || 0) + 1;
 
     logger.info(
-      `[Draft Sync] ${decision.action === "correct" ? "Corrected" : "Published"} pick ` +
+      `${decision.action === "correct" ? "Corrected" : "Published"} pick ` +
         `#${decision.event.pick_number} (${rawEvent.source}): player ${decision.event.player_id} ` +
         `-> team ${decision.event.team_id}`,
       {
@@ -442,13 +443,13 @@ async function seedLedgerFromBoard(redisClient, state) {
     }
     state.health.seeded_from_board = seeded;
     logger.info(
-      `[Draft Sync] Seeded ledger with ${seeded} already-published pick(s) from ${ledgerKey} ` +
+      `Seeded ledger with ${seeded} already-published pick(s) from ${ledgerKey} ` +
         `(highest pick #${state.ledger.highestPickNumber ?? "none"}).`,
       { component: "draft_ingest", seeded },
     );
   } catch (err) {
     logger.error(
-      `[Draft Sync] Could not seed ledger from ${ledgerKey} — starting cold, which risks ` +
+      `Could not seed ledger from ${ledgerKey} — starting cold, which risks ` +
         `re-publishing picks already on the board: ${err.message}`,
       { component: "draft_ingest", err },
     );
@@ -499,14 +500,14 @@ async function fetchDraftDetail(context, state) {
   // response object that can't produce .text() (or any other capture failure) must never
   // block the actual mDraftDetail read this function exists for.
   try {
-    logger.debug(`[Draft Sync] REST response: mDraftDetail (HTTP ${response.status()})`, {
+    logger.debug(`REST response: mDraftDetail (HTTP ${response.status()})`, {
       component: "draft_rest_capture",
       url: buildDraftDetailUrl(state.leagueId, state.seasonId),
       status: response.status(),
       body: await response.text(),
     });
   } catch (err) {
-    logger.debug(`[Draft Sync] mDraftDetail REST capture failed: ${err.message}`, {
+    logger.debug(`mDraftDetail REST capture failed: ${err.message}`, {
       component: "draft_rest_capture", err,
     });
   }
@@ -587,14 +588,14 @@ async function fetchDraftTotals(context, state) {
     // from the outer one below, which must only ever fire for a genuine mSettings/mTeam
     // failure, not a capture-logging issue).
     try {
-      logger.debug(`[Draft Sync] REST response: mSettings/mTeam (HTTP ${response.status()})`, {
+      logger.debug(`REST response: mSettings/mTeam (HTTP ${response.status()})`, {
         component: "draft_rest_capture",
         url: buildLeagueSettingsUrl(state.leagueId, state.seasonId),
         status: response.status(),
         body: await response.text(),
       });
     } catch (captureErr) {
-      logger.debug(`[Draft Sync] mSettings/mTeam REST capture failed: ${captureErr.message}`, {
+      logger.debug(`mSettings/mTeam REST capture failed: ${captureErr.message}`, {
         component: "draft_rest_capture", err: captureErr,
       });
     }
@@ -617,7 +618,7 @@ async function fetchDraftTotals(context, state) {
     }
     const totalExpectedPicks = teamCount * rosterSlotsPerTeam;
     logger.info(
-      `[Draft Sync] Learned expected total picks: ${teamCount} teams x ` +
+      `Learned expected total picks: ${teamCount} teams x ` +
         `${rosterSlotsPerTeam} roster slots = ${totalExpectedPicks}.`,
       {
         component: "draft_ingest",
@@ -633,7 +634,7 @@ async function fetchDraftTotals(context, state) {
     // caller preserves any total already learned earlier, and the STATE 2 completion frame (plus
     // the reconnect cap as an ultimate bound) still governs terminal detection either way.
     logger.warn(
-      `[Draft Sync] Could not learn expected total picks: ${err.message}`,
+      `Could not learn expected total picks: ${err.message}`,
       { component: "draft_ingest", err },
     );
     return null;
@@ -660,12 +661,12 @@ async function loadPlayerPool(context, state) {
     });
     state.playerPool = new Map(players.map((p) => [String(p.id), p]));
     logger.info(
-      `[Draft Sync] Loaded player pool: ${state.playerPool.size} players.`,
+      `Loaded player pool: ${state.playerPool.size} players.`,
       { component: "draft_ingest", player_count: state.playerPool.size },
     );
   } catch (err) {
     logger.warn(
-      `[Draft Sync] Could not load player pool — suggested picks will carry only a player_id ` +
+      `Could not load player pool — suggested picks will carry only a player_id ` +
         `until this succeeds: ${err.message}`,
       { component: "draft_ingest", err },
     );
@@ -694,7 +695,7 @@ async function reconcileFromRest(context, redisClient, state) {
     if (err instanceof PermanentError) {
       state.permanentError = err;
     }
-    logger.error(`[Draft Sync] REST reconciliation failed: ${err.message}`, {
+    logger.error(`REST reconciliation failed: ${err.message}`, {
       component: "draft_ingest",
       source: "rest",
       err,
@@ -725,7 +726,7 @@ async function handleSelectedFrame(parsed, redisClient, state) {
     await ingestPickEvent(redisClient, event, state);
   } catch (err) {
     logger.error(
-      `[Draft Sync] Failed to publish WS pick event: ${err.message}`,
+      `Failed to publish WS pick event: ${err.message}`,
       {
         component: "draft_ingest",
         source: "ws",
@@ -766,7 +767,7 @@ async function handleAutosuggestFrame(parsed, redisClient, state) {
     );
   } catch (err) {
     logger.error(
-      `[Draft Sync] Failed to publish suggested pick: ${err.message}`,
+      `Failed to publish suggested pick: ${err.message}`,
       {
         component: "draft_ingest",
         source: "ws",
@@ -796,7 +797,7 @@ async function handleSelectingFrame(parsed, redisClient, state) {
     );
   } catch (err) {
     logger.error(
-      `[Draft Sync] Failed to publish on-the-clock team: ${err.message}`,
+      `Failed to publish on-the-clock team: ${err.message}`,
       {
         component: "draft_ingest",
         source: "ws",
@@ -827,7 +828,7 @@ async function handleAutodraftFrame(parsed, redisClient, state) {
     );
   } catch (err) {
     logger.error(
-      `[Draft Sync] Failed to publish autodraft state: ${err.message}`,
+      `Failed to publish autodraft state: ${err.message}`,
       {
         component: "draft_ingest",
         source: "ws",
@@ -883,7 +884,7 @@ async function handleDomRecords(records, redisClient, state, meta) {
       if (!known && decision.action === "publish") newPicks += 1;
     } catch (err) {
       logger.error(
-        `[Draft Sync] Failed to publish DOM pick event: ${err.message}`,
+        `Failed to publish DOM pick event: ${err.message}`,
         {
           component: "draft_ingest",
           source: "dom",
@@ -901,7 +902,7 @@ async function handleDomRecords(records, redisClient, state, meta) {
     // this line never appears in a live draft, the WS tier was sufficient on its own; if it
     // appears often, the socket is being evicted more than expected and that's worth knowing.
     logger.warn(
-      `[Draft Sync] DOM tier recovered ${newPicks} pick(s) the WebSocket never delivered ` +
+      `DOM tier recovered ${newPicks} pick(s) the WebSocket never delivered ` +
         `(trigger=${meta.trigger}, strategy=${meta.matched_strategy}).`,
       {
         component: "draft_ingest",
@@ -959,7 +960,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
   // openSockets/lastActivityAt) is recreated every time this is called, including from the
   // context.on("page", ...) reassignment below — a page that never opens a websocket of its own
   // leaves this handle's isDead() clock silently running from here with no other trace of it.
-  logger.debug("[Draft Sync] attachDraftListeners: new handle created.", {
+  logger.debug("attachDraftListeners: new handle created.", {
     component: "draft_ws",
     page_url: page.url(),
   });
@@ -972,14 +973,14 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       // NOT touch openSockets/lastActivityAt/state.health.ws.*, or its own reconnect churn masks
       // a genuinely dead draft-room socket forever (confirmed root cause, see this function's
       // header comment and isDraftRoomSocketUrl's).
-      logger.debug(`[Draft Sync] Ignoring non-draft-room WebSocket: ${url}`, {
+      logger.debug(`Ignoring non-draft-room WebSocket: ${url}`, {
         component: "draft_ws",
       });
       return;
     }
 
     const socketId = (state.health.ws.sockets_opened += 1);
-    logger.info(`[Draft Sync] WebSocket opened: ${url}`, {
+    logger.info(`WebSocket opened: ${url}`, {
       component: "draft_ws",
       socket_id: socketId,
     });
@@ -999,7 +1000,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
     // #108 follow-up) without needing to reproduce the exact frame live again.
     ws.on("framesent", (frame) => {
       const payload = frame.payload ? frame.payload.toString() : "";
-      logger.debug(`[Draft Sync] WS frame sent (${payload.length} bytes)`, {
+      logger.debug(`WS frame sent (${payload.length} bytes)`, {
         component: "draft_ws_capture",
         direction: "out",
         socket_id: socketId,
@@ -1012,7 +1013,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       framesOnThisSocket += 1;
       state.health.ws.frames_received += 1;
       const line = frame.payload ? frame.payload.toString() : "";
-      logger.debug(`[Draft Sync] WS frame received (${line.length} bytes)`, {
+      logger.debug(`WS frame received (${line.length} bytes)`, {
         component: "draft_ws_capture",
         direction: "in",
         socket_id: socketId,
@@ -1022,7 +1023,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       if (line.startsWith("INIT ")) {
         state.health.ws.init_frames += 1;
         logger.info(
-          `[Draft Sync] INIT frame received (${line.length} bytes) — treating as a room (re)join; ` +
+          `INIT frame received (${line.length} bytes) — treating as a room (re)join; ` +
             "triggering a recovery sweep of the board + REST.",
           { component: "draft_ws", socket_id: socketId },
         );
@@ -1034,7 +1035,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
             .onRejoin("init")
             .catch((err) =>
               logger.error(
-                `[Draft Sync] INIT-triggered recovery sweep failed: ${err.message}`,
+                `INIT-triggered recovery sweep failed: ${err.message}`,
                 { component: "draft_ws", err },
               ),
             );
@@ -1120,13 +1121,13 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
         if (type === "STATE" && tokens[1] === "2") {
           state.draftCompleted = true;
           logger.info(
-            "[Draft Sync] STATE 2 frame received — ESPN's own signal that the draft has finished.",
+            "STATE 2 frame received — ESPN's own signal that the draft has finished.",
             { component: "draft_ws", socket_id: socketId },
           );
         }
 
         if (!(type in state.health.ws.other_frames)) {
-          logger.info(`[Draft Sync] First-seen frame type this run: ${type}`, {
+          logger.info(`First-seen frame type this run: ${type}`, {
             component: "draft_ws",
             frame_type: type,
             socket_id: socketId,
@@ -1166,7 +1167,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
       // fault — and every pick broadcast until we're back is lost, since the WS protocol has no
       // replay. Logged at warn with the frame counts so the size of the gap is reconstructable.
       logger.warn(
-        `[Draft Sync] WebSocket closed after ${framesOnThisSocket} frame(s), ` +
+        `WebSocket closed after ${framesOnThisSocket} frame(s), ` +
           `${picksOnThisSocket} pick(s): ${ws.url()}. Picks broadcast while disconnected can only ` +
           "be recovered by the DOM board scan or REST.",
         {
@@ -1244,7 +1245,7 @@ async function executeSubmitPickCommand(session, redisClient, state, command) {
   });
 
   logger.info(
-    `[Draft Sync] Delegated command ${commandId} (player ${playerId}, team ${teamId}) ` +
+    `Delegated command ${commandId} (player ${playerId}, team ${teamId}) ` +
       `resolved: ${result.status}.`,
     { component: "draft_commands", command_id: commandId, ...result },
   );
@@ -1252,7 +1253,7 @@ async function executeSubmitPickCommand(session, redisClient, state, command) {
   await publishCommandResult(redisClient, state.leagueId, commandId, result).catch(
     (err) =>
       logger.error(
-        `[Draft Sync] Could not publish result for delegated command ${commandId}: ${err.message}`,
+        `Could not publish result for delegated command ${commandId}: ${err.message}`,
         { component: "draft_commands", err },
       ),
   );
@@ -1272,7 +1273,7 @@ async function pollDraftCommands(redisClient, state, session, lastIdRef) {
       await executeSubmitPickCommand(session, redisClient, state, command);
     } catch (err) {
       logger.error(
-        `[Draft Sync] Failed to execute delegated command ${command.command_id}: ${err.message}`,
+        `Failed to execute delegated command ${command.command_id}: ${err.message}`,
         { component: "draft_commands", err },
       );
     }
@@ -1288,7 +1289,7 @@ async function enterDraftRoom(session) {
 
   if (process.env.DRAFT_ROOM_URL) {
     logger.info(
-      `[Draft Sync] DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`,
+      `DRAFT_ROOM_URL set — navigating directly: ${process.env.DRAFT_ROOM_URL}`,
     );
     await session.page.goto(process.env.DRAFT_ROOM_URL, {
       waitUntil: "load",
@@ -1296,7 +1297,7 @@ async function enterDraftRoom(session) {
     });
   } else if (process.env.DRAFT_MODE === "mock") {
     logger.info(
-      "[Draft Sync] DRAFT_MODE=mock — joining a fresh practice draft from the lobby...",
+      "DRAFT_MODE=mock — joining a fresh practice draft from the lobby...",
     );
     ({ page: activePage } = await startFreshPracticeDraft(
       session.page,
@@ -1315,7 +1316,7 @@ async function enterDraftRoom(session) {
       );
     }
     const draftUrl = buildDraftUrl(leagueId, seasonId, teamId, session.swid);
-    logger.info(`[Draft Sync] Navigating to live draft room: ${draftUrl}`);
+    logger.info(`Navigating to live draft room: ${draftUrl}`);
     await session.page.goto(draftUrl, { waitUntil: "load", timeout: 60000 });
   }
 
@@ -1325,6 +1326,9 @@ async function enterDraftRoom(session) {
       `Could not determine league/season from draft room URL: ${activePage.url()}`,
     );
   }
+  // Bound once here (mirroring connection.js's trackingId binding) so every subsequent log
+  // line for this draft session carries league/team context automatically via pino's mixin.
+  updateContext({ leagueId, teamId });
   return { leagueId, seasonId, teamId, page: activePage };
 }
 
@@ -1537,7 +1541,7 @@ async function emitHealthHeartbeat(
   const quiet = silenceMs != null && silenceMs > PICK_SILENCE_WARN_MS;
   const level = quiet || !wsConnected ? "warn" : "info";
   logger[level](
-    `[Draft Sync] Health: ws=${wsConnected ? "connected" : "DOWN"} ` +
+    `Health: ws=${wsConnected ? "connected" : "DOWN"} ` +
       `picks=${snapshot.picks_known} ` +
       `last_pick=${state.health.last_pick_seen_at || "none yet"} ` +
       `dom_recovered=${state.health.dom.recovered_picks} ` +
@@ -1551,7 +1555,7 @@ async function emitHealthHeartbeat(
     await redisClient.set(key, JSON.stringify(snapshot), { EX: 3600 });
   } catch (err) {
     logger.warn(
-      `[Draft Sync] Could not write health snapshot to Redis: ${err.message}`,
+      `Could not write health snapshot to Redis: ${err.message}`,
       { component: "draft_health", err },
     );
   }
@@ -1590,7 +1594,7 @@ async function connectAndStream(redisClient, state) {
     sweeping = true;
     state.health.recovery_sweeps += 1;
     try {
-      logger.info(`[Draft Sync] Recovery sweep (${trigger}) starting.`, {
+      logger.info(`Recovery sweep (${trigger}) starting.`, {
         component: "draft_ingest",
         trigger,
       });
@@ -1621,7 +1625,7 @@ async function connectAndStream(redisClient, state) {
         // fires mid-draft (resetting the isDead() handle/clock out from under the reconnect loop)
         // versus not firing at all.
         logger.info(
-          "[Draft Sync] context 'page' event fired — reassigning WebSocket listener handle to " +
+          "context 'page' event fired — reassigning WebSocket listener handle to " +
             "the new page.",
           { component: "draft_ws", new_page_url: newPage.url() },
         );
@@ -1636,7 +1640,7 @@ async function connectAndStream(redisClient, state) {
     // this function (the isDead() poll loop below) watches the actually-active page.
     if (draftContext.page && draftContext.page !== session.page) {
       logger.info(
-        "[Draft Sync] Draft room opened in a new tab — listeners were already attached to it.",
+        "Draft room opened in a new tab — listeners were already attached to it.",
       );
       session.page = draftContext.page;
     }
@@ -1645,7 +1649,7 @@ async function connectAndStream(redisClient, state) {
     // previous draft's counters would misnumber (or skip) every pick in the new one.
     if (state.leagueId && state.leagueId !== draftContext.leagueId) {
       logger.info(
-        `[Draft Sync] League changed (${state.leagueId} -> ${draftContext.leagueId}), resetting pick counters.`,
+        `League changed (${state.leagueId} -> ${draftContext.leagueId}), resetting pick counters.`,
       );
       state.lastPickNumber = null;
       state.pickCounter = 0;
@@ -1742,7 +1746,7 @@ async function connectAndStream(redisClient, state) {
       });
     } catch (err) {
       logger.error(
-        `[Draft Sync] DOM observer failed to attach — continuing with WS + REST only: ${err.message}`,
+        `DOM observer failed to attach — continuing with WS + REST only: ${err.message}`,
         { component: "draft_dom_observer", err },
       );
     }
@@ -1765,7 +1769,7 @@ async function connectAndStream(redisClient, state) {
       } catch (err) {
         if (err instanceof SessionExpiredError) {
           logger.error(
-            `[Draft Sync] ESPN session appears to have expired mid-draft: ${err.message}`,
+            `ESPN session appears to have expired mid-draft: ${err.message}`,
             { err },
           );
           state.sessionExpiredError = err;
@@ -1776,13 +1780,13 @@ async function connectAndStream(redisClient, state) {
           // out of this catch. A PermanentError here can never resolve on retry (the room is
           // gone), so it gets the same "stop looping, surface it" treatment.
           logger.error(
-            `[Draft Sync] Periodic session check found an unrecoverable condition: ${err.message}`,
+            `Periodic session check found an unrecoverable condition: ${err.message}`,
             { err },
           );
           state.permanentError = err;
         } else {
           logger.error(
-            `[Draft Sync] Periodic session check failed: ${err.message}`,
+            `Periodic session check failed: ${err.message}`,
             { err },
           );
         }
@@ -1794,7 +1798,7 @@ async function connectAndStream(redisClient, state) {
         wsConnected: handle.hasOpenSocket(),
         dom: domObserver ? domObserver.getHealth() : null,
       }).catch((err) =>
-        logger.error(`[Draft Sync] Health heartbeat failed: ${err.message}`, {
+        logger.error(`Health heartbeat failed: ${err.message}`, {
           component: "draft_health",
           err,
         }),
@@ -1814,7 +1818,7 @@ async function connectAndStream(redisClient, state) {
       pollDraftCommands(redisClient, state, session, state.commandLastIdRef)
         .catch((err) =>
           logger.error(
-            `[Draft Sync] Draft command poll failed: ${err.message}`,
+            `Draft command poll failed: ${err.message}`,
             { component: "draft_commands", err },
           ),
         )
@@ -1850,7 +1854,7 @@ async function connectAndStream(redisClient, state) {
       // delegated-command state, since a stuck command is a candidate root cause worth ruling
       // in/out from the same trace point.
       const snap = handle.debugSnapshot();
-      logger.debug("[Draft Sync] Reconnect-loop tick.", {
+      logger.debug("Reconnect-loop tick.", {
         component: "draft_ingest",
         open_sockets: snap.openSockets,
         idle_ms: snap.idleMs,
@@ -1923,12 +1927,12 @@ async function connectAndStream(redisClient, state) {
 
     logger[isTerminal ? "info" : concerning ? "error" : "warn"](
       isTerminal
-        ? `[Draft Sync] Draft appears complete (${terminalReason}) — exiting cleanly.`
+        ? `Draft appears complete (${terminalReason}) — exiting cleanly.`
         : concerning
-          ? `[Draft Sync] ${state.consecutiveEmptyCycles} consecutive reconnect cycles with no ` +
+          ? `${state.consecutiveEmptyCycles} consecutive reconnect cycles with no ` +
             "new picks and no completion signal — connection may be stuck (still retrying up to " +
             "the reconnect cap)."
-          : "[Draft Sync] Connection appears dead, will attempt to reconnect.",
+          : "Connection appears dead, will attempt to reconnect.",
       {
         component: "draft_ingest",
         consecutive_empty_cycles: state.consecutiveEmptyCycles,
@@ -2003,7 +2007,7 @@ function decideReconnectAction({ terminal, newPicksThisCycle, attempt }) {
 
 async function streamLiveDraftRoom() {
   logger.info(
-    `[Draft Sync] Booting live channel listener client. Connecting to Redis node at ${REDIS_HOST}...`,
+    `Booting live channel listener client. Connecting to Redis node at ${REDIS_HOST}...`,
   );
   const redisClient = redis.createClient({
     url: `redis://${REDIS_HOST}:${REDIS_PORT}`,
@@ -2012,7 +2016,7 @@ async function streamLiveDraftRoom() {
   // EventEmitter) would crash the process outright instead of letting the client's own
   // reconnect strategy recover.
   redisClient.on("error", (err) =>
-    logger.error(`[Draft Sync] Redis client error: ${err.message}`, {
+    logger.error(`Redis client error: ${err.message}`, {
       err,
     }),
   );
@@ -2035,7 +2039,7 @@ async function streamLiveDraftRoom() {
           // MAX_RECONNECT_ATTEMPTS (each with its own growing delay) against a room that had
           // already 404'd — 17+ minutes of pointless retries in the incident this fixes.
           logger.error(
-            `[Draft Sync] Unrecoverable condition, exiting without further reconnect attempts: ${error.message}`,
+            `Unrecoverable condition, exiting without further reconnect attempts: ${error.message}`,
             { err: error },
           );
           return;
@@ -2049,7 +2053,7 @@ async function streamLiveDraftRoom() {
           );
         }
         logger.error(
-          `[Draft Sync] Session crashed (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}): ` +
+          `Session crashed (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}): ` +
             `${error.message}. Reconnecting in ${crashDecision.delayMs}ms...`,
           { err: error, attempt },
         );
@@ -2066,7 +2070,7 @@ async function streamLiveDraftRoom() {
       const decision = decideReconnectAction({ ...result, attempt });
       if (decision.action === "exit_clean") {
         logger.info(
-          "[Draft Sync] Draft sync complete — no more reconnect attempts needed, exiting.",
+          "Draft sync complete — no more reconnect attempts needed, exiting.",
         );
         return;
       }
@@ -2078,7 +2082,7 @@ async function streamLiveDraftRoom() {
       attempt = decision.nextAttempt;
       if (decision.action === "retry_after_delay") {
         logger.warn(
-          `[Draft Sync] Stalled cycle with no new picks (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}), ` +
+          `Stalled cycle with no new picks (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS}), ` +
             `reconnecting in ${decision.delayMs}ms...`,
           { attempt },
         );
@@ -2087,7 +2091,7 @@ async function streamLiveDraftRoom() {
     }
   } catch (error) {
     logger.error(
-      `[Draft Sync] Live data sync loop crashed permanently: ${error.message}`,
+      `Live data sync loop crashed permanently: ${error.message}`,
       { err: error },
     );
     // Rethrow rather than shutting down/exiting here -- this runs inside withInstrumentation's

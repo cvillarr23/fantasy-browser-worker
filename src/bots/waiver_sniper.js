@@ -4,6 +4,7 @@ const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitWaiverClaim } = require("./espn_api");
 const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { logger } = require("../telemetry/logger");
+const { updateContext } = require("../telemetry/context");
 
 /**
  * High-Speed Waiver Sniper Bot (fix for #14)
@@ -49,12 +50,10 @@ function captureFailure(tracking, details) {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const file = path.join(DEBUG_DIR, `waiver-fail-${tracking}-${stamp}.json`);
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    logger.error(
-      `[Sniper Bot][${tracking}] Failure context written to: ${file}`,
-    );
+    logger.error(`Failure context written to: ${file}`);
   } catch (captureError) {
     logger.error(
-      `[Sniper Bot][${tracking}] Could not capture failure context: ${captureError.message}`,
+      `Could not capture failure context: ${captureError.message}`,
       {
         err: captureError,
       },
@@ -89,6 +88,9 @@ async function executeInstantWaiverClaim(payload) {
       `[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`,
     );
   }
+  // Bound once here (mirroring connection.js's trackingId binding) so every subsequent log
+  // line in this transaction carries league/team context automatically via pino's mixin.
+  updateContext({ leagueId, teamId });
   const addPlayerId = requirePlayerId(payload.player_id, "player_id");
   const dropPlayerId = payload.drop_player_id
     ? requirePlayerId(payload.drop_player_id, "drop_player_id")
@@ -188,7 +190,7 @@ async function executeInstantWaiverClaim(payload) {
     );
   } catch (error) {
     logger.error(
-      `[Sniper Bot][${tracking}] Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      `Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
       { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {

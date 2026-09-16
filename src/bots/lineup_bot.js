@@ -5,6 +5,7 @@ const { readRoster, submitLineup } = require("./espn_api");
 const { PermanentError } = require("../errors");
 const slotConfig = require("../selectors/lineup_slots.json");
 const { logger } = require("../telemetry/logger");
+const { updateContext } = require("../telemetry/context");
 const { withInstrumentation } = require("../telemetry/instrument");
 
 /**
@@ -295,12 +296,10 @@ function captureFailure(tracking, details) {
     const file = path.join(DEBUG_DIR, `lineup-fail-${tracking}-${stamp}.json`);
 
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
-    logger.error(
-      `[Lineup Bot][${tracking}] Failure context written to: ${file}`,
-    );
+    logger.error(`Failure context written to: ${file}`);
   } catch (captureError) {
     logger.error(
-      `[Lineup Bot][${tracking}] Could not capture failure context: ${captureError.message}`,
+      `Could not capture failure context: ${captureError.message}`,
       {
         err: captureError,
       },
@@ -339,6 +338,10 @@ async function executeLineupAdjustments(payload) {
     log(`No transaction swaps specified for team ${teamId}. Nothing to do.`);
     return;
   }
+
+  // Bound once here (mirroring connection.js's trackingId binding) so every subsequent log
+  // line in this transaction carries league/team context automatically via pino's mixin.
+  updateContext({ leagueId, teamId });
 
   const target = { leagueId, seasonId, teamId };
   const { dryRun, defaulted } = resolveDryRun();
@@ -421,7 +424,7 @@ async function executeLineupAdjustments(payload) {
     log("Lineup realignment complete and verified.");
   } catch (error) {
     logger.error(
-      `[Lineup Bot][${tracking}] Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
+      `Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
       { err: error, permanent: error.permanent === true },
     );
     captureFailure(tracking, {

@@ -13,24 +13,24 @@ const { shutdownTelemetry } = require("./telemetry/init");
 async function dispatch(queueName, payload) {
   switch (queueName) {
     case "lineup_updates":
-      logger.info("[Worker Engine] Invoking Lineup Adjustment Engine...");
+      logger.info("Invoking Lineup Adjustment Engine...");
       return executeLineupAdjustments(payload);
 
     case "waiver_actions":
-      logger.info("[Worker Engine] Invoking Waiver Sniping Target Engine...");
+      logger.info("Invoking Waiver Sniping Target Engine...");
       return executeInstantWaiverClaim(payload);
 
     case "draft_targets":
-      logger.info("[Worker Engine] Invoking Draft Selection Engine...");
+      logger.info("Invoking Draft Selection Engine...");
       return executeAutomatedDraftSelection(payload);
 
     case "trade_evaluations":
-      logger.info("[Worker Engine] Invoking Trade Evaluation Engine...");
+      logger.info("Invoking Trade Evaluation Engine...");
       return executeTradeEvaluation(payload);
 
     default:
       logger.warn(
-        `[Worker Engine] Intercepted unsupported message format signature: ${queueName}`,
+        `Intercepted unsupported message format signature: ${queueName}`,
       );
       return undefined;
   }
@@ -38,9 +38,7 @@ async function dispatch(queueName, payload) {
 
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
-  logger.info(
-    `[Worker Engine] Routing task parameters for queue event: "${queueName}"`,
-  );
+  logger.info(`Routing task parameters for queue event: "${queueName}"`);
   await withInstrumentation(
     queueName,
     { queueName, trackingId: payload && payload.tracking_id },
