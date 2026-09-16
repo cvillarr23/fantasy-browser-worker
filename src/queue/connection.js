@@ -92,6 +92,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
     "waiver_actions",
     "draft_targets",
     "trade_evaluations",
+    "trade_negotiations",
   ];
   for (const queue of targetQueues) {
     await channel.assertQueue(queue, { durable: true });
