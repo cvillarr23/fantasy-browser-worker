@@ -1,0 +1,84 @@
+# Manual test Job for rumor_digest_bot.js (WORKER-13) — NOT part of fantasy-infra's GitOps-synced
+# tree, so it never auto-deploys via Argo CD. Apply/delete this by hand to exercise the digest
+# against the real fantasy-db.
+#
+# The production CronJob (the actual hourly schedule, RUMOR_DIGEST_INTERVAL-driven) belongs in
+# fantasy-infra as its own issue, mirroring how CORE-13's ingestion CronJob (INFRA-11,
+# base/core-pipeline/fantasy-rumor-syncer-cronjob.yaml) was scoped separately from CORE-13
+# itself — not created as part of this issue.
+#
+# Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
+# locally-built image, same as k8s/test-lineup-bot-job.yaml — the repo is private, so the package
+# stays private too, pulled via the ghcr-pull-secret ExternalSecret.
+#
+# No ESPN_S2/SWID/ESPN_LEAGUE_ID needed — unlike every other bot in this repo, this one never
+# opens a browser page or calls ESPN's API. It only reads fantasy-core-pipeline's raw_signals
+# table and writes rumor_signals, both via Postgres directly.
+#
+# GROQ_API_KEY/GEMINI_API_KEY are deliberately NOT set here, same as every other manifest in this
+# repo — src/lib/llm_client.js falls back to OpenBao (`bao kv get secret/fantasy/<provider>`) when
+# an env var is unset. That in-cluster fallback path is unverified as of this change (no manifest
+# anywhere yet sets these keys directly, nor confirms `bao kv get` succeeds without an explicit
+# `bao login` first) — if this Job's log shows every provider skipped with "No API key resolved",
+# that's the fallback path failing, not a bug in this bot.
+#
+# PREREQUISITE: fantasy-core-pipeline's rumor_signals table migration (models.py's
+# CREATE_RUMOR_SIGNALS_TABLE) must have run against this fantasy-db instance first.
+#
+# Usage:
+#   git push origin main                                        # triggers the build+publish workflow
+#   kubectl delete job rumor-digest-bot-test --ignore-not-found -n default
+#   kubectl apply -f k8s/test-rumor-digest-job.yaml
+#   kubectl logs -f job/rumor-digest-bot-test -n default
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rumor-digest-bot-test
+  namespace: default
+  labels:
+    app: fantasy-browser-worker
+    component: rumor-digest-bot-test
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: fantasy-browser-worker
+        component: rumor-digest-bot-test
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: rumor-digest-bot
+          image: ghcr.io/cvillarr23/fantasy-browser-worker:latest
+          imagePullPolicy: Always # always pull latest for a test run, don't reuse a stale cached image
+          command: ["node", "src/bots/rumor_digest_bot.js"]
+          env:
+            # Same fantasy-db credentials every other CronJob/Job in this repo uses (see
+            # base/browser-worker/espn-session-healthcheck-cronjob.yaml in fantasy-infra) — this
+            # is the shared instance both raw_signals and rumor_signals live in.
+            - name: DB_HOST
+              value: "fantasy-db.default.svc.cluster.local"
+            - name: DB_NAME
+              value: "fantasy_football"
+            - name: DB_USER
+              value: "bot_admin"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-password
+            # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
+            # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
+            # grpc://.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.default.svc.cluster.local:4317"
+          resources:
+            requests:
+              memory: "128Mi" # no Chromium in this bot's process, unlike the browser-driving bots
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
