@@ -7,32 +7,10 @@ const { completeWithFallback } = require("../lib/llm_client");
 const { logger } = require("../telemetry/logger");
 
 /**
- * Rumor/News-Driven Waiver & Lineup Signal Bot (WORKER-13, #27)
- *
- * CORE-13 (fantasy-core-pipeline) polls news/rumor sources and fuzzy-matches items to players
- * into a `raw_signals` table, deliberately doing no interpretation. This bot is the
- * interpretation step: on a schedule, it reads raw_signals rows created since the last
- * successful run, batches them into a single completeWithFallback (WORKER-12) call, and persists
- * a structured per-player signal to fantasy-core-pipeline's `rumor_signals` table.
- *
- * Phase 1 (this issue): ADVISORY ONLY. This bot never touches waiver_actions/lineup_updates --
- * it only produces signals for a future consumer (#81, currently blocked on this issue) to read
- * and act on. Nothing here submits a waiver claim or a lineup swap.
- *
- * Scheduled-job entrypoint, NOT a queue consumer -- mirrors check_espn_session.js's
- * require.main + withInstrumentation shape, not waiver_sniper.js's queue-handler shape. The
- * production CronJob schedule (fantasy-infra, mirroring INFRA-11's CORE-13 CronJob) is out of
- * scope here; k8s/test-rumor-digest-job.yaml covers manual/dev-only invocation the same way
- * k8s/test-lineup-bot-job.yaml does for lineup_bot.js.
- *
- * ID NAMESPACE WARNING: player_id throughout this file is the INTERNAL (Sleeper) id space --
- * the same one raw_signals.player_id/players.player_id use in fantasy-core-pipeline -- NOT an
- * ESPN id. Do not forward it into an ESPN-id-only field (waiver_sniper.js's player_id/
- * drop_player_id, lineup_bot.js's swap ids) without first translating through
- * fantasy-core-pipeline's players.espn_id crosswalk. This is the exact id-namespace collision
- * fantasy-core-pipeline's `_reject_internal_player_id` (api/routes.py) exists to guard against
- * elsewhere (ESPN 12483 is Matthew Stafford, internal 12483 is Jack Bech) -- #81 must add the
- * same guard before dispatching a real queue message off a rumor_signals row.
+ * Rumor/news-driven waiver & lineup signal bot -- advisory only, no waiver/lineup execution.
+ * Scheduled-job entrypoint (not a queue consumer). player_id is the internal Sleeper id space,
+ * not ESPN's -- see README.md's Architecture section and CLAUDE.md's WORKER-13 notes for the
+ * full design rationale (watermark strategy, id-namespace warning, scope boundaries).
  */
 
 const VALID_SENTIMENTS = new Set(["positive", "negative", "neutral"]);

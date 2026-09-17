@@ -1,13 +1,9 @@
 const { Pool } = require("pg");
 const { logger } = require("../telemetry/logger");
 
-// Same pool shape as src/db/execution_log.js / src/lib/llm_client.js -- small, dedicated.
-// UNLIKE those two, this module does NOT swallow errors: rumor_signals is rumor_digest_bot.js's
-// actual deliverable output, not a best-effort audit/metrics side-channel, so a read or write
-// failure here must fail the run loudly (propagate a plain Error) rather than be logged and
-// ignored. That's safe -- nothing this module does is non-idempotent, so a failed run can simply
-// be retried on the next scheduled invocation without double-processing anything (the watermark
-// only advances once a run's rows are actually committed).
+// Same pool shape as execution_log.js/llm_client.js, but unlike those, errors here propagate
+// rather than being swallowed -- this table is the deliverable, not a best-effort side channel.
+// Safe to retry: nothing here is non-idempotent, and the watermark only advances on a commit.
 const pool = new Pool({
   host: process.env.DB_HOST,
   database: process.env.DB_NAME,
@@ -36,10 +32,9 @@ async function fetchWatermark() {
   return watermark === null || watermark === undefined ? null : Number(watermark);
 }
 
-/** New raw_signals rows to interpret this run. `player_id IS NOT NULL` skips items CORE-13's
- * fuzzy matcher couldn't resolve to a player -- there is nothing for a per-player signal to
- * attach to. player_id here is the internal (Sleeper) id space, same as raw_signals/players --
- * NOT an ESPN id (see rumor_digest_bot.js's header for why that distinction matters). */
+/** New raw_signals rows to interpret this run. Skips rows the upstream fuzzy matcher couldn't
+ * resolve to a player -- nothing to attach a per-player signal to. player_id is the internal
+ * (Sleeper) id space, same as raw_signals/players -- not an ESPN id. */
 async function fetchNewRawSignals(sinceId) {
   const { rows } = await pool.query(
     `SELECT id, player_id, source, raw_text, published_at

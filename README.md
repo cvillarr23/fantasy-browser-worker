@@ -54,6 +54,13 @@ Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for
 Grafana dashboard — see `CLAUDE.md`'s WORKER-12 notes for the metrics schema and rate-limiter
 details.
 
+### WORKER-13: rumor digest bot
+
+`src/bots/rumor_digest_bot.js` batches new `raw_signals` rows (from `fantasy-core-pipeline`) into
+a single `completeWithFallback` call and persists structured per-player verdicts to
+`rumor_signals` — advisory only, no waiver/lineup execution. See `CLAUDE.md`'s WORKER-13 notes
+for the watermark design and the internal-vs-ESPN player id warning.
+
 ## Image release + Argo CD Image Updater contract
 - Pushes to `main` publish:
   - `ghcr.io/cvillarr23/fantasy-browser-worker:latest`
