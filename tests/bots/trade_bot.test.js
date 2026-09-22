@@ -201,14 +201,14 @@ describe("fetchRosterDeficits", () => {
   });
 
   it("fetches and returns the parsed deficits", async () => {
-    const body = { deficits: [{ position: "RB", severity: "high" }] };
+    const body = { season: 2026, week: 3, roster_snapshot: "current", teams: {} };
     fetchSpy.mockResolvedValue(mockFetchResponse({ ok: true, json: body }));
 
-    const result = await fetchRosterDeficits({ leagueId: "1248158344", season: 2026 });
+    const result = await fetchRosterDeficits({ season: 2026, week: 3 });
 
     expect(result).toEqual(body);
     expect(fetchSpy).toHaveBeenCalledWith(
-      expect.stringContaining("/v1/league/roster-deficits"),
+      expect.stringContaining("/v1/roster/deficits"),
       expect.anything(),
     );
   });
@@ -217,7 +217,7 @@ describe("fetchRosterDeficits", () => {
     fetchSpy.mockResolvedValue(mockFetchResponse({ ok: false, status: 404, text: "not found" }));
 
     let caught;
-    await fetchRosterDeficits({ leagueId: "1248158344", season: 2026 }).catch((e) => (caught = e));
+    await fetchRosterDeficits({ season: 2026, week: 3 }).catch((e) => (caught = e));
     expect(caught.permanent).toBe(true);
   });
 
@@ -225,7 +225,7 @@ describe("fetchRosterDeficits", () => {
     fetchSpy.mockResolvedValue(mockFetchResponse({ ok: false, status: 500, text: "boom" }));
 
     let caught;
-    await fetchRosterDeficits({ leagueId: "1248158344", season: 2026 }).catch((e) => (caught = e));
+    await fetchRosterDeficits({ season: 2026, week: 3 }).catch((e) => (caught = e));
     expect(caught.permanent).not.toBe(true);
     expect(caught.retryDelayMs).toEqual(expect.any(Number));
   });
@@ -234,7 +234,7 @@ describe("fetchRosterDeficits", () => {
     fetchSpy.mockRejectedValue(new Error("ECONNREFUSED"));
 
     await expect(
-      fetchRosterDeficits({ leagueId: "1248158344", season: 2026 }),
+      fetchRosterDeficits({ season: 2026, week: 3 }),
     ).rejects.toMatchObject({ retryDelayMs: expect.any(Number) });
   });
 
@@ -242,7 +242,7 @@ describe("fetchRosterDeficits", () => {
     fetchSpy.mockResolvedValue(mockFetchResponse({ ok: true }));
 
     await expect(
-      fetchRosterDeficits({ leagueId: "1248158344", season: 2026 }),
+      fetchRosterDeficits({ season: 2026, week: 3 }),
     ).rejects.toMatchObject({ retryDelayMs: expect.any(Number) });
   });
 });
