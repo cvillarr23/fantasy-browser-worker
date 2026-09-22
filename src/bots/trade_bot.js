@@ -14,6 +14,7 @@ const {
 const { completeWithFallback } = require("../lib/llm_client");
 const { recordTradeNegotiation } = require("../db/execution_log");
 const { logger } = require("../telemetry/logger");
+const { withInstrumentation } = require("../telemetry/instrument");
 
 // Same cluster-DNS-default convention as OLLAMA_URL in src/lib/llm_client.js — verified against
 // fantasy-infra's base/core-pipeline/fastapi-service.yaml (ClusterIP service
@@ -272,20 +273,21 @@ async function postTradeEvaluation({ incoming, outgoing, season, week }, label =
   }
 }
 
-/** Maps a GET /v1/league/roster-deficits failure the same way classifyEvaluateError does for
- * /v1/trade/evaluate: a 4xx (except 429) means this league/season can never resolve on
+/** Maps a GET /v1/roster/deficits failure the same way classifyEvaluateError does for
+ * /v1/trade/evaluate: a 4xx (except 429) means this season/week can never resolve on
  * redelivery, everything else is transient. */
 function classifyRosterDeficitsError(status, body) {
-  const message = `[Trade Negotiator] GET /v1/league/roster-deficits failed with HTTP ${status} — ${body.slice(0, 500)}`;
+  const message = `[Trade Negotiator] GET /v1/roster/deficits failed with HTTP ${status} — ${body.slice(0, 500)}`;
   return withRetryDelay(classifyHttpStatusError(status, message));
 }
 
-/** Grounding data for negotiateTradeProposal's LLM prompt: which roster positions a league's
- * teams are thin at, so the model can judge leverage instead of guessing. New endpoint on
- * fantasy-core-pipeline (not yet built there as of WORKER-04) — same REST convention as
- * postTradeEvaluation rather than a new MCP client, per the decision recorded in the plan. */
-async function fetchRosterDeficits({ leagueId, season }) {
-  const url = `${CORE_PIPELINE_URL}/v1/league/roster-deficits?leagueId=${encodeURIComponent(leagueId)}&season=${encodeURIComponent(season)}`;
+/** Grounding data for negotiateTradeProposal's LLM prompt: which roster positions each of this
+ * league's teams are thin at, so the model can judge leverage instead of guessing. Hits
+ * fantasy-core-pipeline's GET /v1/roster/deficits (src/api/roster.py) — that endpoint has no
+ * league-scoping param (this system tracks exactly one league) and requires season+week, not
+ * season alone. */
+async function fetchRosterDeficits({ season, week }) {
+  const url = `${CORE_PIPELINE_URL}/v1/roster/deficits?season=${encodeURIComponent(season)}&week=${encodeURIComponent(week)}`;
 
   let response;
   try {
@@ -515,7 +517,7 @@ async function negotiateTradeProposal(payload) {
     const { proposals, chatLog } = await scrapeTradePortalContent(session.page);
 
     const [deficits, evaluation] = await Promise.all([
-      fetchRosterDeficits({ leagueId, season }),
+      fetchRosterDeficits({ season, week }),
       postTradeEvaluation({ incoming, outgoing, season, week }, "[Trade Negotiator]"),
     ]);
 
@@ -619,6 +621,34 @@ async function negotiateTradeProposal(payload) {
       await session.browser.close();
     }
   }
+}
+
+// Local/manual runs: node src/bots/trade_bot.js '{"incoming_player_ids":[...], ...}'
+if (require.main === module) {
+  const raw = process.argv[2];
+  if (!raw) {
+    logger.error(
+      "Usage: node src/bots/trade_bot.js '<trade_negotiations JSON payload>'\n" +
+        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/trade_bot.js \\\n" +
+        `  '{"incoming_player_ids":["101"],"outgoing_player_ids":["202"],"season":2026,"week":3,"offering_team_id":"7"}'`,
+    );
+    process.exit(1);
+  }
+
+  const payload = JSON.parse(raw);
+  withInstrumentation(
+    "trade_bot",
+    { trackingId: payload.tracking_id || require("crypto").randomUUID() },
+    () => negotiateTradeProposal(payload),
+  ).catch(async (error) => {
+    logger.error(`[Trade Bot] Run failed: ${error.message}`, { err: error });
+    const { shutdownTelemetry } = require("../telemetry/init");
+    try {
+      await shutdownTelemetry();
+    } finally {
+      process.exit(1);
+    }
+  });
 }
 
 module.exports = {

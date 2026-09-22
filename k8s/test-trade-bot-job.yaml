@@ -1,0 +1,87 @@
+# Manual test Job for trade_bot.js's negotiateTradeProposal — NOT part of fantasy-infra's
+# GitOps-synced tree, so it never auto-deploys via Argo CD. See README.md's "Trade negotiation
+# test job" section for the DRY_RUN safety note and the known execution_log no-op.
+#
+# Usage:
+#   git push origin main                                   # triggers the build+publish workflow
+#   # edit PAYLOAD below with real player IDs / season+week / offering_team_id from a real pending
+#   # trade on the ESPN trade portal
+#   kubectl delete job trade-bot-test --ignore-not-found -n default
+#   kubectl apply -f k8s/test-trade-bot-job.yaml
+#   kubectl logs -f job/trade-bot-test -n default
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trade-bot-test
+  namespace: default
+  labels:
+    app: fantasy-browser-worker
+    component: trade-bot-test
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: fantasy-browser-worker
+        component: trade-bot-test
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: trade-bot
+          image: ghcr.io/cvillarr23/fantasy-browser-worker:latest
+          imagePullPolicy: Always # always pull latest for a test run, don't reuse a stale cached image
+          # The payload mirrors what the "trade_negotiations" queue message shape requires
+          # (requireNegotiationPayload in trade_bot.js).
+          command: ["node", "src/bots/trade_bot.js"]
+          args:
+            - >-
+              {"tracking_id":"manual-k8s-test",
+               "incoming_player_ids":["REPLACE_ME"],
+               "outgoing_player_ids":["REPLACE_ME"],
+               "season":2026,
+               "week":REPLACE_ME,
+               "offering_team_id":"REPLACE_ME"}
+          env:
+            - name: DRY_RUN
+              value: "true" # flip to "false" only after a clean dry run confirms the DOM selectors
+            - name: ESPN_LEAGUE_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: fantasy-league-config
+                  key: ESPN_LEAGUE_ID
+            # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
+            # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
+            # grpc://.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://tempo.default.svc.cluster.local:4317"
+            - name: ESPN_S2
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: espn_s2
+            - name: SWID
+              valueFrom:
+                secretKeyRef:
+                  name: espn-session-secrets
+                  key: swid
+            - name: DB_HOST
+              value: "fantasy-db.default.svc.cluster.local"
+            - name: DB_NAME
+              value: "fantasy_football"
+            - name: DB_USER
+              value: "bot_admin"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: database-credentials
+                  key: postgres-password
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1200Mi" # Same ceiling as the production ScaledJob — catches Chromium bloat here too
+              cpu: "1000m"
