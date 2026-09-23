@@ -42,8 +42,10 @@ function withRetryDelay(error) {
   return error;
 }
 
-function buildTradePortalUrl(leagueId, seasonId) {
-  return `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${seasonId}`;
+// Confirmed live 2026-09-22: /football/team without a teamId renders ESPN's "Invalid Team ID"
+// error page, not the clubhouse — teamId is required, not optional.
+function buildTradePortalUrl(leagueId, seasonId, teamId) {
+  return `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${seasonId}&teamId=${teamId}`;
 }
 
 // Cross-origin iframe hosting the entire "Fantasy Chat" widget (room list, message feed, compose
@@ -107,8 +109,9 @@ async function scrapeTradePortalContent(page) {
  */
 async function scrapePendingTradeProposals() {
   const leagueId = process.env.ESPN_LEAGUE_ID;
+  const teamId = process.env.ESPN_TEAM_ID;
   const currentYear = process.env.CURRENT_YEAR || "2026";
-  const tradeUrl = buildTradePortalUrl(leagueId, currentYear);
+  const tradeUrl = buildTradePortalUrl(leagueId, currentYear, teamId);
 
   logger.info(
     `[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`,
@@ -448,7 +451,7 @@ async function negotiateTradeProposal(payload) {
   try {
     session =
       (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
-    await session.page.goto(buildTradePortalUrl(leagueId, season), {
+    await session.page.goto(buildTradePortalUrl(leagueId, season, process.env.ESPN_TEAM_ID), {
       waitUntil: "networkidle",
       timeout: 20000,
     });
