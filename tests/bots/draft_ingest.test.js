@@ -165,9 +165,9 @@ describe("ingestPickEvent", () => {
     );
 
     expect(decision.action).toBe("correct");
-    expect(redis.calls.hDel).toEqual([["draft:123:picks", "1"]]);
+    expect(redis.calls.hDel).toEqual([["draft:123:2026:picks", "1"]]);
     expect(redis.calls.hSet[1]).toEqual([
-      "draft:123:picks",
+      "draft:123:2026:picks",
       "17",
       expect.any(String),
     ]);
@@ -456,6 +456,32 @@ describe("seedLedgerFromBoard", () => {
     const state = freshState();
 
     await expect(seedLedgerFromBoard(redis, state)).resolves.toBe(0);
+  });
+
+  it("does not rehydrate a previous season's picks for a reused league id", async () => {
+    // ESPN reuses the same league id every season. Without season-scoping the ledger key, a
+    // brand-new draft against the same league id would rehydrate last season's entire pick
+    // history and treat every real new pick as a duplicate.
+    const redis = fakeRedis();
+    const boardByKey = {
+      "draft:123:2025:picks": {
+        1: JSON.stringify({
+          league_id: "123",
+          player_id: 4360438,
+          team_id: 8,
+          pick_number: 1,
+          round: 1,
+          source: "ws",
+        }),
+      },
+    };
+    redis.hGetAll = async (key) => boardByKey[key] || {};
+    const state = freshState(); // seasonId: "2026" — a new season, same league id
+
+    const seeded = await seedLedgerFromBoard(redis, state);
+
+    expect(seeded).toBe(0);
+    expect(state.ledger.hasPlayer(4360438)).toBe(false);
   });
 });
 

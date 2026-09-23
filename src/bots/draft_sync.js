@@ -83,6 +83,16 @@ const COMMAND_CONFIRM_TIMEOUT_MS = Number(
 const OWNERSHIP_LEASE_TTL_MS =
   HEALTH_HEARTBEAT_INTERVAL_MS * DEFAULT_LEASE_GRACE_MULTIPLIER;
 
+// ESPN reuses the same league id every season, so scoping by leagueId alone would rehydrate last
+// season's picks into a brand-new draft. seasonId is stable across a same-draft restart but
+// changes on a real new draft, so the new season's key is naturally empty.
+function buildPicksKey(leagueId, seasonId) {
+  return `draft:${leagueId}:${seasonId}:picks`;
+}
+function buildPicksStreamKey(leagueId, seasonId) {
+  return `draft_picks:${leagueId}:${seasonId}`;
+}
+
 /**
  * Live Draft Room Network Interceptor Daemon
  *
@@ -337,10 +347,12 @@ async function ingestPickEvent(redisClient, rawEvent, state) {
     }
 
     const payload = JSON.stringify(decision.event);
-    const ledgerKey = `draft:${state.leagueId}:picks`;
+    const ledgerKey = buildPicksKey(state.leagueId, state.seasonId);
     const multi = redisClient
       .multi()
-      .xAdd(`draft_picks:${state.leagueId}`, "*", { payload })
+      .xAdd(buildPicksStreamKey(state.leagueId, state.seasonId), "*", {
+        payload,
+      })
       .hSet(ledgerKey, String(decision.event.pick_number), payload);
 
     // A correction that also changes the pick NUMBER (REST supplying a true overallPickNumber for
@@ -426,7 +438,7 @@ function withIngestLock(state, fn) {
  * must not block the draft sync from coming up.
  */
 async function seedLedgerFromBoard(redisClient, state) {
-  const ledgerKey = `draft:${state.leagueId}:picks`;
+  const ledgerKey = buildPicksKey(state.leagueId, state.seasonId);
   let seeded = 0;
   try {
     const board = await redisClient.hGetAll(ledgerKey);
@@ -2150,6 +2162,8 @@ if (require.main === module) {
 module.exports = {
   streamLiveDraftRoom,
   connectAndStream,
+  buildPicksKey,
+  buildPicksStreamKey,
   parseSelectedFrame,
   parseAutosuggestFrame,
   parseSelectingFrame,

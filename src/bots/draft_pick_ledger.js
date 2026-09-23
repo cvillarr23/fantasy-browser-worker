@@ -129,7 +129,8 @@ function agreesWith(existing, incoming) {
 /**
  * Tracks every pick seen this draft and decides what to do with each new observation.
  *
- * In-memory, but NOT the only record: Redis holds the durable pick hash (`draft:{leagueId}:picks`),
+ * In-memory, but NOT the only record: Redis holds the durable pick hash
+ * (`draft:{leagueId}:{seasonId}:picks`),
  * and draft_sync.js rehydrates this ledger from it via seed() before ingest starts. That
  * rehydration is load-bearing rather than an optimization — a worker restart mid-draft would
  * otherwise begin with an empty ledger, and the DOM observer's first full-board scan would
@@ -170,7 +171,7 @@ class DraftPickLedger {
   /**
    * Loads an already-durable pick into the ledger WITHOUT counting it as a new publish.
    *
-   * Used to rehydrate from Redis (`draft:{leagueId}:picks`) on startup. Without this, a worker
+   * Used to rehydrate from Redis (`draft:{leagueId}:{seasonId}:picks`) on startup. Without this, a worker
    * restarting mid-draft would start with an empty ledger, and the DOM observer's very first
    * board scan — which reports the entire visible board at once — would look like N brand-new
    * picks and re-emit the whole draft downstream, minting fresh pick numbers in DOM scan order
