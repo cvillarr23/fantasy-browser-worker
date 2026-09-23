@@ -333,10 +333,10 @@ function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog
     "",
     "Respond with STRICT JSON ONLY — no markdown code fences, no commentary before or after — in",
     'exactly this shape: {"counter_offer": {"incoming_player_ids": ["..."], ' +
-      '"outgoing_player_ids": ["..."]}, "message": "..."}.',
+      '"outgoing_player_ids": ["..."]}}.',
     "counter_offer.incoming_player_ids and counter_offer.outgoing_player_ids are the player ids",
-    "for the counter-trade you propose. message is a natural-language message to send the",
-    "offering manager persuading them to accept it.",
+    "for the counter-trade you propose. Do not draft any message to the offering manager — the",
+    "counter-offer is surfaced for a human to send themselves, never posted automatically.",
     "",
     `Roster deficits: ${JSON.stringify(deficits)}`,
     `Trade evaluation: ${JSON.stringify(evaluation)}`,
@@ -383,18 +383,12 @@ function parseNegotiationResponse(text) {
       "[Trade Negotiator] LLM response's counter_offer.outgoing_player_ids must be a non-empty array of string player ids.",
     );
   }
-  if (typeof parsed.message !== "string" || parsed.message.trim() === "") {
-    throw new Error(
-      "[Trade Negotiator] LLM response missing a non-empty message string.",
-    );
-  }
 
   return {
     counterOffer: {
       incomingPlayerIds: counterOffer.incoming_player_ids,
       outgoingPlayerIds: counterOffer.outgoing_player_ids,
     },
-    message: parsed.message,
   };
 }
 
@@ -428,63 +422,13 @@ async function executeTradeEvaluation(payload) {
   return result;
 }
 
-// Same resolver shape as draft_clicker.js/lineup_bot.js/waiver_sniper.js: env DRY_RUN, explicit
-// 0/false/no (case-insensitive) means live. Defaults TRUE — this bot's live action is a real
-// message into a real human's inbox, at least as consequential as a live draft pick or waiver
-// claim, so it gets at least as conservative a default as those, never lineup_bot.js's
-// default-false.
-function resolveDryRun() {
-  const raw = process.env.DRY_RUN;
-  if (raw === undefined || raw === "") {
-    return { dryRun: true, defaulted: true };
-  }
-  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
-}
-
-/** Maps an offering_team_id to the manager's display name so the chat DM room (keyed by name in
- * the UI, not id — see the plan's recon findings) can be opened. Reads it from the host-page
- * "Opposing Teams" list: recon's accessibility-tree dump confirmed a real `a[href="/football/team
- * ?leagueId=...&teamId=<id>"]` per team, each wrapping the team name and manager name as two
- * stacked lines (e.g. "Michael Penix come back" / "Emily Wentorf") — the last non-empty line is
- * the manager's name, which is what the chat room list is keyed by.
- *
- * Matches the href's `teamId` query param exactly (via URL/URLSearchParams), not a CSS substring
- * selector — `a[href*="teamId=7"]` would also match `teamId=17`/`teamId=70`, and would even match
- * the unrelated "Propose Trade" link (`/football/team/trade?...&teamId=<id>&...`, confirmed live —
- * see the plan), which carries the *same* teamId but isn't a name at all. Restricting to
- * pathname `/football/team` rules that link out too. Exact-DOM-rendering of `.innerText()` here
- * (vs. what the accessibility tree showed) is still unverified — best-effort, not guaranteed.
- */
-async function resolveManagerDisplayName(page, teamId) {
-  const text = await page
-    .evaluate((wantedTeamId) => {
-      const links = Array.from(document.querySelectorAll('a[href*="teamId="]'));
-      const match = links.find((a) => {
-        try {
-          const url = new URL(a.getAttribute("href"), window.location.href);
-          return (
-            url.pathname === "/football/team" && url.searchParams.get("teamId") === wantedTeamId
-          );
-        } catch {
-          return false;
-        }
-      });
-      return match ? match.innerText : null;
-    }, teamId)
-    .catch(() => null);
-  if (!text) return null;
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  return lines.length > 0 ? lines[lines.length - 1] : null;
-}
-
 /**
  * Queue-shaped entrypoint for WORKER-04/#4: scrapes the pending trade + league chat, grounds it
- * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, asks the LLM (via
- * WORKER-12's completeWithFallback) for a structured counter-offer + message, and — unless
- * DRY_RUN is set — pastes that message into the offering manager's ESPN chat DM.
+ * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, and asks the LLM (via
+ * WORKER-12's completeWithFallback) for a structured counter-offer. Advisory only — it never
+ * posts anything to ESPN on a human's behalf; no AI-drafted message is generated or sent. Acting
+ * on a negotiation (formally re-submitting a counter-offer via ESPN's trade-builder UI) is
+ * separate, unbuilt follow-up work.
  */
 async function negotiateTradeProposal(payload) {
   const { incoming, outgoing, season, week, offeringTeamId } =
@@ -498,11 +442,6 @@ async function negotiateTradeProposal(payload) {
   );
 
   let session = null;
-  // null = never reached resolveDryRun() (failed before we knew); true/false once it has.
-  // Keeping this three-valued (rather than defaulting to false) matters because dry_run is a
-  // safety-relevant field in execution_log — collapsing "unknown" into "false" would make a
-  // pre-scrape failure indistinguishable from a genuine live attempt that failed.
-  let dryRun = null;
   let counterOffer;
   let status = "failure";
   let errorMessage;
@@ -528,67 +467,18 @@ async function negotiateTradeProposal(payload) {
       chatLog,
     });
     const { text } = await completeWithFallback(
-      "Propose a counter-offer and negotiation message for the pending trade described above.",
+      "Propose a counter-offer for the pending trade described above.",
       { systemPrompt, callSite: "trade_negotiation" },
     );
     const negotiation = parseNegotiationResponse(text);
     counterOffer = negotiation.counterOffer;
 
-    ({ dryRun } = resolveDryRun());
-    if (dryRun) {
-      logger.info(
-        `[Trade Negotiator][${tracking}] DRY_RUN set — would send counter-offer ` +
-          `${JSON.stringify(counterOffer)} message: '${negotiation.message}'`,
-      );
-      await captureDebugSnapshot(session.page, "trade-negotiation-dry-run");
-      status = "skipped_dry_run";
-      return negotiation;
-    }
-
-    const managerName = await resolveManagerDisplayName(session.page, offeringTeamId);
-    if (!managerName) {
-      // offering_team_id doesn't map to any team link on the page — no amount of redelivery of
-      // this exact payload fixes that (PermanentError, not a retryable Error).
-      throw new PermanentError(
-        `[Trade Negotiator][${tracking}] Could not resolve a manager name for offering_team_id ${offeringTeamId}.`,
-      );
-    }
-
-    // UNVERIFIED — recon pending (see plan): opening the chat widget and selecting a DM room by
-    // clicking the manager's name was confirmed live at a UI level, but not the exact selector,
-    // since the widget's toggle position was only confirmed by coordinate, not a stable locator.
-    await session.page
-      .getByText(/fantasy chat/i)
-      .first()
-      .click({ timeout: 5000 })
-      .catch(() => {});
-    const chatFrame = session.page.frameLocator(CHAT_IFRAME_SELECTOR);
-    await chatFrame.getByText(managerName, { exact: false }).first().click({ timeout: 5000 });
-    await captureDebugSnapshot(session.page, "trade-chat-before-send");
-
-    const messageBox = chatFrame.getByPlaceholder("Message");
-    await messageBox.click();
-    await messageBox.fill(negotiation.message);
-    await chatFrame.getByRole("button", { name: "Send" }).click();
-
-    // Best-effort confirmation, not a hard verify — if the feed doesn't show the sent text within
-    // the timeout, log a caveat rather than failing a message that may well have landed anyway
-    // (same soft-verify posture as waiver_sniper.js's post-submit confirmation).
-    const posted = await chatFrame
-      .getByText(negotiation.message, { exact: false })
-      .first()
-      .waitFor({ state: "visible", timeout: 5000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!posted) {
-      logger.warn(
-        `[Trade Negotiator][${tracking}] Could not confirm the message appeared in the chat feed — it may still have sent.`,
-      );
-    }
-    await captureDebugSnapshot(session.page, "trade-chat-after-send");
-
-    logger.info(`[Trade Negotiator][${tracking}] Counter-offer message sent.`);
-    status = "success";
+    logger.info(
+      `[Trade Negotiator][${tracking}] Computed counter-offer ${JSON.stringify(counterOffer)} — ` +
+        "advisory only, nothing sent.",
+    );
+    await captureDebugSnapshot(session.page, "trade-negotiation-computed");
+    status = "computed";
     return negotiation;
   } catch (error) {
     errorMessage = error.message;
@@ -596,13 +486,13 @@ async function negotiateTradeProposal(payload) {
       await captureDebugSnapshot(session.page, "trade-negotiation-failure");
     }
     // Every throw site above this point — session/navigation, the scrape, completeWithFallback
-    // exhausting every provider, a flaky non-JSON LLM response, a chat-DOM timeout — is a novel
-    // failure mode this function introduces beyond the two REST calls that already opt into
-    // withRetryDelay individually. Without this, any of them nacks with an instant requeue under
-    // connection.js's channel-wide prefetch(1), hot-looping a fresh Chromium launch exactly the
-    // way PR #42 already fixed once for SessionExpiredError — and since the trade-card/chat
-    // selectors are still UNVERIFIED (see scrapeTradePortalContent), a selector miss on the first
-    // live run is a realistic trigger, not just a rare edge case.
+    // exhausting every provider, a flaky non-JSON LLM response — is a novel failure mode this
+    // function introduces beyond the two REST calls that already opt into withRetryDelay
+    // individually. Without this, any of them nacks with an instant requeue under connection.js's
+    // channel-wide prefetch(1), hot-looping a fresh Chromium launch exactly the way PR #42 already
+    // fixed once for SessionExpiredError — and since the trade-card selectors are still UNVERIFIED
+    // (see scrapeTradePortalContent), a selector miss on the first live run is a realistic
+    // trigger, not just a rare edge case.
     if (!error.permanent && error.retryDelayMs === undefined) {
       withRetryDelay(error);
     }
@@ -613,7 +503,7 @@ async function negotiateTradeProposal(payload) {
       season,
       offeringTeamId,
       counterOffer,
-      dryRun,
+      dryRun: true, // this function never sends anything live — see the function doc comment
       status,
       errorMessage,
     });
@@ -629,7 +519,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/trade_bot.js '<trade_negotiations JSON payload>'\n" +
-        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/trade_bot.js \\\n" +
+        "Example: ESPN_LEAGUE_ID=1248158344 node src/bots/trade_bot.js \\\n" +
         `  '{"incoming_player_ids":["101"],"outgoing_player_ids":["202"],"season":2026,"week":3,"offering_team_id":"7"}'`,
     );
     process.exit(1);

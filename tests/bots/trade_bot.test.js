@@ -336,13 +336,14 @@ describe("buildNegotiationSystemPrompt", () => {
     chatLog: "Team A: interested in a deal?",
   };
 
-  it("instructs the model to return strict JSON only", () => {
+  it("instructs the model to return strict JSON only, with no message field", () => {
     const prompt = buildNegotiationSystemPrompt(context);
     expect(prompt).toMatch(/JSON/);
     expect(prompt).toMatch(/counter_offer/);
     expect(prompt).toMatch(/incoming_player_ids/);
     expect(prompt).toMatch(/outgoing_player_ids/);
-    expect(prompt).toMatch(/message/);
+    expect(prompt).toMatch(/Do not draft any message/);
+    expect(prompt).not.toContain('"message"');
   });
 
   it("includes the grounding data so the model has leverage context", () => {
@@ -359,11 +360,9 @@ describe("parseNegotiationResponse", () => {
   it("parses a plain JSON response", () => {
     const text = JSON.stringify({
       counter_offer: { incoming_player_ids: ["101"], outgoing_player_ids: ["202"] },
-      message: "How about this instead?",
     });
     expect(parseNegotiationResponse(text)).toEqual({
       counterOffer: { incomingPlayerIds: ["101"], outgoingPlayerIds: ["202"] },
-      message: "How about this instead?",
     });
   });
 
@@ -372,13 +371,11 @@ describe("parseNegotiationResponse", () => {
       "```json",
       JSON.stringify({
         counter_offer: { incoming_player_ids: ["101"], outgoing_player_ids: ["202"] },
-        message: "Deal?",
       }),
       "```",
     ].join("\n");
     expect(parseNegotiationResponse(text)).toEqual({
       counterOffer: { incomingPlayerIds: ["101"], outgoingPlayerIds: ["202"] },
-      message: "Deal?",
     });
   });
 
@@ -409,7 +406,6 @@ describe("parseNegotiationResponse", () => {
   it("throws a non-permanent error when incoming_player_ids is empty", () => {
     const text = JSON.stringify({
       counter_offer: { incoming_player_ids: [], outgoing_player_ids: ["202"] },
-      message: "hi",
     });
     let caught;
     try {
@@ -420,20 +416,5 @@ describe("parseNegotiationResponse", () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught.permanent).not.toBe(true);
     expect(caught.message).toMatch(/incoming_player_ids/);
-  });
-
-  it("throws a non-permanent error when message is missing", () => {
-    const text = JSON.stringify({
-      counter_offer: { incoming_player_ids: ["101"], outgoing_player_ids: ["202"] },
-    });
-    let caught;
-    try {
-      parseNegotiationResponse(text);
-    } catch (e) {
-      caught = e;
-    }
-    expect(caught).toBeInstanceOf(Error);
-    expect(caught.permanent).not.toBe(true);
-    expect(caught.message).toMatch(/message/);
   });
 });
