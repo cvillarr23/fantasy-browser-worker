@@ -71,6 +71,16 @@ describe("parseDigestResponse", () => {
     ]);
   });
 
+  it("extracts the JSON array from surrounding prose the model added despite instructions", () => {
+    const array = JSON.stringify([
+      { player_id: "500", sentiment: "positive", confidence: 0.7, suggested_action: "boost_waiver_priority" },
+    ]);
+    const text = `Based on the items above, here is my analysis:\n${array}\nLet me know if you need anything else.`;
+    expect(parseDigestResponse(text, validPlayerIds)).toEqual([
+      { playerId: "500", sentiment: "positive", confidence: 0.7, suggestedAction: "boost_waiver_priority" },
+    ]);
+  });
+
   it("throws a non-permanent error on malformed JSON", () => {
     let caught;
     try {
