@@ -20,6 +20,34 @@ const VALID_ACTIONS = new Set([
   "no_op",
 ]);
 
+// A single call covering 150+ players has failed against every provider tried: groq rejects it
+// on free-tier TPM, and smaller models silently drop fields once the output array gets this big.
+const DEFAULT_DIGEST_CHUNK_SIZE = 20;
+
+function digestChunkSize() {
+  return Number(process.env.RUMOR_DIGEST_CHUNK_SIZE) || DEFAULT_DIGEST_CHUNK_SIZE;
+}
+
+/** Splits rawSignals into chunks of at most `chunkSize` distinct players each, keeping every
+ * raw_signal for a given player in the same chunk -- buildDigestSystemPrompt's "synthesize ALL
+ * items for a given player into exactly ONE verdict" contract requires a player's items never be
+ * split across calls. Chunk order follows each player's first appearance in rawSignals. */
+function chunkRawSignalsByPlayer(rawSignals, chunkSize) {
+  const rowsByPlayer = new Map();
+  for (const row of rawSignals) {
+    const playerId = String(row.player_id);
+    if (!rowsByPlayer.has(playerId)) rowsByPlayer.set(playerId, []);
+    rowsByPlayer.get(playerId).push(row);
+  }
+
+  const playerGroups = [...rowsByPlayer.values()];
+  const chunks = [];
+  for (let i = 0; i < playerGroups.length; i += chunkSize) {
+    chunks.push(playerGroups.slice(i, i + chunkSize).flat());
+  }
+  return chunks;
+}
+
 /** Builds the system prompt for runRumorDigest's single, batched completeWithFallback call.
  * Like trade_bot.js's buildNegotiationSystemPrompt, completeWithFallback has no native JSON-mode
  * opts field, so strict-JSON output can only be enforced by instruction -- parseDigestResponse
@@ -152,9 +180,14 @@ function parseDigestResponse(text, validPlayerIds) {
   return results;
 }
 
-/** One digest run: read new raw_signals since the last watermark, batch them into a single
- * completeWithFallback call, persist the structured verdicts. Advisory only -- writes to
- * rumor_signals and nothing else. */
+/** One digest run: read new raw_signals since the last watermark, split them into per-player
+ * chunks (see chunkRawSignalsByPlayer), and make one completeWithFallback call per chunk rather
+ * than one call for the whole run -- persist the combined verdicts. Advisory only -- writes to
+ * rumor_signals and nothing else. Sequential, not parallel: keeps this cost-conservation
+ * strategy's whole point (few LLM calls per schedule interval) and avoids bursting a provider's
+ * per-minute rate limit across chunks. All-or-nothing: any chunk throwing fails the whole run and
+ * nothing persists, same as before chunking -- the watermark only ever advances on full success,
+ * safe to retry next run. */
 async function runRumorDigest() {
   const watermark = await fetchWatermark();
   const rawSignals = await fetchNewRawSignals(watermark);
@@ -168,19 +201,24 @@ async function runRumorDigest() {
 
   const validPlayerIds = new Set(rawSignals.map((row) => String(row.player_id)));
   const maxRawSignalId = Math.max(...rawSignals.map((row) => row.id));
+  const chunks = chunkRawSignalsByPlayer(rawSignals, digestChunkSize());
 
   logger.info(
     `[Rumor Digest] Batching ${rawSignals.length} new raw signal(s) across ${validPlayerIds.size} ` +
-      `distinct player(s) since watermark ${watermark ?? "<none>"} (up to raw_signals.id=${maxRawSignalId}).`,
+      `distinct player(s) since watermark ${watermark ?? "<none>"} (up to raw_signals.id=${maxRawSignalId}), ` +
+      `split into ${chunks.length} chunk(s) of up to ${digestChunkSize()} player(s) each.`,
   );
 
-  const systemPrompt = buildDigestSystemPrompt(rawSignals);
-  const { text } = await completeWithFallback(
-    "Analyze the batch of rumor/news items described above and produce the structured verdict array.",
-    { systemPrompt, callSite: "rumor_digest" },
-  );
-
-  const verdicts = parseDigestResponse(text, validPlayerIds);
+  const verdicts = [];
+  for (const chunk of chunks) {
+    const chunkPlayerIds = new Set(chunk.map((row) => String(row.player_id)));
+    const systemPrompt = buildDigestSystemPrompt(chunk);
+    const { text } = await completeWithFallback(
+      "Analyze the batch of rumor/news items described above and produce the structured verdict array.",
+      { systemPrompt, callSite: "rumor_digest" },
+    );
+    verdicts.push(...parseDigestResponse(text, chunkPlayerIds));
+  }
 
   const sourceRawSignalIdsByPlayer = new Map();
   for (const row of rawSignals) {
@@ -230,4 +268,9 @@ if (require.main === module) {
     });
 }
 
-module.exports = { runRumorDigest, buildDigestSystemPrompt, parseDigestResponse };
+module.exports = {
+  runRumorDigest,
+  buildDigestSystemPrompt,
+  parseDigestResponse,
+  chunkRawSignalsByPlayer,
+};
