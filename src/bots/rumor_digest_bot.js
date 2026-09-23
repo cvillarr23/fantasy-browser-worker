@@ -64,6 +64,16 @@ function stripCodeFence(text) {
   return match ? match[1] : text;
 }
 
+// Slices out the outermost [...] so a model that prepends/appends prose despite being told not
+// to (observed from ollama's smaller models) still parses. Returns the input unchanged if no
+// bracket pair is found, so JSON.parse's own error still fires for non-JSON output.
+function extractJsonArray(text) {
+  const start = text.indexOf("[");
+  const end = text.lastIndexOf("]");
+  if (start === -1 || end === -1 || end < start) return text;
+  return text.slice(start, end + 1);
+}
+
 /** Defensive counterpart to buildDigestSystemPrompt's strict-JSON instruction. Throws a plain
  * (non-permanent) Error only when the response is unusable as a whole -- not valid JSON, or not
  * an array -- since a different scheduled run (or a different provider in the fallback chain)
@@ -78,7 +88,7 @@ function stripCodeFence(text) {
 function parseDigestResponse(text, validPlayerIds) {
   let parsed;
   try {
-    parsed = JSON.parse(stripCodeFence(text));
+    parsed = JSON.parse(extractJsonArray(stripCodeFence(text)));
   } catch (parseError) {
     throw new Error(
       `[Rumor Digest] LLM response was not valid JSON: ${parseError.message}`,
