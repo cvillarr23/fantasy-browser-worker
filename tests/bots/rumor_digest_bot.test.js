@@ -11,6 +11,7 @@ const {
   runRumorDigest,
   buildDigestSystemPrompt,
   parseDigestResponse,
+  chunkRawSignalsByPlayer,
 } = require("../../src/bots/rumor_digest_bot");
 
 function rawSignal(overrides = {}) {
@@ -138,6 +139,41 @@ describe("parseDigestResponse", () => {
   });
 });
 
+describe("chunkRawSignalsByPlayer", () => {
+  it("keeps a small batch in a single chunk", () => {
+    const signals = [
+      rawSignal({ id: 1, player_id: "500" }),
+      rawSignal({ id: 2, player_id: "600" }),
+    ];
+    expect(chunkRawSignalsByPlayer(signals, 20)).toEqual([signals]);
+  });
+
+  it("splits players (not raw signals) across chunks once the player count exceeds chunkSize", () => {
+    const signals = [
+      rawSignal({ id: 1, player_id: "500" }),
+      rawSignal({ id: 2, player_id: "600" }),
+      rawSignal({ id: 3, player_id: "700" }),
+    ];
+    const chunks = chunkRawSignalsByPlayer(signals, 2);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].map((r) => r.player_id)).toEqual(["500", "600"]);
+    expect(chunks[1].map((r) => r.player_id)).toEqual(["700"]);
+  });
+
+  it("never splits one player's raw signals across two chunks", () => {
+    const signals = [
+      rawSignal({ id: 1, player_id: "500" }),
+      rawSignal({ id: 2, player_id: "500" }),
+      rawSignal({ id: 3, player_id: "600" }),
+    ];
+    const chunks = chunkRawSignalsByPlayer(signals, 1);
+    expect(chunks).toEqual([
+      [signals[0], signals[1]],
+      [signals[2]],
+    ]);
+  });
+});
+
 describe("runRumorDigest", () => {
   it("skips the LLM call entirely when there are no new raw signals", async () => {
     fetchWatermark.mockResolvedValue(42);
@@ -200,5 +236,55 @@ describe("runRumorDigest", () => {
 
     await expect(runRumorDigest()).rejects.toThrow(/JSON/);
     expect(persistRumorSignals).not.toHaveBeenCalled();
+  });
+
+  it("makes one completeWithFallback call per chunk and stamps every row with the run's overall maxRawSignalId, not the chunk's own max", async () => {
+    const originalChunkSize = process.env.RUMOR_DIGEST_CHUNK_SIZE;
+    process.env.RUMOR_DIGEST_CHUNK_SIZE = "1";
+    try {
+      fetchWatermark.mockResolvedValue(null);
+      fetchNewRawSignals.mockResolvedValue([
+        rawSignal({ id: 10, player_id: "500" }),
+        rawSignal({ id: 20, player_id: "600" }),
+      ]);
+      completeWithFallback
+        .mockResolvedValueOnce({
+          text: JSON.stringify([
+            { player_id: "500", sentiment: "negative", confidence: 0.9, suggested_action: "bench_watch" },
+          ]),
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify([
+            { player_id: "600", sentiment: "neutral", confidence: 0.1, suggested_action: "no_op" },
+          ]),
+        });
+      persistRumorSignals.mockResolvedValue();
+
+      const result = await runRumorDigest();
+
+      expect(completeWithFallback).toHaveBeenCalledTimes(2);
+      expect(persistRumorSignals).toHaveBeenCalledWith([
+        {
+          playerId: "500",
+          sentiment: "negative",
+          confidence: 0.9,
+          suggestedAction: "bench_watch",
+          sourceRawSignalIds: [10],
+          maxRawSignalId: 20,
+        },
+        {
+          playerId: "600",
+          sentiment: "neutral",
+          confidence: 0.1,
+          suggestedAction: "no_op",
+          sourceRawSignalIds: [20],
+          maxRawSignalId: 20,
+        },
+      ]);
+      expect(result).toEqual({ processed: 2, written: 2 });
+    } finally {
+      if (originalChunkSize === undefined) delete process.env.RUMOR_DIGEST_CHUNK_SIZE;
+      else process.env.RUMOR_DIGEST_CHUNK_SIZE = originalChunkSize;
+    }
   });
 });
