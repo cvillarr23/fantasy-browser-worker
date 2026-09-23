@@ -21,11 +21,25 @@ const VALID_ACTIONS = new Set([
 ]);
 
 // A single call covering 150+ players has failed against every provider tried: groq rejects it
-// on free-tier TPM, and smaller models silently drop fields once the output array gets this big.
+// on free-tier TPM, and smaller models drop fields once the output array gets this big.
+// maxPlayers guards the latter, maxEstimatedTokens the former (see chunkRawSignalsByPlayer).
 const DEFAULT_DIGEST_CHUNK_SIZE = 20;
+// Real observed groq TPM limit is 8000; headroom covers completion tokens plus the fixed
+// instructional prompt text, which also counts against the same per-minute budget.
+const DEFAULT_DIGEST_TOKEN_BUDGET = 6000;
 
 function digestChunkSize() {
   return Number(process.env.RUMOR_DIGEST_CHUNK_SIZE) || DEFAULT_DIGEST_CHUNK_SIZE;
+}
+
+function digestTokenBudget() {
+  return Number(process.env.RUMOR_DIGEST_TOKEN_BUDGET) || DEFAULT_DIGEST_TOKEN_BUDGET;
+}
+
+// No tokenizer dependency in this codebase -- ~4 chars/token is a standard rough-estimate
+// heuristic for English text, good enough to stay under a budget with margin, not exact.
+function estimateTokens(rawSignals) {
+  return Math.ceil(buildDigestSystemPrompt(rawSignals).length / 4);
 }
 
 // Groq's TPM budget is a rolling per-minute window shared across every chunk, not per-call - a
@@ -46,11 +60,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Splits rawSignals into chunks of at most `chunkSize` distinct players each, keeping every
- * raw_signal for a given player in the same chunk -- buildDigestSystemPrompt's "synthesize ALL
- * items for a given player into exactly ONE verdict" contract requires a player's items never be
- * split across calls. Chunk order follows each player's first appearance in rawSignals. */
-function chunkRawSignalsByPlayer(rawSignals, chunkSize) {
+/** Greedily packs rawSignals into chunks bounded by BOTH maxPlayers and maxEstimatedTokens,
+ * whichever is hit first, keeping every raw_signal for a given player in the same chunk --
+ * buildDigestSystemPrompt's "synthesize ALL items for a given player into exactly ONE verdict"
+ * contract requires a player's items never be split across calls. A player whose own items alone
+ * exceed maxEstimatedTokens still gets a (oversized) chunk to itself rather than being dropped --
+ * chunk order follows each player's first appearance in rawSignals. */
+function chunkRawSignalsByPlayer(rawSignals, { maxPlayers, maxEstimatedTokens }) {
   const rowsByPlayer = new Map();
   for (const row of rawSignals) {
     const playerId = String(row.player_id);
@@ -58,11 +74,26 @@ function chunkRawSignalsByPlayer(rawSignals, chunkSize) {
     rowsByPlayer.get(playerId).push(row);
   }
 
-  const playerGroups = [...rowsByPlayer.values()];
   const chunks = [];
-  for (let i = 0; i < playerGroups.length; i += chunkSize) {
-    chunks.push(playerGroups.slice(i, i + chunkSize).flat());
+  let currentRows = [];
+  let currentPlayerCount = 0;
+
+  for (const playerRows of rowsByPlayer.values()) {
+    const candidateRows = [...currentRows, ...playerRows];
+    const exceedsTokenBudget = estimateTokens(candidateRows) > maxEstimatedTokens;
+    const exceedsPlayerCap = currentPlayerCount + 1 > maxPlayers;
+
+    if (currentRows.length > 0 && (exceedsTokenBudget || exceedsPlayerCap)) {
+      chunks.push(currentRows);
+      currentRows = [...playerRows];
+      currentPlayerCount = 1;
+    } else {
+      currentRows = candidateRows;
+      currentPlayerCount += 1;
+    }
   }
+  if (currentRows.length > 0) chunks.push(currentRows);
+
   return chunks;
 }
 
@@ -219,12 +250,16 @@ async function runRumorDigest() {
 
   const validPlayerIds = new Set(rawSignals.map((row) => String(row.player_id)));
   const maxRawSignalId = Math.max(...rawSignals.map((row) => row.id));
-  const chunks = chunkRawSignalsByPlayer(rawSignals, digestChunkSize());
+  const chunks = chunkRawSignalsByPlayer(rawSignals, {
+    maxPlayers: digestChunkSize(),
+    maxEstimatedTokens: digestTokenBudget(),
+  });
 
   logger.info(
     `[Rumor Digest] Batching ${rawSignals.length} new raw signal(s) across ${validPlayerIds.size} ` +
       `distinct player(s) since watermark ${watermark ?? "<none>"} (up to raw_signals.id=${maxRawSignalId}), ` +
-      `split into ${chunks.length} chunk(s) of up to ${digestChunkSize()} player(s) each.`,
+      `split into ${chunks.length} chunk(s) of up to ${digestChunkSize()} player(s)/${digestTokenBudget()} ` +
+      `est. token(s) each.`,
   );
 
   const verdicts = [];

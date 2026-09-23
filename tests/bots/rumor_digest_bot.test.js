@@ -140,21 +140,25 @@ describe("parseDigestResponse", () => {
 });
 
 describe("chunkRawSignalsByPlayer", () => {
+  const NO_TOKEN_LIMIT = Infinity;
+
   it("keeps a small batch in a single chunk", () => {
     const signals = [
       rawSignal({ id: 1, player_id: "500" }),
       rawSignal({ id: 2, player_id: "600" }),
     ];
-    expect(chunkRawSignalsByPlayer(signals, 20)).toEqual([signals]);
+    expect(
+      chunkRawSignalsByPlayer(signals, { maxPlayers: 20, maxEstimatedTokens: NO_TOKEN_LIMIT }),
+    ).toEqual([signals]);
   });
 
-  it("splits players (not raw signals) across chunks once the player count exceeds chunkSize", () => {
+  it("splits players (not raw signals) across chunks once the player count exceeds maxPlayers", () => {
     const signals = [
       rawSignal({ id: 1, player_id: "500" }),
       rawSignal({ id: 2, player_id: "600" }),
       rawSignal({ id: 3, player_id: "700" }),
     ];
-    const chunks = chunkRawSignalsByPlayer(signals, 2);
+    const chunks = chunkRawSignalsByPlayer(signals, { maxPlayers: 2, maxEstimatedTokens: NO_TOKEN_LIMIT });
     expect(chunks).toHaveLength(2);
     expect(chunks[0].map((r) => r.player_id)).toEqual(["500", "600"]);
     expect(chunks[1].map((r) => r.player_id)).toEqual(["700"]);
@@ -166,11 +170,34 @@ describe("chunkRawSignalsByPlayer", () => {
       rawSignal({ id: 2, player_id: "500" }),
       rawSignal({ id: 3, player_id: "600" }),
     ];
-    const chunks = chunkRawSignalsByPlayer(signals, 1);
+    const chunks = chunkRawSignalsByPlayer(signals, { maxPlayers: 1, maxEstimatedTokens: NO_TOKEN_LIMIT });
     expect(chunks).toEqual([
       [signals[0], signals[1]],
       [signals[2]],
     ]);
+  });
+
+  it("splits on token budget even when the player count is under maxPlayers", () => {
+    const signals = [
+      rawSignal({ id: 1, player_id: "500", raw_text: "x".repeat(400) }),
+      rawSignal({ id: 2, player_id: "600", raw_text: "x".repeat(400) }),
+    ];
+    // Each player's own prompt is well under a generous budget, but the pair together isn't -
+    // forces a split despite both fitting maxPlayers: 20.
+    const soloTokens = Math.ceil(buildDigestSystemPrompt([signals[0]]).length / 4);
+    const chunks = chunkRawSignalsByPlayer(signals, {
+      maxPlayers: 20,
+      maxEstimatedTokens: soloTokens + 5,
+    });
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].map((r) => r.player_id)).toEqual(["500"]);
+    expect(chunks[1].map((r) => r.player_id)).toEqual(["600"]);
+  });
+
+  it("still gives an oversized single player its own chunk rather than dropping data", () => {
+    const signals = [rawSignal({ id: 1, player_id: "500", raw_text: "x".repeat(10_000) })];
+    const chunks = chunkRawSignalsByPlayer(signals, { maxPlayers: 20, maxEstimatedTokens: 10 });
+    expect(chunks).toEqual([signals]);
   });
 });
 
