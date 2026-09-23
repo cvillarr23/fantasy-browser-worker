@@ -63,12 +63,11 @@ for the watermark design and the internal-vs-ESPN player id warning.
 
 ### Trade negotiation test job (`k8s/test-trade-bot-job.yaml`)
 
-Rehearses `trade_bot.js`'s `negotiateTradeProposal` against a real pending trade. `DRY_RUN`
-defaults to `"true"`: it scrapes, grounds against roster-deficit/VORP data, and calls the LLM for a
-counter-offer, but only logs what it would send — flip to `"false"` only once a dry run confirms
-the still-unverified trade-card/chat-DM selectors work. Its `execution_log` write
-(`offering_team_id`/`counter_offer`/`dry_run` columns) will silently no-op until those columns are
-added on `fantasy-core-pipeline`'s side — expected, not a bug in this job.
+Rehearses `trade_bot.js`'s `negotiateTradeProposal` against a real pending trade. Advisory only —
+it scrapes, grounds against roster-deficit/VORP data, calls the LLM for a counter-offer, and logs
+it; no AI-drafted message is generated, and nothing is ever posted to ESPN on your behalf. Its
+`execution_log` write (`offering_team_id`/`counter_offer`/`dry_run` columns) will silently no-op
+until those columns are added on `fantasy-core-pipeline`'s side — expected, not a bug in this job.
 
 ## Image release + Argo CD Image Updater contract
 - Pushes to `main` publish:

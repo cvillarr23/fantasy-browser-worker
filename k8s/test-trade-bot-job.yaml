@@ -1,6 +1,6 @@
 # Manual test Job for trade_bot.js's negotiateTradeProposal — NOT part of fantasy-infra's
 # GitOps-synced tree, so it never auto-deploys via Argo CD. See README.md's "Trade negotiation
-# test job" section for the DRY_RUN safety note and the known execution_log no-op.
+# test job" section for the advisory-only behavior and the known execution_log no-op.
 #
 # Usage:
 #   git push origin main                                   # triggers the build+publish workflow
@@ -45,8 +45,6 @@ spec:
                "week":REPLACE_ME,
                "offering_team_id":"REPLACE_ME"}
           env:
-            - name: DRY_RUN
-              value: "true" # flip to "false" only after a clean dry run confirms the DOM selectors
             - name: ESPN_LEAGUE_ID
               valueFrom:
                 configMapKeyRef:
