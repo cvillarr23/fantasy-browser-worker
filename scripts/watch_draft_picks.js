@@ -1,4 +1,5 @@
 const redis = require("redis");
+const { buildPicksStreamKey } = require("../src/bots/draft_sync");
 
 /**
  * Local inspection tool for draft_sync.js — subscribes to the `draft_picks` pub/sub channel and
@@ -6,11 +7,12 @@ const redis = require("redis");
  * -> Redis -> here) without needing a real consumer service running yet.
  *
  * Usage (typically after `kubectl port-forward svc/fantasy-cache 6379:6379`):
- *   node scripts/watch_draft_picks.js [leagueId]
+ *   node scripts/watch_draft_picks.js [leagueId] [seasonId]
  *
- * Pass leagueId to also dump the full pick history so far (from the `draft_picks:{leagueId}`
- * stream) before switching to live-tail mode — useful if you attach after the draft's already in
- * progress. Without it, this only shows picks published from the moment it connects onward.
+ * Pass leagueId and seasonId to also dump the full pick history so far (from the
+ * `draft_picks:{leagueId}:{seasonId}` stream) before switching to live-tail mode — useful if you
+ * attach after the draft's already in progress. Without them, this only shows picks published
+ * from the moment it connects onward.
  */
 
 const REDIS_HOST = process.env.REDIS_HOST || "127.0.0.1";
@@ -25,8 +27,8 @@ function formatPick(event) {
   );
 }
 
-async function dumpHistory(client, leagueId) {
-  const streamKey = `draft_picks:${leagueId}`;
+async function dumpHistory(client, leagueId, seasonId) {
+  const streamKey = buildPicksStreamKey(leagueId, seasonId);
   const entries = await client.xRange(streamKey, "-", "+");
   if (entries.length === 0) {
     console.log(`[Watch] No history yet on ${streamKey}.`);
@@ -43,7 +45,14 @@ async function dumpHistory(client, leagueId) {
 }
 
 async function main() {
-  const leagueId = process.argv[2];
+  const [leagueId, seasonId] = process.argv.slice(2);
+  if (leagueId && !seasonId) {
+    console.error(
+      "[Watch] leagueId given without seasonId — the picks stream is keyed by both. " +
+        "Usage: node scripts/watch_draft_picks.js [leagueId] [seasonId]",
+    );
+    process.exit(1);
+  }
 
   const client = redis.createClient({ url: `redis://${REDIS_HOST}:${REDIS_PORT}` });
   client.on("error", (err) => console.error(`[Watch] Redis client error: ${err.message}`));
@@ -51,7 +60,7 @@ async function main() {
   console.log(`[Watch] Connected to Redis at ${REDIS_HOST}:${REDIS_PORT}`);
 
   if (leagueId) {
-    await dumpHistory(client, leagueId);
+    await dumpHistory(client, leagueId, seasonId);
   }
 
   const subscriber = client.duplicate();
