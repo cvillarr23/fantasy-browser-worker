@@ -2,10 +2,8 @@
 # tree, so it never auto-deploys via Argo CD. Apply/delete this by hand to exercise the digest
 # against the real fantasy-db.
 #
-# The production CronJob (the actual hourly schedule, RUMOR_DIGEST_INTERVAL-driven) belongs in
-# fantasy-infra as its own issue, mirroring how CORE-13's ingestion CronJob (INFRA-11,
-# base/core-pipeline/fantasy-rumor-syncer-cronjob.yaml) was scoped separately from CORE-13
-# itself — not created as part of this issue.
+# The production CronJob lives in fantasy-infra (base/browser-worker/rumor-digest-bot-cronjob.yaml,
+# daily not RUMOR_DIGEST_INTERVAL-driven) - this manual Job stays for on-demand runs/debugging.
 #
 # Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
 # locally-built image, same as k8s/test-lineup-bot-job.yaml — the repo is private, so the package
@@ -15,12 +13,9 @@
 # opens a browser page or calls ESPN's API. It only reads fantasy-core-pipeline's raw_signals
 # table and writes rumor_signals, both via Postgres directly.
 #
-# GROQ_API_KEY/GEMINI_API_KEY are deliberately NOT set here, same as every other manifest in this
-# repo — src/lib/llm_client.js falls back to OpenBao (`bao kv get secret/fantasy/<provider>`) when
-# an env var is unset. That in-cluster fallback path is unverified as of this change (no manifest
-# anywhere yet sets these keys directly, nor confirms `bao kv get` succeeds without an explicit
-# `bao login` first) — if this Job's log shows every provider skipped with "No API key resolved",
-# that's the fallback path failing, not a bug in this bot.
+# GROQ_API_KEY comes from the groq-api-key ExternalSecret (fantasy-infra) - llm_client.js's
+# in-process OpenBao fallback shells out to `bao`, which has no route to OpenBao from this pod
+# and always fails. GEMINI_API_KEY has no matching ExternalSecret yet, so gemini still skips.
 #
 # PREREQUISITE: fantasy-core-pipeline's rumor_signals table migration (models.py's
 # CREATE_RUMOR_SIGNALS_TABLE) must have run against this fantasy-db instance first.
@@ -70,6 +65,11 @@ spec:
                 secretKeyRef:
                   name: database-credentials
                   key: postgres-password
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: groq-api-key
+                  key: groq_api_key
             # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
             # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
             # grpc://.
