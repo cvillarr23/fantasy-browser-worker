@@ -50,6 +50,11 @@ spec:
                 configMapKeyRef:
                   name: fantasy-league-config
                   key: ESPN_LEAGUE_ID
+            - name: ESPN_TEAM_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: fantasy-league-config
+                  key: ESPN_TEAM_ID
             # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
             # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
             # grpc://.
