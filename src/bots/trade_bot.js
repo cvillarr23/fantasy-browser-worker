@@ -554,4 +554,5 @@ module.exports = {
   buildNegotiationSystemPrompt,
   parseNegotiationResponse,
   negotiateTradeProposal,
+  buildTradePortalUrl,
 };

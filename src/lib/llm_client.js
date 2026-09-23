@@ -31,7 +31,7 @@ pool.on("error", (err) => {
 });
 
 const DEFAULT_PROVIDER_PRIORITY =
-  "groq:llama-3.1-70b-versatile,gemini:gemini-1.5-flash,ollama:llama3.1:8b";
+  "groq:llama-3.3-70b-versatile,gemini:gemini-1.5-flash,ollama:llama3.1:8b";
 
 // Conservative free-tier request-per-minute budgets. Only used for providers with no
 // per-provider *_RPM_LIMIT env override -- ollama has no entry here because it's a local
