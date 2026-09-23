@@ -240,7 +240,9 @@ describe("runRumorDigest", () => {
 
   it("makes one completeWithFallback call per chunk and stamps every row with the run's overall maxRawSignalId, not the chunk's own max", async () => {
     const originalChunkSize = process.env.RUMOR_DIGEST_CHUNK_SIZE;
+    const originalChunkDelay = process.env.RUMOR_DIGEST_CHUNK_DELAY_MS;
     process.env.RUMOR_DIGEST_CHUNK_SIZE = "1";
+    process.env.RUMOR_DIGEST_CHUNK_DELAY_MS = "0";
     try {
       fetchWatermark.mockResolvedValue(null);
       fetchNewRawSignals.mockResolvedValue([
@@ -285,6 +287,8 @@ describe("runRumorDigest", () => {
     } finally {
       if (originalChunkSize === undefined) delete process.env.RUMOR_DIGEST_CHUNK_SIZE;
       else process.env.RUMOR_DIGEST_CHUNK_SIZE = originalChunkSize;
+      if (originalChunkDelay === undefined) delete process.env.RUMOR_DIGEST_CHUNK_DELAY_MS;
+      else process.env.RUMOR_DIGEST_CHUNK_DELAY_MS = originalChunkDelay;
     }
   });
 });

@@ -28,6 +28,24 @@ function digestChunkSize() {
   return Number(process.env.RUMOR_DIGEST_CHUNK_SIZE) || DEFAULT_DIGEST_CHUNK_SIZE;
 }
 
+// Groq's TPM budget is a rolling per-minute window shared across every chunk, not per-call - a
+// real run hit 429 on chunk 2 despite each chunk individually fitting. 60s clears any per-minute
+// budget without needing to track token usage against an unknown, provider-specific window.
+const DEFAULT_CHUNK_DELAY_MS = 60_000;
+
+function chunkDelayMs() {
+  // Unlike digestChunkSize's `||` fallback, this must accept an explicit 0 (disabling the delay,
+  // as tests do) rather than treating it as unset.
+  const raw = process.env.RUMOR_DIGEST_CHUNK_DELAY_MS;
+  if (raw === undefined || raw === "") return DEFAULT_CHUNK_DELAY_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_CHUNK_DELAY_MS;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Splits rawSignals into chunks of at most `chunkSize` distinct players each, keeping every
  * raw_signal for a given player in the same chunk -- buildDigestSystemPrompt's "synthesize ALL
  * items for a given player into exactly ONE verdict" contract requires a player's items never be
@@ -210,7 +228,8 @@ async function runRumorDigest() {
   );
 
   const verdicts = [];
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
     const chunkPlayerIds = new Set(chunk.map((row) => String(row.player_id)));
     const systemPrompt = buildDigestSystemPrompt(chunk);
     const { text } = await completeWithFallback(
@@ -218,6 +237,7 @@ async function runRumorDigest() {
       { systemPrompt, callSite: "rumor_digest" },
     );
     verdicts.push(...parseDigestResponse(text, chunkPlayerIds));
+    if (i < chunks.length - 1) await sleep(chunkDelayMs());
   }
 
   const sourceRawSignalIdsByPlayer = new Map();
