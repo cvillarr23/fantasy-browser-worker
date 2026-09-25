@@ -13,9 +13,9 @@
 # opens a browser page or calls ESPN's API. It only reads fantasy-core-pipeline's raw_signals
 # table and writes rumor_signals, both via Postgres directly.
 #
-# GROQ_API_KEY comes from the groq-api-key ExternalSecret (fantasy-infra) - llm_client.js's
-# in-process OpenBao fallback shells out to `bao`, which has no route to OpenBao from this pod
-# and always fails. GEMINI_API_KEY has no matching ExternalSecret yet, so gemini still skips.
+# GROQ_API_KEY and GEMINI_API_KEY come from ExternalSecrets (fantasy-infra) - llm_client.js's
+# in-process OpenBao fallback shells out to `bao`, which has no route to OpenBao from this pod.
+# The gemini-api-key ExternalSecret must exist in-cluster before this pod sees a real value.
 #
 # PREREQUISITE: fantasy-core-pipeline's rumor_signals table migration (models.py's
 # CREATE_RUMOR_SIGNALS_TABLE) must have run against this fantasy-db instance first.
@@ -70,6 +70,11 @@ spec:
                 secretKeyRef:
                   name: groq-api-key
                   key: groq_api_key
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gemini-api-key
+                  key: gemini_api_key
             # Sends OTel traces to homelab-deployment's Tempo instance -- see the matching env var
             # comment in fantasy-infra's keda-scaledjob.yaml for why this must be http://, not
             # grpc://.

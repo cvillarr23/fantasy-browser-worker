@@ -31,7 +31,7 @@ pool.on("error", (err) => {
 });
 
 const DEFAULT_PROVIDER_PRIORITY =
-  "groq:openai/gpt-oss-120b,gemini:gemini-1.5-flash,ollama:llama3.1:8b";
+  "groq:openai/gpt-oss-120b,gemini:gemini-3.1-flash-lite,ollama:llama3.1:8b";
 
 // Conservative free-tier request-per-minute budgets. Only used for providers with no
 // per-provider *_RPM_LIMIT env override -- ollama has no entry here because it's a local
@@ -222,6 +222,10 @@ async function callGemini(model, prompt, opts, apiKey) {
         ? { systemInstruction: { parts: [{ text: opts.systemPrompt }] } }
         : {}),
       generationConfig: {
+        // Unconditional: every caller wants strict JSON and previously had only prompt
+        // wording to enforce it. Gemini constrains this server-side, unlike groq's
+        // prompt-only json_mode.
+        response_mime_type: "application/json",
         ...(opts.maxTokens ? { maxOutputTokens: opts.maxTokens } : {}),
         ...(opts.temperature !== undefined
           ? { temperature: opts.temperature }
