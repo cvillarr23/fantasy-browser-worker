@@ -57,6 +57,15 @@ const DEFAULT_OLLAMA_URL =
 // base/ollama/http-scaled-object.yaml exactly. This is deliberately the same hostname
 // DEFAULT_OLLAMA_URL used to point at directly, before routing through the interceptor.
 const DEFAULT_OLLAMA_HOST_HEADER = "ollama.default.svc.cluster.local";
+// Short warm-up timeout for startOllama(): it only needs the request to *reach* the interceptor
+// (which starts scaling immediately), not to wait out a full cold-start round trip.
+const DEFAULT_OLLAMA_WARMUP_TIMEOUT_MS = 5000;
+// isOllamaReady() bypasses the interceptor entirely (see below) and talks to the real Ollama
+// Service directly -- a short timeout here just guards against a half-open/blackholed connection.
+const DEFAULT_OLLAMA_READY_TIMEOUT_MS = 1500;
+// The real Ollama Service, not the interceptor -- going through the interceptor to check
+// readiness would itself trigger/extend scale-up, defeating a passive "is it already warm" check.
+const DEFAULT_OLLAMA_DIRECT_URL = "http://ollama.default.svc.cluster.local:11434";
 
 // provider -> array of request timestamps (ms), used for the in-memory sliding-window rate
 // limiter below. Process-local by design: each pod/job instance guards its own budget slice
@@ -255,12 +264,15 @@ async function callGemini(model, prompt, opts, apiKey) {
 // against this exact Node version, not just from the spec text. That makes `fetch` unusable for
 // routing through the KEDA HTTP Add-on interceptor, which dispatches purely on the request's
 // Host header (see http-scaled-object.yaml in fantasy-infra). Node's lower-level `http`/`https`
-// modules have no such restriction, so callOllama uses this instead.
-function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
+// modules have no such restriction, so callOllama/startOllama/isOllamaReady all use this instead.
+function requestWithHostHeader(
+  url,
+  { method = "POST", body, hostHeader, timeoutMs },
+) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === "https:" ? https : http;
-    const payload = Buffer.from(JSON.stringify(body));
+    const payload = body !== undefined ? Buffer.from(JSON.stringify(body)) : null;
 
     let settled = false;
     const timeoutError = () => {
@@ -290,10 +302,14 @@ function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
         hostname: target.hostname,
         port: target.port || (target.protocol === "https:" ? 443 : 80),
         path: `${target.pathname}${target.search}`,
-        method: "POST",
+        method,
         headers: {
-          "Content-Type": "application/json",
-          "Content-Length": payload.length,
+          ...(payload
+            ? {
+                "Content-Type": "application/json",
+                "Content-Length": payload.length,
+              }
+            : {}),
           ...(hostHeader ? { Host: hostHeader } : {}),
         },
         timeout: timeoutMs,
@@ -314,20 +330,24 @@ function postJsonWithHostHeader(url, body, { hostHeader, timeoutMs }) {
 
     req.on("timeout", () => req.destroy(timeoutError()));
     req.on("error", (err) => settle(reject, err));
-    req.write(payload);
+    if (payload) req.write(payload);
     req.end();
   });
 }
 
-async function callOllama(model, prompt, opts) {
+// Only default the Host header when OLLAMA_URL is also at its default -- a manually configured
+// OLLAMA_URL (e.g. local dev) shouldn't get a stale interceptor Host header unless
+// OLLAMA_HOST_HEADER asks for it explicitly. Shared by callOllama and startOllama.
+function resolveInterceptorTarget() {
   const baseUrl = process.env.OLLAMA_URL || DEFAULT_OLLAMA_URL;
-  // Only default the Host header when OLLAMA_URL itself is also at its default (the
-  // interceptor's address): a manually configured OLLAMA_URL pointing at a real, directly
-  // reachable Ollama instance (e.g. local dev) shouldn't get a stale interceptor-routing Host
-  // header stamped onto it unless that's explicitly asked for via OLLAMA_HOST_HEADER.
   const hostHeader =
     process.env.OLLAMA_HOST_HEADER ||
     (process.env.OLLAMA_URL ? undefined : DEFAULT_OLLAMA_HOST_HEADER);
+  return { baseUrl, hostHeader };
+}
+
+async function callOllama(model, prompt, opts) {
+  const { baseUrl, hostHeader } = resolveInterceptorTarget();
 
   // No manual scale-up call here anymore: the KEDA HTTP Add-on interceptor (see
   // base/ollama/http-scaled-object.yaml) does this itself on any request that reaches it,
@@ -335,9 +355,9 @@ async function callOllama(model, prompt, opts) {
   // beforehand. The Host header is what tells the interceptor which HTTPScaledObject (and
   // therefore which Deployment/Service) this request is for -- it has nothing to do with
   // baseUrl's own hostname.
-  const response = await postJsonWithHostHeader(
-    `${baseUrl}/api/generate`,
-    {
+  const response = await requestWithHostHeader(`${baseUrl}/api/generate`, {
+    method: "POST",
+    body: {
       model,
       prompt: opts.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt,
       stream: false,
@@ -348,8 +368,9 @@ async function callOllama(model, prompt, opts) {
         ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
       },
     },
-    { hostHeader, timeoutMs: requestTimeoutMs("ollama") },
-  );
+    hostHeader,
+    timeoutMs: requestTimeoutMs("ollama"),
+  });
 
   if (!response.ok) {
     throw classifyHttpError(response.status, response.text);
@@ -359,6 +380,46 @@ async function callOllama(model, prompt, opts) {
   if (!data?.response)
     throw new Error("Ollama response missing 'response' field");
   return data.response;
+}
+
+/**
+ * Fires a cheap GET through the interceptor to trigger Ollama's 0->1 scale-up ahead of a known
+ * usage window, without waiting out a full cold-start round trip -- use isOllamaReady() to check
+ * whether that scale-up has actually finished. Never throws; `triggered: false` only when the
+ * interceptor Service itself couldn't be reached (a real request-level failure), not when Ollama
+ * is merely still cold (that shows up as a TimeoutError, which still counts as triggered).
+ */
+async function startOllama() {
+  const { baseUrl, hostHeader } = resolveInterceptorTarget();
+  try {
+    await requestWithHostHeader(`${baseUrl}/api/tags`, {
+      method: "GET",
+      hostHeader,
+      timeoutMs: DEFAULT_OLLAMA_WARMUP_TIMEOUT_MS,
+    });
+    return { triggered: true };
+  } catch (err) {
+    logger.info(`[LLM Client] startOllama warm-up request settled: ${err.message}`);
+    return { triggered: err.name === "TimeoutError" };
+  }
+}
+
+/**
+ * Passive readiness probe: hits the real Ollama Service directly (bypassing the interceptor,
+ * which would itself trigger/extend scale-up) with a short timeout. Never throws -- `true` only
+ * on an HTTP 200 from /api/tags, `false` on anything else (refused, timed out, non-2xx).
+ */
+async function isOllamaReady() {
+  const directUrl = process.env.OLLAMA_DIRECT_URL || DEFAULT_OLLAMA_DIRECT_URL;
+  try {
+    const response = await requestWithHostHeader(`${directUrl}/api/tags`, {
+      method: "GET",
+      timeoutMs: DEFAULT_OLLAMA_READY_TIMEOUT_MS,
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 // needsApiKey=false for ollama -- it's an unauthenticated in-cluster endpoint, not a cloud API.
@@ -574,4 +635,4 @@ async function completeWithFallback(prompt, opts = {}) {
   });
 }
 
-module.exports = { completeWithFallback };
+module.exports = { completeWithFallback, startOllama, isOllamaReady };

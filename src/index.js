@@ -3,6 +3,7 @@ const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
 const { executeTradeEvaluation, negotiateTradeProposal } = require("./bots/trade_bot");
+const { processAsyncLlmRequest } = require("./lib/llm_async_queue");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
 const { shutdownTelemetry } = require("./telemetry/init");
@@ -31,6 +32,10 @@ async function dispatch(queueName, payload) {
     case "trade_negotiations":
       logger.info("Invoking Trade Negotiation Engine...");
       return negotiateTradeProposal(payload);
+
+    case "llm_requests":
+      logger.info("Invoking async LLM request handler...");
+      return processAsyncLlmRequest(payload);
 
     default:
       logger.warn(

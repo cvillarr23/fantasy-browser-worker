@@ -23,6 +23,7 @@ function makeFakeChannel() {
     }),
     ack: jest.fn(),
     nack: jest.fn(),
+    sendToQueue: jest.fn().mockReturnValue(true),
   };
 }
 
@@ -75,6 +76,7 @@ describe("initializeQueueConsumer", () => {
       "draft_targets",
       "trade_evaluations",
       "trade_negotiations",
+      "llm_requests",
     ]) {
       expect(channel.assertQueue).toHaveBeenCalledWith(queue, { durable: true });
       expect(channel.consumers[queue]).toBeInstanceOf(Function);
@@ -176,5 +178,47 @@ describe("initializeQueueConsumer", () => {
     await flushMicrotasks();
 
     expect(processor).toHaveBeenCalledWith("lineup_updates", payload);
+  });
+});
+
+// publishToQueue lazily memoizes its own connection/channel at module scope (independent of
+// initializeQueueConsumer's), so each test here reloads a fresh connection.js module instance --
+// otherwise a channel opened by one test would leak into the next.
+describe("publishToQueue", () => {
+  function loadFreshConnectionModule() {
+    jest.resetModules();
+    const freshAmqplib = require("amqplib");
+    const freshChannel = makeFakeChannel();
+    const freshConnection = makeFakeConnection(freshChannel);
+    freshAmqplib.connect.mockResolvedValue(freshConnection);
+    return {
+      connectionModule: require("../../src/queue/connection"),
+      channel: freshChannel,
+      connection: freshConnection,
+    };
+  }
+
+  it("publishes a JSON-encoded payload as a persistent message", async () => {
+    const { connectionModule, channel } = loadFreshConnectionModule();
+
+    await connectionModule.publishToQueue("llm_requests", {
+      request_id: "abc",
+      prompt: "hi",
+    });
+
+    expect(channel.sendToQueue).toHaveBeenCalledWith(
+      "llm_requests",
+      Buffer.from(JSON.stringify({ request_id: "abc", prompt: "hi" })),
+      { persistent: true },
+    );
+  });
+
+  it("reuses the same channel across multiple publishes instead of reconnecting", async () => {
+    const { connectionModule, connection } = loadFreshConnectionModule();
+
+    await connectionModule.publishToQueue("llm_requests", { a: 1 });
+    await connectionModule.publishToQueue("llm_requests", { a: 2 });
+
+    expect(connection.createChannel).toHaveBeenCalledTimes(1);
   });
 });
