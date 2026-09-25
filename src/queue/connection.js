@@ -93,6 +93,7 @@ async function initializeQueueConsumer(messageProcessorCallback) {
     "draft_targets",
     "trade_evaluations",
     "trade_negotiations",
+    "llm_requests",
   ];
   for (const queue of targetQueues) {
     await channel.assertQueue(queue, { durable: true });
@@ -191,6 +192,29 @@ async function initializeQueueConsumer(messageProcessorCallback) {
   }
 }
 
+// Lazily-created and memoized, independent of initializeQueueConsumer's own connection/channel --
+// publishToQueue has to work even from a process that never calls initializeQueueConsumer (e.g.
+// a one-off publisher), and a publish channel has no reason to share the consumer's prefetch(1).
+let publishChannelPromise = null;
+
+async function getPublishChannel() {
+  if (!publishChannelPromise) {
+    publishChannelPromise = connectWithRetry().then((connection) =>
+      connection.createChannel(),
+    );
+  }
+  return publishChannelPromise;
+}
+
+async function publishToQueue(queueName, payload) {
+  const channel = await getPublishChannel();
+  await channel.assertQueue(queueName, { durable: true });
+  channel.sendToQueue(queueName, Buffer.from(JSON.stringify(payload)), {
+    persistent: true,
+  });
+}
+
 module.exports = {
   initializeQueueConsumer,
+  publishToQueue,
 };
