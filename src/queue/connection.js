@@ -7,6 +7,19 @@ const { shutdownTelemetry } = require("../telemetry/init");
 const AMQP_URL =
   process.env.AMQP_URL ||
   "amqp://guest:guest@fantasy-broker.databases.svc.cluster.local:5672//";
+const BROKER_OWNED_QUEUES = new Set([
+  "lineup_updates",
+  "waiver_actions",
+  "draft_targets",
+]);
+
+async function ensureQueue(channel, queue) {
+  if (BROKER_OWNED_QUEUES.has(queue)) {
+    await channel.checkQueue(queue);
+  } else {
+    await channel.assertQueue(queue, { durable: true });
+  }
+}
 
 async function connectWithRetry() {
   let attempts = 0;
@@ -96,10 +109,8 @@ async function initializeQueueConsumer(messageProcessorCallback) {
     "llm_requests",
   ];
   for (const queue of targetQueues) {
-    await channel.assertQueue(queue, { durable: true });
-    logger.info(
-      `[Queue Bridge] Bound tracking parameters for durable target queue: "${queue}"`,
-    );
+    await ensureQueue(channel, queue);
+    logger.info(`[Queue Bridge] Ready to consume target queue: "${queue}"`);
 
     // 3. Register our persistent background worker consumers
     await channel.consume(
@@ -168,7 +179,10 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               // plain immediate nack(requeue=true) hot-loops relaunching Chromium against a
               // credential that isn't coming back on its own, and — since prefetch is channel-wide
               // — blocks every consumer on this channel until someone intervenes (PR #42 review).
-              if (typeof error?.retryDelayMs === "number" && error.retryDelayMs > 0) {
+              if (
+                typeof error?.retryDelayMs === "number" &&
+                error.retryDelayMs > 0
+              ) {
                 logger.info(
                   `Delaying ${error.retryDelayMs}ms before re-queuing message ID ` +
                     `${msg.fields.deliveryTag} (${error.name || "Error"}) — avoids hot-looping ` +
@@ -208,7 +222,7 @@ async function getPublishChannel() {
 
 async function publishToQueue(queueName, payload) {
   const channel = await getPublishChannel();
-  await channel.assertQueue(queueName, { durable: true });
+  await ensureQueue(channel, queueName);
   channel.sendToQueue(queueName, Buffer.from(JSON.stringify(payload)), {
     persistent: true,
   });
