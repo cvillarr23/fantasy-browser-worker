@@ -17,6 +17,7 @@ function makeFakeChannel() {
     consumers,
     prefetch: jest.fn().mockResolvedValue(undefined),
     assertQueue: jest.fn().mockResolvedValue(undefined),
+    checkQueue: jest.fn().mockResolvedValue(undefined),
     consume: jest.fn((queue, cb) => {
       consumers[queue] = cb;
       return Promise.resolve();
@@ -37,7 +38,9 @@ function makeFakeConnection(channel) {
 
 function fakeMsg(payload, deliveryTag = 1) {
   return {
-    content: Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload)),
+    content: Buffer.from(
+      typeof payload === "string" ? payload : JSON.stringify(payload),
+    ),
     fields: { deliveryTag },
   };
 }
@@ -78,7 +81,18 @@ describe("initializeQueueConsumer", () => {
       "trade_negotiations",
       "llm_requests",
     ]) {
-      expect(channel.assertQueue).toHaveBeenCalledWith(queue, { durable: true });
+      if (
+        ["lineup_updates", "waiver_actions", "draft_targets"].includes(queue)
+      ) {
+        expect(channel.checkQueue).toHaveBeenCalledWith(queue);
+        expect(channel.assertQueue).not.toHaveBeenCalledWith(queue, {
+          durable: true,
+        });
+      } else {
+        expect(channel.assertQueue).toHaveBeenCalledWith(queue, {
+          durable: true,
+        });
+      }
       expect(channel.consumers[queue]).toBeInstanceOf(Function);
     }
   });
@@ -158,7 +172,9 @@ describe("initializeQueueConsumer", () => {
   });
 
   it("discards (does not requeue) a PermanentError processor failure", async () => {
-    const processor = jest.fn().mockRejectedValue(new PermanentError("doomed payload"));
+    const processor = jest
+      .fn()
+      .mockRejectedValue(new PermanentError("doomed payload"));
     await initializeQueueConsumer(processor);
 
     const msg = fakeMsg({ tracking_id: "abc" });
@@ -211,6 +227,15 @@ describe("publishToQueue", () => {
       Buffer.from(JSON.stringify({ request_id: "abc", prompt: "hi" })),
       { persistent: true },
     );
+  });
+
+  it("checks a broker-owned queue before publishing", async () => {
+    const { connectionModule, channel } = loadFreshConnectionModule();
+    await connectionModule.publishToQueue("waiver_actions", {
+      tracking_id: "abc",
+    });
+    expect(channel.checkQueue).toHaveBeenCalledWith("waiver_actions");
+    expect(channel.assertQueue).not.toHaveBeenCalled();
   });
 
   it("reuses the same channel across multiple publishes instead of reconnecting", async () => {
