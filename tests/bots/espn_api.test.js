@@ -8,7 +8,11 @@ const path = require("path");
 const MODULE_TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "espn-api-test-"));
 process.env.DEBUG_OUTPUT_DIR = MODULE_TMP_DIR;
 
-const { submitLineup, submitWaiverClaim } = require("../../src/bots/espn_api");
+const {
+  readRoster,
+  submitLineup,
+  submitWaiverClaim,
+} = require("../../src/bots/espn_api");
 
 afterAll(() => {
   fs.rmSync(MODULE_TMP_DIR, { recursive: true, force: true });
@@ -37,6 +41,61 @@ const EXPECTED_HEADERS = {
   "x-fantasy-source": "kona",
   "x-fantasy-platform": "espn-fantasy-web",
 };
+
+// ESPN gives a team defense a negative player id (#116): Team 8's Eagles D/ST is -16021.
+describe("D/ST negative player ids", () => {
+  it("readRoster keys a D/ST entry by its signed id as a string", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          json: async () => ({
+            scoringPeriodId: 4,
+            teams: [
+              {
+                id: 8,
+                roster: {
+                  entries: [
+                    { playerId: -16021, lineupSlotId: 16 },
+                    { playerId: 4239996, lineupSlotId: 20 },
+                  ],
+                },
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const roster = await readRoster(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+    });
+
+    expect(roster.slotByPlayerId.get("-16021")).toBe(16);
+    expect(roster.slotByPlayerId.has("16021")).toBe(false);
+  });
+
+  it("submitWaiverClaim keeps the sign on D/ST ADD and DROP items", async () => {
+    const context = fakeContext({ id: "abc" });
+
+    await submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 4,
+      addPlayerId: "-16021",
+      dropPlayerId: "-16030",
+    });
+
+    expect(context.request.post.mock.calls[0][1].data.items).toEqual([
+      { playerId: -16021, type: "ADD" },
+      { playerId: -16030, type: "DROP" },
+    ]);
+  });
+});
 
 describe("submitLineup", () => {
   it("sends the verified request shape", async () => {

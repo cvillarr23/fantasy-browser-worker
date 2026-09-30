@@ -146,4 +146,56 @@ describe("executeInstantWaiverClaim", () => {
       }),
     );
   });
+
+  // ESPN gives a team defense a negative player id (#116): Team 8's Eagles D/ST is -16021.
+  it("claims a D/ST off waivers by its negative id", async () => {
+    readRoster.mockResolvedValueOnce(roster({ "200": 20 }));
+    readRoster.mockResolvedValueOnce(roster({ "-16021": 20, "200": 20 }));
+    process.env.DRY_RUN = "false";
+    submitWaiverClaim.mockResolvedValue(undefined);
+
+    await executeInstantWaiverClaim({ player_id: "-16021", drop_player_id: "200" });
+
+    expect(submitWaiverClaim).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ addPlayerId: "-16021", dropPlayerId: "200" }),
+    );
+  });
+
+  it("drops a rostered D/ST by its negative id", async () => {
+    readRoster.mockResolvedValueOnce(roster({ "-16021": 16 }));
+    readRoster.mockResolvedValueOnce(roster({ "-16030": 20 }));
+    process.env.DRY_RUN = "false";
+    submitWaiverClaim.mockResolvedValue(undefined);
+
+    await executeInstantWaiverClaim({ player_id: "-16030", drop_player_id: "-16021" });
+
+    expect(submitWaiverClaim).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ addPlayerId: "-16030", dropPlayerId: "-16021" }),
+    );
+  });
+
+  it.each(["", "-", "-0", "-00", "-012", "--1", "+5", "1.5", "-1.5", "abc", " - 1"])(
+    "rejects junk player_id %p",
+    async (junk) => {
+      await expect(executeInstantWaiverClaim({ player_id: junk })).rejects.toMatchObject({
+        permanent: true,
+        message: /player_id ".*" is not a valid numeric ESPN player id/,
+      });
+    },
+  );
+
+  // An empty drop_player_id means "no drop", so "" is not junk here.
+  it.each(["-", "-0", "-00", "-012", "--1", "+5", "1.5", "-1.5", "abc", " - 1"])(
+    "rejects junk drop_player_id %p",
+    async (junk) => {
+      await expect(
+        executeInstantWaiverClaim({ player_id: "100", drop_player_id: junk }),
+      ).rejects.toMatchObject({
+        permanent: true,
+        message: /drop_player_id ".*" is not a valid numeric ESPN player id/,
+      });
+    },
+  );
 });

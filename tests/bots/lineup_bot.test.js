@@ -141,6 +141,64 @@ describe("planSwaps", () => {
     ).toThrow(/this league does not field/);
   });
 
+  // ESPN gives a team defense a negative player id (#116): Team 8's Eagles D/ST is -16021.
+  it("benches a D/ST on the drop side, keeping the negative id's sign", () => {
+    const r = roster({ "-16021": 16, "-16030": 20 }, DEFAULT_SLOT_COUNTS);
+    const { items, intended, skipped } = planSwaps(
+      [{ drop_player_id: "-16021", add_player_id: "-16030", slot: "D/ST" }],
+      r,
+      noopLog,
+    );
+
+    expect(skipped).toBe(0);
+    expect(items).toEqual([
+      { playerId: -16021, type: "LINEUP", fromLineupSlotId: 16, toLineupSlotId: 20 },
+      { playerId: -16030, type: "LINEUP", fromLineupSlotId: 20, toLineupSlotId: 16 },
+    ]);
+    expect(intended.get("-16021")).toBe(20);
+    expect(intended.get("-16030")).toBe(16);
+  });
+
+  it("promotes a benched D/ST on the add side", () => {
+    const r = roster({ "-16021": 20, "-16030": 16 }, DEFAULT_SLOT_COUNTS);
+    const { items } = planSwaps(
+      [{ drop_player_id: "-16030", add_player_id: "-16021", slot: "D/ST" }],
+      r,
+      noopLog,
+    );
+
+    expect(items).toEqual([
+      { playerId: -16030, type: "LINEUP", fromLineupSlotId: 16, toLineupSlotId: 20 },
+      { playerId: -16021, type: "LINEUP", fromLineupSlotId: 20, toLineupSlotId: 16 },
+    ]);
+  });
+
+  it("still rejects a D/ST that isn't on the roster", () => {
+    const r = roster({ "-16030": 16 }, DEFAULT_SLOT_COUNTS);
+    expect(() =>
+      planSwaps(
+        [{ drop_player_id: "-16030", add_player_id: "-16021", slot: "D/ST" }],
+        r,
+        noopLog,
+      ),
+    ).toThrow(/-16021 \(add\) is not on team's roster/);
+  });
+
+  it.each(["", "-", "-0", "-00", "-012", "--1", "+5", "1.5", "-1.5", "abc", " - 1", null])(
+    "rejects junk player id %p",
+    (junk) => {
+      const r = roster({ "100": 4, "200": 20 }, DEFAULT_SLOT_COUNTS);
+      for (const swap of [
+        { drop_player_id: junk, add_player_id: "200", slot: "WR1" },
+        { drop_player_id: "100", add_player_id: junk, slot: "WR1" },
+      ]) {
+        expect(() => planSwaps([swap], r, noopLog)).toThrow(
+          /is not a valid numeric ESPN player id/,
+        );
+      }
+    },
+  );
+
   it("rejects a plan that overfills a slot's capacity", () => {
     // FLEX only has 1 spot; two independent swaps (no shared players) both promote into FLEX.
     const r = roster(
