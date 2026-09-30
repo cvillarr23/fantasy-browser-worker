@@ -311,6 +311,14 @@ describe("DraftPickLedger", () => {
     expect(ledger.stats.invalid).toBe(2);
   });
 
+  it("accepts a D/ST pick's negative player id (#116)", () => {
+    const ledger = new DraftPickLedger();
+
+    expect(record(ledger, wsPick(-16021)).action).not.toBe("invalid");
+    expect(ledger.hasPlayer(-16021)).toBe(true);
+    expect(ledger.stats.invalid).toBe(0);
+  });
+
   it("clears everything on reset, so a fresh practice draft starts clean", () => {
     // DRAFT_MODE=mock joins a brand-new ephemeral league per reconnect; carrying the old draft's
     // players over would make every pick of the new one look like a duplicate.
