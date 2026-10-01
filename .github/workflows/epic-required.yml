@@ -7,6 +7,10 @@ on:
 jobs:
   check-epic:
     runs-on: ubuntu-latest
+    # Repo default workflow permissions are read-only, which 403s every issues call below (#118,
+    # same as #111). issues:write covers the reads plus the addLabels/createComment writes.
+    permissions:
+      issues: write
     steps:
       - name: Check for a parent epic
         uses: actions/github-script@v7
