@@ -12,6 +12,7 @@ const {
   classifyHttpStatusError,
 } = require("../errors");
 const { completeWithFallback } = require("../lib/llm_client");
+const { submitTradeOffer } = require("./trade_builder");
 const { recordTradeNegotiation } = require("../db/execution_log");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -339,7 +340,8 @@ function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog
       '"outgoing_player_ids": ["..."]}}.',
     "counter_offer.incoming_player_ids and counter_offer.outgoing_player_ids are the player ids",
     "for the counter-trade you propose. Do not draft any message to the offering manager — the",
-    "counter-offer is surfaced for a human to send themselves, never posted automatically.",
+    "counter-offer is staged in ESPN's trade builder for a human to review, and is only ever sent",
+    "after that human explicitly approves it.",
     "",
     `Roster deficits: ${JSON.stringify(deficits)}`,
     `Trade evaluation: ${JSON.stringify(evaluation)}`,
@@ -428,10 +430,14 @@ async function executeTradeEvaluation(payload) {
 /**
  * Queue-shaped entrypoint for WORKER-04/#4: scrapes the pending trade + league chat, grounds it
  * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, and asks the LLM (via
- * WORKER-12's completeWithFallback) for a structured counter-offer. Advisory only — it never
- * posts anything to ESPN on a human's behalf; no AI-drafted message is generated or sent. Acting
- * on a negotiation (formally re-submitting a counter-offer via ESPN's trade-builder UI) is
- * separate, unbuilt follow-up work.
+ * WORKER-12's completeWithFallback) for a structured counter-offer.
+ *
+ * It never sends anything to ESPN itself, and no AI-drafted message is generated. Since #90 it
+ * STAGES the counter in ESPN's trade builder via trade_builder.js's submitTradeOffer, which ticks
+ * the boxes, screenshots them, and records an `awaiting_approval` execution_log row with the
+ * offer's offer_key. It does that WITHOUT an approval, so submitTradeOffer's gate can't open here
+ * whatever DRY_RUN/TRADE_SUBMIT_ENABLED say. The real send is a separate, human-approved
+ * "trade_submissions" message carrying that offer_key (see trade_builder.js's header).
  */
 async function negotiateTradeProposal(payload) {
   const { incoming, outgoing, season, week, offeringTeamId } =
@@ -478,11 +484,35 @@ async function negotiateTradeProposal(payload) {
 
     logger.info(
       `[Trade Negotiator][${tracking}] Computed counter-offer ${JSON.stringify(counterOffer)} — ` +
-        "advisory only, nothing sent.",
+        "staging it for approval, nothing sent.",
     );
     await captureDebugSnapshot(session.page, "trade-negotiation-computed");
     status = "computed";
-    return negotiation;
+
+    // Staging failures (an LLM-invented id, a selector miss) must not fail the negotiation: a
+    // requeue would re-run the LLM call for a counter we already have. The counter still stands;
+    // it just has no staged offer to approve yet.
+    let submission;
+    try {
+      submission = await submitTradeOffer(
+        {
+          leagueId,
+          seasonId: String(season),
+          fromTeamId: process.env.ESPN_TEAM_ID,
+          toTeamId: offeringTeamId,
+          incomingPlayerIds: counterOffer.incomingPlayerIds,
+          outgoingPlayerIds: counterOffer.outgoingPlayerIds,
+        },
+        { source: "counter_offer", trackingId: tracking, session },
+      );
+    } catch (stageError) {
+      logger.warn(
+        `[Trade Negotiator][${tracking}] Could not stage the counter-offer in ESPN's trade ` +
+          `builder: ${stageError.message}`,
+      );
+      submission = { status: "fill_failed", error: stageError.message };
+    }
+    return { ...negotiation, submission };
   } catch (error) {
     errorMessage = error.message;
     if (session && session.page) {
@@ -506,7 +536,7 @@ async function negotiateTradeProposal(payload) {
       season,
       offeringTeamId,
       counterOffer,
-      dryRun: true, // this function never sends anything live — see the function doc comment
+      dryRun: true, // never sends: staging is approval-less, see the function doc comment
       status,
       errorMessage,
     });

@@ -88,12 +88,21 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
 
   // playerId -> lineupSlotId for everyone currently rostered.
   const slotByPlayerId = new Map();
+  // playerId -> display name (null when ESPN omits playerPoolEntry). trade_builder.js needs this:
+  // the trade-builder DOM is keyed by what's rendered, not by player id, and a D/ST row's logo
+  // carries no id at all, so its name is the only way to find it.
+  const nameByPlayerId = new Map();
   for (const entry of team.roster?.entries || []) {
     slotByPlayerId.set(String(entry.playerId), entry.lineupSlotId);
+    nameByPlayerId.set(
+      String(entry.playerId),
+      entry.playerPoolEntry?.player?.fullName ?? null,
+    );
   }
 
   return {
     slotByPlayerId,
+    nameByPlayerId,
     scoringPeriodId: body.scoringPeriodId,
     slotCounts: body.settings?.rosterSettings?.lineupSlotCounts || {},
     entryCount: slotByPlayerId.size,
@@ -375,6 +384,7 @@ async function submitDraftPick(
 }
 
 module.exports = {
+  captureWriteArtifact,
   readRoster,
   submitLineup,
   submitWaiverClaim,

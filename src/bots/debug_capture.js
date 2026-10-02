@@ -50,4 +50,4 @@ async function captureDebugSnapshot(page, label) {
   }
 }
 
-module.exports = { captureDebugSnapshot, isEnabled };
+module.exports = { captureDebugSnapshot, isEnabled, OUTPUT_DIR };

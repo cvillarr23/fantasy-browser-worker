@@ -6,6 +6,7 @@ const {
   executeTradeEvaluation,
   negotiateTradeProposal,
 } = require("./bots/trade_bot");
+const { executeTradeSubmission } = require("./bots/trade_builder");
 const { processAsyncLlmRequest } = require("./lib/llm_async_queue");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
@@ -35,6 +36,12 @@ async function dispatch(queueName, payload) {
     case "trade_negotiations":
       logger.info("Invoking Trade Negotiation Engine...");
       return negotiateTradeProposal(payload);
+
+    // Human-approved trade offers (#90). Without a matching approval, or with any of
+    // trade_builder.js's other locks closed, this only dry-fills the form.
+    case "trade_submissions":
+      logger.info("Invoking Trade Submission Engine...");
+      return executeTradeSubmission(payload);
 
     case "llm_requests":
       logger.info("Invoking async LLM request handler...");

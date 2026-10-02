@@ -77,6 +77,43 @@ describe("D/ST negative player ids", () => {
     expect(roster.slotByPlayerId.has("16021")).toBe(false);
   });
 
+  it("readRoster exposes each rostered player's name by signed id, null when ESPN omits it", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          json: async () => ({
+            scoringPeriodId: 4,
+            teams: [
+              {
+                id: 8,
+                roster: {
+                  entries: [
+                    {
+                      playerId: -16021,
+                      lineupSlotId: 16,
+                      playerPoolEntry: { player: { fullName: "Eagles D/ST" } },
+                    },
+                    { playerId: 4239996, lineupSlotId: 20 },
+                  ],
+                },
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const roster = await readRoster(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+    });
+
+    expect(roster.nameByPlayerId.get("-16021")).toBe("Eagles D/ST");
+    expect(roster.nameByPlayerId.get("4239996")).toBeNull();
+  });
+
   it("submitWaiverClaim keeps the sign on D/ST ADD and DROP items", async () => {
     const context = fakeContext({ id: "abc" });
 
