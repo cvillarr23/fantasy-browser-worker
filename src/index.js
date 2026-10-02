@@ -2,7 +2,10 @@ const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
 const { executeAutomatedDraftSelection } = require("./bots/draft_clicker");
-const { executeTradeEvaluation, negotiateTradeProposal } = require("./bots/trade_bot");
+const {
+  executeTradeEvaluation,
+  negotiateTradeProposal,
+} = require("./bots/trade_bot");
 const { processAsyncLlmRequest } = require("./lib/llm_async_queue");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
@@ -63,7 +66,13 @@ async function bootDaemon() {
 
   try {
     // Initialize our managed RabbitMQ connection framework loops
-    await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage);
+    // IDLE_EXIT_SECONDS: set by fantasy-infra's production ScaledJob so each Job completes once
+    // the queues drain; unset/0 (draft-day overlay) keeps the worker running indefinitely. See
+    // initializeQueueConsumer for why.
+    const idleExitSeconds = Number(process.env.IDLE_EXIT_SECONDS) || 0;
+    await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage, {
+      idleExitMs: idleExitSeconds > 0 ? idleExitSeconds * 1000 : undefined,
+    });
     logger.info(
       "[Worker Engine] Background listener threads fully initialized. Standing by...",
     );
