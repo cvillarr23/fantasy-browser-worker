@@ -13,6 +13,21 @@ const BROKER_OWNED_QUEUES = new Set([
   "draft_targets",
 ]);
 
+// The AMQP URL carries the broker password, and the connect log line below ships to Loki on
+// every attempt -- mask it. Regex rather than `new URL()` so a URL the parser rejects (an
+// unescaped `@` in the password, a bad port) is still masked instead of logged raw. `[^/]*@` is
+// greedy within the authority, so it runs to the last `@` before the host.
+function redactAmqpUrl(url) {
+  return String(url).replace(
+    /^([a-z][a-z0-9+.-]*:\/\/[^:/@]*:)[^/]*@/i,
+    "$1***@",
+  );
+}
+
+// Set once the worker decides to shut down on its own (idle exit), so the connection "close"
+// handler can tell a deliberate close apart from the broker dropping us.
+let intentionalShutdown = false;
+
 async function ensureQueue(channel, queue) {
   if (BROKER_OWNED_QUEUES.has(queue)) {
     await channel.checkQueue(queue);
@@ -29,7 +44,7 @@ async function connectWithRetry() {
   while (attempts < maxAttempts) {
     try {
       logger.info(
-        `[Queue Bridge] Attempting connection to broker cluster endpoint: ${AMQP_URL} (Attempt ${attempts + 1}/${maxAttempts})`,
+        `[Queue Bridge] Attempting connection to broker cluster endpoint: ${redactAmqpUrl(AMQP_URL)} (Attempt ${attempts + 1}/${maxAttempts})`,
       );
       const connection = await amqp.connect(AMQP_URL);
       logger.info(
@@ -45,6 +60,9 @@ async function connectWithRetry() {
       });
 
       connection.on("close", async () => {
+        if (intentionalShutdown) {
+          return;
+        }
         // Reconnecting here would only replace the raw AMQP connection — the channel and its
         // consumers (set up by initializeQueueConsumer, which this function has no access to)
         // would stay gone, leaving the process alive but silently processing nothing forever.
@@ -80,9 +98,59 @@ async function connectWithRetry() {
   );
 }
 
-async function initializeQueueConsumer(messageProcessorCallback) {
+// idleExitMs: when set, exit 0 after this long with no message in flight. This worker runs as
+// a KEDA ScaledJob (one Job per queued message, see fantasy-infra's keda-scaledjob.yaml), and a
+// Job is only "done" when its pod exits -- without this, every Job KEDA starts stays Running
+// forever after the queue drains, each holding its CPU/memory request (21 of them once starved
+// the node after a single 21-message waiver burst). Unset keeps the old run-forever daemon
+// behavior, which the draft-day overlay relies on to hold a warm, logged-in browser open.
+async function initializeQueueConsumer(
+  messageProcessorCallback,
+  { idleExitMs } = {},
+) {
   const connection = await connectWithRetry();
   const channel = await connection.createChannel();
+
+  let inFlight = 0;
+  let draining = false;
+  let idleTimer = null;
+
+  async function exitIdle() {
+    if (inFlight > 0 || draining) {
+      return;
+    }
+    draining = true;
+    intentionalShutdown = true;
+    logger.info(
+      `[Queue Bridge] No messages for ${idleExitMs}ms. Closing consumers and exiting so the Job completes...`,
+    );
+    try {
+      // Closing the channel returns anything delivered-but-unacked (a message that raced the
+      // drain flag) to the queue for the next worker.
+      await channel.close();
+      await connection.close();
+    } catch (err) {
+      logger.warn(
+        "[Queue Bridge] Error while closing broker connection on idle exit",
+        {
+          err,
+        },
+      );
+    }
+    try {
+      await shutdownTelemetry();
+    } finally {
+      process.exit(0);
+    }
+  }
+
+  function armIdleTimer() {
+    if (!idleExitMs) {
+      return;
+    }
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(exitIdle, idleExitMs);
+  }
 
   // 1. Enforce strict resource boundaries to limit processing to 1 message at a time
   // This safeguards our 1200MiB pod limits by blocking concurrent Chromium execution cycles.
@@ -121,7 +189,18 @@ async function initializeQueueConsumer(messageProcessorCallback) {
         // carry queueName -- closing the gap where queue-bridge lines previously had no
         // correlation id at all.
         runWithContext({ queueName: queue }, async () => {
-          if (msg !== null) {
+          if (msg === null) {
+            return;
+          }
+          if (draining) {
+            // Shutting down: hand it straight back for another worker rather than starting work
+            // this process is about to abandon.
+            channel.nack(msg, false, true);
+            return;
+          }
+          inFlight++;
+          clearTimeout(idleTimer);
+          try {
             const payloadString = msg.content.toString();
             logger.info(`Inbound message captured from queue "${queue}"`);
 
@@ -199,11 +278,20 @@ async function initializeQueueConsumer(messageProcessorCallback) {
               );
               channel.nack(msg, false, true);
             }
+          } finally {
+            inFlight--;
+            if (inFlight === 0) {
+              armIdleTimer();
+            }
           }
         }),
       { noAck: false },
     ); // Disable dangerous automatic acks to ensure data safety
   }
+
+  // Started only once every consumer is registered, so the idle clock counts from "ready to
+  // take work", not from process start.
+  armIdleTimer();
 }
 
 // Lazily-created and memoized, independent of initializeQueueConsumer's own connection/channel --
@@ -231,4 +319,5 @@ async function publishToQueue(queueName, payload) {
 module.exports = {
   initializeQueueConsumer,
   publishToQueue,
+  redactAmqpUrl,
 };
