@@ -322,6 +322,58 @@ async function fetchRosterDeficits({ season, week }) {
   }
 }
 
+/**
+ * Translates core-pipeline internal (Sleeper) player ids to ESPN ids for trade_builder.js.
+ *
+ * negotiateTradeProposal's ids, and so the LLM's counter, live in core-pipeline's internal id
+ * space (the one /v1/trade/evaluate takes), NOT ESPN's. The two spaces collide numerically:
+ * internal 12483 is Jack Bech, ESPN 12483 is Matthew Stafford. So forwarding them untranslated
+ * would silently target real, different players. See core-pipeline's README "id-space contract".
+ *
+ * core-pipeline exposes the players.espn_id crosswalk only through /v1/players/search (by name),
+ * so this looks the name up via /summary, searches it, and takes the result whose player_id is
+ * exactly ours. Fails closed with a PermanentError when the id is unknown, missing from the
+ * (limited) search results, or has a null espn_id. The crosswalk covers about 82% of players and
+ * no K or D/ST at all, so a counter involving one can't be staged until core-pipeline fills that in.
+ */
+async function resolveEspnPlayerIds(internalIds) {
+  const espnIds = [];
+  for (const internalId of internalIds) {
+    const summaryUrl = `${CORE_PIPELINE_URL}/v1/players/${encodeURIComponent(internalId)}/summary`;
+    const summaryResponse = await fetch(summaryUrl, {
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
+    });
+    if (!summaryResponse.ok) {
+      throw new PermanentError(
+        `[Trade Negotiator] Internal player ${internalId} could not be looked up ` +
+          `(GET /v1/players/${internalId}/summary -> HTTP ${summaryResponse.status}).`,
+      );
+    }
+    const { name } = await summaryResponse.json();
+
+    const searchUrl = `${CORE_PIPELINE_URL}/v1/players/search?q=${encodeURIComponent(name)}`;
+    const searchResponse = await fetch(searchUrl, {
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
+    });
+    if (!searchResponse.ok) {
+      throw new Error(
+        `[Trade Negotiator] Player search for "${name}" failed with HTTP ${searchResponse.status}.`,
+      );
+    }
+    const match = (await searchResponse.json()).find(
+      (result) => String(result.player_id) === String(internalId),
+    );
+    if (!match || match.espn_id === null || match.espn_id === undefined || match.espn_id === "") {
+      throw new PermanentError(
+        `[Trade Negotiator] Internal player ${internalId} ("${name}") has no ESPN id in ` +
+          "core-pipeline's crosswalk, so the counter can't be staged.",
+      );
+    }
+    espnIds.push(String(match.espn_id));
+  }
+  return espnIds;
+}
+
 /** Builds the system prompt for negotiateTradeProposal's completeWithFallback call.
  * completeWithFallback (src/lib/llm_client.js) has no native JSON-mode opts field, so strict-JSON
  * output can only be enforced by instruction — parseNegotiationResponse below is the other half
@@ -433,7 +485,8 @@ async function executeTradeEvaluation(payload) {
  * WORKER-12's completeWithFallback) for a structured counter-offer.
  *
  * It never sends anything to ESPN itself, and no AI-drafted message is generated. Since #90 it
- * STAGES the counter in ESPN's trade builder via trade_builder.js's submitTradeOffer, which ticks
+ * STAGES the counter in ESPN's trade builder via trade_builder.js's submitTradeOffer (after
+ * translating its internal player ids to ESPN ids, see resolveEspnPlayerIds), which ticks
  * the boxes, screenshots them, and records an `awaiting_approval` execution_log row with the
  * offer's offer_key. It does that WITHOUT an approval, so submitTradeOffer's gate can't open here
  * whatever DRY_RUN/TRADE_SUBMIT_ENABLED say. The real send is a separate, human-approved
@@ -494,14 +547,18 @@ async function negotiateTradeProposal(payload) {
     // it just has no staged offer to approve yet.
     let submission;
     try {
+      const [incomingEspnIds, outgoingEspnIds] = [
+        await resolveEspnPlayerIds(counterOffer.incomingPlayerIds),
+        await resolveEspnPlayerIds(counterOffer.outgoingPlayerIds),
+      ];
       submission = await submitTradeOffer(
         {
           leagueId,
           seasonId: String(season),
           fromTeamId: process.env.ESPN_TEAM_ID,
           toTeamId: offeringTeamId,
-          incomingPlayerIds: counterOffer.incomingPlayerIds,
-          outgoingPlayerIds: counterOffer.outgoingPlayerIds,
+          incomingPlayerIds: incomingEspnIds,
+          outgoingPlayerIds: outgoingEspnIds,
         },
         { source: "counter_offer", trackingId: tracking, session },
       );
@@ -584,5 +641,6 @@ module.exports = {
   buildNegotiationSystemPrompt,
   parseNegotiationResponse,
   negotiateTradeProposal,
+  resolveEspnPlayerIds,
   buildTradePortalUrl,
 };
