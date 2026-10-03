@@ -63,6 +63,7 @@ describe("createSessionFromStoredState: stale stored login (#128)", () => {
     expect(session).toMatchObject({ browser, swid: "{SWID}" });
     expect(get).toHaveBeenCalledWith(
       "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344?view=mTeam",
+      { timeout: 5000 },
     );
     expect(browser.close).not.toHaveBeenCalled();
   });

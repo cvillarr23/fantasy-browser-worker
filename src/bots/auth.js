@@ -272,13 +272,6 @@ async function createAuthenticatedSession({ headless = true } = {}) {
 }
 
 /**
- * Prefers a real interactive-login session (full storageState, satisfies the Disney/MyDisney SDK
- * gate) over the bare cookie injection createAuthenticatedSession does above. Returns null — not a
- * throw — when no stored state exists in OpenBao, so callers can cleanly fall through to
- * createAuthenticatedSession() instead; leaves that function itself untouched, so WORKER-06's
- * cookie-only WS submission path is unaffected either way.
- */
-/**
  * A stored login whose espn_s2 is missing or past its expiry can't be logged in, so don't launch
  * Chromium for it. A session-lifetime cookie (expires -1) is left to storedLoginRejected.
  */
@@ -295,6 +288,8 @@ function storedLoginExpired(storageState, now = Date.now()) {
  * outage, so those keep the stored session. Skipped without ESPN_LEAGUE_ID/CURRENT_YEAR. A league
  * readable without login would also pass, so this catches a dead login, not every degraded one.
  */
+const STORED_LOGIN_CHECK_TIMEOUT_MS = 5000;
+
 async function storedLoginRejected(context) {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const seasonId = process.env.CURRENT_YEAR;
@@ -302,6 +297,9 @@ async function storedLoginRejected(context) {
   try {
     const response = await context.request.get(
       `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}?view=mTeam`,
+      // Short: draft_room_dom.js builds a session inside a live pick clock, and a timeout here
+      // only means "keep the stored session" anyway.
+      { timeout: STORED_LOGIN_CHECK_TIMEOUT_MS },
     );
     return response.status() === 401 || response.status() === 403;
   } catch {
@@ -309,6 +307,13 @@ async function storedLoginRejected(context) {
   }
 }
 
+/**
+ * Prefers a real interactive-login session (full storageState, satisfies the Disney/MyDisney SDK
+ * gate) over the bare cookie injection createAuthenticatedSession does above. Returns null — not a
+ * throw — when no stored state exists in OpenBao, or when its login is expired or rejected (#128),
+ * so callers can cleanly fall through to createAuthenticatedSession() instead; leaves that
+ * function itself untouched, so WORKER-06's cookie-only WS submission path is unaffected either way.
+ */
 async function createSessionFromStoredState({ headless = true } = {}) {
   const storageState = fetchStoredSessionState();
   if (!storageState) {
@@ -352,9 +357,6 @@ async function createSessionFromStoredState({ headless = true } = {}) {
     });
     const page = await context.newPage();
 
-    // Callers (e.g. draft_room_dom.js's buildDraftUrl) expect `swid` back the same way
-    // createAuthenticatedSession() provides it, even though it came from the stored state's
-    // cookies rather than ESPN_S2/SWID env/OpenBao fields.
     if (await storedLoginRejected(context)) {
       logger.warn(
         "[Auth Engine] ESPN rejected the stored session state (401/403); falling back to cookie auth.",
@@ -363,6 +365,9 @@ async function createSessionFromStoredState({ headless = true } = {}) {
       return null;
     }
 
+    // Callers (e.g. draft_room_dom.js's buildDraftUrl) expect `swid` back the same way
+    // createAuthenticatedSession() provides it, even though it came from the stored state's
+    // cookies rather than ESPN_S2/SWID env/OpenBao fields.
     const cookies = await context.cookies();
     const swid = cookies.find((c) => c.name === "SWID")?.value;
 
