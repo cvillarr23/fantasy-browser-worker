@@ -78,3 +78,29 @@ until those columns are added on `fantasy-core-pipeline`'s side — expected, no
 
 ## Project Tracking
 Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
+
+### Outgoing trade proposals (#93)
+
+Publish `{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}` to
+`trade_proposals`. The worker ranks other teams' positional deficits, reads our
+roster and the highest-ranked target's live ESPN roster, and uses
+`completeWithFallback` to draft one fresh offer and a pitch. It can return
+`no_target` or `no_offer` without staging anything. Ownership, duplicate ids,
+nonempty sides, and a player at the targeted position are checked before staging.
+Player ids come exclusively from ESPN; no Sleeper/internal player ids are sent
+to the trade builder. The deficit service must describe the configured ESPN
+league and use its team ids (the service currently tracks one league).
+
+Offers are staged with `source: "proposal"`, never with an approval from the
+request. `trade_builder` records the offer and pitch in `execution_log`; this
+worker does not write `bot_decisions`. The existing separate approval and
+`trade_submissions` flow is required to send. The pitch is part of the approval's
+`offer_key`. Check `messageAttached`: if ESPN has no note field, the pitch is not
+sent; this generator does not automatically post it to league chat. Staging
+failures return `fill_failed` with the computed offer rather than regenerating
+on a queue retry. Model/read failures use delayed retries; invalid requests are
+permanent failures.
+
+This adds a worker consumer, not a scheduled producer. Production scale-from-zero
+also needs a `trade_proposals` queue trigger in fantasy-infra before publishing to
+an idle ScaledJob deployment.

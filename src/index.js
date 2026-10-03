@@ -6,6 +6,7 @@ const {
   executeTradeEvaluation,
   negotiateTradeProposal,
 } = require("./bots/trade_bot");
+const { generateTradeProposal } = require("./bots/trade_proposal");
 const { executeTradeSubmission } = require("./bots/trade_builder");
 const { processAsyncLlmRequest } = require("./lib/llm_async_queue");
 const { withInstrumentation } = require("./telemetry/instrument");
@@ -32,6 +33,9 @@ async function dispatch(queueName, payload) {
     case "trade_evaluations":
       logger.info("Invoking Trade Evaluation Engine...");
       return executeTradeEvaluation(payload);
+
+    case "trade_proposals":
+      return generateTradeProposal(payload);
 
     case "trade_negotiations":
       logger.info("Invoking Trade Negotiation Engine...");
