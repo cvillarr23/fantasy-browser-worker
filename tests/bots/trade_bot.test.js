@@ -6,6 +6,8 @@ const {
   fetchRosterDeficits,
   buildNegotiationSystemPrompt,
   parseNegotiationResponse,
+  formatPendingTrades,
+  formatLeagueChat,
 } = require("../../src/bots/trade_bot");
 
 function mockFetchResponse({ ok, status = 200, json, text = "" }) {
@@ -353,6 +355,80 @@ describe("buildNegotiationSystemPrompt", () => {
     expect(prompt).toContain("4.5");
     expect(prompt).toContain(context.proposals);
     expect(prompt).toContain(context.chatLog);
+  });
+});
+
+describe("formatPendingTrades", () => {
+  it("says so when nothing is pending", () => {
+    expect(formatPendingTrades([])).toBe("NO_PENDING_PROPOSALS");
+  });
+
+  it("lists what each team sends, by name", () => {
+    const text = formatPendingTrades([
+      {
+        id: "trade-1",
+        type: "TRADE_PROPOSAL",
+        status: "PENDING",
+        proposingTeamId: "3",
+        items: [
+          { playerId: "-16021", playerName: "Eagles D/ST", fromTeamId: "3", toTeamId: "8" },
+          { playerId: "4429795", playerName: "Bijan Robinson", fromTeamId: "8", toTeamId: "3" },
+          { playerId: "3139477", playerName: "Some Receiver", fromTeamId: "8", toTeamId: "3" },
+        ],
+      },
+    ]);
+
+    expect(text).toBe(
+      "TRADE_PROPOSAL from team 3 (PENDING): team 3 sends Eagles D/ST; " +
+        "team 8 sends Bijan Robinson, Some Receiver",
+    );
+  });
+
+  // ESPN ids collide with core-pipeline's internal ids (the LLM's id space), so putting them in the
+  // prompt invites the model to echo one back as a counter-offer id for a different player.
+  it("never puts ESPN player ids in the text", () => {
+    const text = formatPendingTrades([
+      {
+        id: "t",
+        type: "TRADE_PROPOSAL",
+        status: "PENDING",
+        proposingTeamId: "3",
+        items: [{ playerId: "12483", playerName: null, fromTeamId: "3", toTeamId: "8" }],
+      },
+    ]);
+
+    expect(text).not.toContain("12483");
+    expect(text).toContain("team 3 sends an unnamed player");
+  });
+
+  it("joins several trades", () => {
+    const trade = (id) => ({ id, type: "TRADE_PROPOSAL", status: "PENDING", proposingTeamId: id, items: [] });
+    expect(formatPendingTrades([trade("1"), trade("2")]).split(" | ")).toHaveLength(2);
+  });
+});
+
+describe("formatLeagueChat", () => {
+  const teamIdByMemberId = new Map([["{OWNER-3A}", "3"]]);
+
+  it("says so when there are no posts", () => {
+    expect(formatLeagueChat([], teamIdByMemberId)).toBe("NO_RECENT_CHAT");
+  });
+
+  it("attributes posts to teams, the league manager, or an unknown member", () => {
+    const text = formatLeagueChat(
+      [
+        { authorId: "{OWNER-3A}", date: Date.UTC(2026, 9, 1), content: "still want Bijan?" },
+        { authorId: "LM", date: Date.UTC(2026, 9, 2), content: "Recap is up" },
+        { authorId: "{GONE}", date: Date.UTC(2026, 9, 3), content: "hi" },
+      ],
+      teamIdByMemberId,
+    );
+
+    expect(text.split("\n")).toEqual([
+      "2026-10-01T00:00:00.000Z team 3: still want Bijan?",
+      "2026-10-02T00:00:00.000Z League Manager: Recap is up",
+      "2026-10-03T00:00:00.000Z a league member: hi",
+    ]);
   });
 });
 

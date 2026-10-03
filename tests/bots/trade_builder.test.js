@@ -103,31 +103,32 @@ function proposalPostData(offer = offerFixture(), overrides = {}) {
   });
 }
 
-// A pending TRADE_PROPOSAL as mPendingTransactions would list it for offerFixture().
+// A pending TRADE_PROPOSAL for offerFixture() as espn_api's readPendingTrades returns it.
 function pendingProposal(offer = offerFixture(), overrides = {}) {
+  const item = (id, from, to) => ({
+    playerId: String(id),
+    playerName: null,
+    type: "TRADE",
+    fromTeamId: String(from),
+    toTeamId: String(to),
+  });
   return {
     id: "tx-1",
     type: "TRADE_PROPOSAL",
     status: "PENDING",
+    proposingTeamId: String(offer.fromTeamId),
     // Proposed a moment after the claim, as a real submit would be.
     proposedDate: Date.now() + 1000,
-    teamId: Number(offer.fromTeamId),
     items: [
-      ...offer.incomingPlayerIds.map((id) => ({
-        playerId: Number(id),
-        type: "TRADE",
-        fromTeamId: Number(offer.toTeamId),
-        toTeamId: Number(offer.fromTeamId),
-      })),
-      ...offer.outgoingPlayerIds.map((id) => ({
-        playerId: Number(id),
-        type: "TRADE",
-        fromTeamId: Number(offer.fromTeamId),
-        toTeamId: Number(offer.toTeamId),
-      })),
+      ...offer.incomingPlayerIds.map((id) => item(id, offer.toTeamId, offer.fromTeamId)),
+      ...offer.outgoingPlayerIds.map((id) => item(id, offer.fromTeamId, offer.toTeamId)),
     ],
     ...overrides,
   };
+}
+
+function pendingRead(trades) {
+  return { trades, teamIdByMemberId: new Map() };
 }
 
 function makeBuilderPage(
@@ -309,7 +310,7 @@ beforeEach(() => {
   claimTradeSubmission.mockResolvedValue({ claimed: true, id: 42 });
   finalizeTradeSubmission.mockResolvedValue(undefined);
   recordTradeOfferFill.mockResolvedValue(undefined);
-  readPendingTrades.mockResolvedValue([]);
+  readPendingTrades.mockResolvedValue(pendingRead([]));
   buildTradeProposalBody.mockImplementation(
     jest.requireActual("../../src/bots/espn_api").buildTradeProposalBody,
   );
@@ -760,10 +761,10 @@ describe("submitTradeOffer: approval gate", () => {
     const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], opts);
     useSession(page);
     const offer = offerFixture();
-    readPendingTrades.mockResolvedValue([
-      pendingProposal(offer, { id: "other", teamId: 3 }),
+    readPendingTrades.mockResolvedValue(pendingRead([
+      pendingProposal(offer, { id: "other", proposingTeamId: "3" }),
       pendingProposal(offer),
-    ]);
+    ]));
 
     const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
 
@@ -775,6 +776,7 @@ describe("submitTradeOffer: approval gate", () => {
     expect(readPendingTrades).toHaveBeenCalledWith(expect.anything(), {
       leagueId: "1248158344",
       seasonId: "2026",
+      teamId: "8",
     });
     expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined);
     expect(state.clicks.filter((c) => c === "submit")).toHaveLength(1);
@@ -792,7 +794,7 @@ describe("submitTradeOffer: approval gate", () => {
       outgoingPlayerIds: offer.incomingPlayerIds,
     }));
     const otherTeam = pendingProposal(offerFixture({ toTeamId: "5" }));
-    readPendingTrades.mockResolvedValue([partial, reversed, otherTeam]);
+    readPendingTrades.mockResolvedValue(pendingRead([partial, reversed, otherTeam]));
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
@@ -811,7 +813,7 @@ describe("submitTradeOffer: approval gate", () => {
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
     useSession(page);
     const offer = offerFixture();
-    readPendingTrades.mockResolvedValue([pendingProposal(offer, overrides)]);
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer, overrides)]));
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
@@ -824,7 +826,7 @@ describe("submitTradeOffer: approval gate", () => {
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
     useSession(page);
     const offer = offerFixture({ message: "Let's deal" });
-    readPendingTrades.mockResolvedValue([pendingProposal(offer, { comment: "Let's deal" })]);
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer, { comment: "Let's deal" })]));
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
@@ -901,7 +903,7 @@ describe("submitTradeOffer: redelivery", () => {
     const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);
     const offer = offerFixture();
-    readPendingTrades.mockResolvedValue([pendingProposal(offer)]);
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
 
     const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
 
@@ -917,9 +919,9 @@ describe("submitTradeOffer: redelivery", () => {
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);
     const offer = offerFixture();
-    readPendingTrades.mockResolvedValue([
+    readPendingTrades.mockResolvedValue(pendingRead([
       pendingProposal(offer, { proposedDate: Date.now() - 10 * 60000 }),
-    ]);
+    ]));
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
@@ -933,7 +935,7 @@ describe("submitTradeOffer: redelivery", () => {
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);
     const offer = offerFixture();
-    readPendingTrades.mockResolvedValue([pendingProposal(offer)]);
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),

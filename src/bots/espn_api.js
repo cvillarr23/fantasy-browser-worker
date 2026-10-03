@@ -34,15 +34,19 @@ const WRITE_CAPTURE_DIR =
  * Never includes cookies: those live on the BrowserContext, not in the headers object built below.
  */
 function captureWriteArtifact(record) {
+  appendCapture("espn-write-log.jsonl", record);
+}
+
+function appendCapture(filename, record) {
   if (!isDebugCaptureEnabled()) return;
   try {
     fs.mkdirSync(WRITE_CAPTURE_DIR, { recursive: true });
     fs.appendFileSync(
-      path.join(WRITE_CAPTURE_DIR, "espn-write-log.jsonl"),
+      path.join(WRITE_CAPTURE_DIR, filename),
       JSON.stringify({ capturedAt: new Date().toISOString(), ...record }) + "\n",
     );
   } catch (err) {
-    logger.error(`[ESPN API] Could not capture write artifact: ${err.message}`, { err });
+    logger.error(`[ESPN API] Could not capture ${filename} record: ${err.message}`, { err });
   }
 }
 
@@ -132,6 +136,119 @@ function parseTeamRoster(body, { leagueId, teamId }) {
     lineupLocked: team.lineupLocked === true,
     rosterLocked: team.rosterLocked === true,
   };
+}
+
+/**
+ * Pending trades involving one team, plus a member-id -> team-id map for attributing chat posts.
+ *
+ * Reads the same views the team clubhouse page loads on entry (recon 2026-10-03, issue #101):
+ * mPendingTransactions is the only pending-specific view it asks for, mRoster supplies player
+ * names, and mTeam's `owners` maps members to teams. The clubhouse has no trade DOM to scrape.
+ *
+ * Verified live: with nothing pending, ESPN omits the key entirely rather than sending [].
+ * UNVERIFIED: the populated shape, including which key holds it. ESPN's own league store reads
+ * the raw response's `pendingTransactions` (frontend bundle, #124), so that key is read, plus
+ * `transactions` in case the view uses that instead; entries are de-duplicated by id. This
+ * assumes mTransactions2's verified per-transaction shape (`type`, `status`, `teamId`,
+ * `proposedDate`, `items[].{playerId, type, fromTeamId, toTeamId}`) with a TRADE_* type, and keeps
+ * any transactions it sees in recon-output/espn-pending-transactions.jsonl so the first real
+ * pending trade can confirm or correct that.
+ *
+ * Each trade carries `proposedDate`, and `comment` only when ESPN sends one: trade_builder.js uses
+ * both to tell our offer from an older one for the same players.
+ */
+async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
+  const url = buildLeagueReadUrl(leagueId, seasonId, ["mPendingTransactions", "mRoster", "mTeam"]);
+  const response = await context.request.get(url);
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] Pending-trade read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
+    );
+  }
+  const body = await response.json();
+
+  const seen = new Set();
+  const transactions = [...(body.pendingTransactions || []), ...(body.transactions || [])].filter(
+    (t) => !seen.has(t.id) && seen.add(t.id),
+  );
+  if (transactions.length > 0) {
+    appendCapture("espn-pending-transactions.jsonl", { leagueId, teamId, transactions });
+  }
+
+  const nameByPlayerId = new Map();
+  const teamIdByMemberId = new Map();
+  for (const team of body.teams || []) {
+    for (const memberId of team.owners || []) teamIdByMemberId.set(memberId, String(team.id));
+    for (const entry of team.roster?.entries || []) {
+      nameByPlayerId.set(String(entry.playerId), entry.playerPoolEntry?.player?.fullName ?? null);
+    }
+  }
+
+  const ours = String(teamId);
+  const involvesUs = (t) =>
+    String(t.teamId) === ours ||
+    (t.items || []).some((i) => String(i.fromTeamId) === ours || String(i.toTeamId) === ours);
+
+  const trades = transactions
+    .filter((t) => /^TRADE/.test(t.type || "") && involvesUs(t))
+    .map((t) => ({
+      id: t.id,
+      type: t.type,
+      status: t.status,
+      proposingTeamId: String(t.teamId),
+      proposedDate: t.proposedDate,
+      ...("comment" in t ? { comment: t.comment } : {}),
+      items: (t.items || []).map((i) => ({
+        playerId: String(i.playerId),
+        playerName: nameByPlayerId.get(String(i.playerId)) ?? null,
+        type: i.type,
+        fromTeamId: String(i.fromTeamId),
+        toTeamId: String(i.toTeamId),
+      })),
+    }));
+
+  return { trades, teamIdByMemberId };
+}
+
+/**
+ * Recent league-chat posts, oldest first: `{authorId, date, content}`, where authorId is a member
+ * id (`{SWID}`) or "LM" for ESPN's league-manager system posts.
+ *
+ * The Fantasy Chat widget's iframe (chat.espn.com) opens on a room list, not messages, so it can't
+ * be read without clicking into a room (recon 2026-10-03, #101). This feed's CHAT_ALL_MEMBERS topic
+ * is the same conversation the widget's "League Chat" room shows (same topic id). Posts without
+ * `content` are ESPN's templated system cards (recaps, power rankings) and are dropped.
+ */
+async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
+  const url = `${READS_HOST}/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}/communication/?view=kona_league_communication`;
+  const filter = {
+    topics: {
+      filterType: { value: ["CHAT_ALL_MEMBERS"] },
+      limit: 1,
+      limitPerMessageSet: { value: limit },
+      sortMessageDate: { sortPriority: 1, sortAsc: false },
+    },
+  };
+  const response = await context.request.get(url, {
+    headers: { "x-fantasy-filter": JSON.stringify(filter) },
+  });
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] League chat read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
+    );
+  }
+  const body = await response.json();
+
+  // Filtered again here: the server honoring x-fantasy-filter isn't something to rely on.
+  return (body.topics || [])
+    .filter((topic) => topic.type === "CHAT_ALL_MEMBERS")
+    .flatMap((topic) => topic.messages || [])
+    .filter((m) => !m.isDeleted && typeof m.content === "string" && m.content.trim() !== "")
+    // Member posts' shape is unconfirmed; without a numeric date the sort and slice go wrong.
+    .filter((m) => Number.isFinite(m.date))
+    .map((m) => ({ authorId: m.author, date: m.date, content: m.content }))
+    .sort((a, b) => a.date - b.date)
+    .slice(-limit);
 }
 
 /**
@@ -450,35 +567,15 @@ function buildTradeProposalBody({
   };
 }
 
-const PENDING_TRADE_TYPES = new Set(["TRADE_PROPOSAL", "TRADE_ACCEPT"]);
-
-/**
- * The league's pending trades, read the way ESPN's clubhouse does (#124): `view=mPendingTransactions`
- * returns a top-level `pendingTransactions[]` of whole transactions (id, type, teamId = proposer,
- * items[] with fromTeamId/toTeamId), and the client keeps TRADE_PROPOSAL/TRADE_ACCEPT. ESPN omits
- * the key entirely when nothing is pending (confirmed live 2026-10-03), so absent means [].
- * A failed read throws: "couldn't tell" must never read as "nothing pending".
- */
-async function readPendingTrades(context, { leagueId, seasonId }) {
-  const url = buildLeagueReadUrl(leagueId, seasonId, ["mPendingTransactions"]);
-  const response = await context.request.get(url);
-  if (!response.ok()) {
-    throw new Error(
-      `[ESPN API] Pending-transactions read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
-    );
-  }
-  const body = await response.json();
-  return (body.pendingTransactions || []).filter((t) => PENDING_TRADE_TYPES.has(t.type));
-}
-
 module.exports = {
   captureWriteArtifact,
   readRoster,
   readRosters,
+  readPendingTrades,
+  readLeagueChat,
   submitLineup,
   submitWaiverClaim,
   buildTradeProposalBody,
-  readPendingTrades,
   readDraftPicks,
   submitDraftPick,
   fetchDraftPlayerPool,

@@ -320,9 +320,10 @@ const CLAIM_CLOCK_SKEW_MS = 60000;
  * or unparseable proposedDate is no match. Throws when the read fails.
  */
 async function findPendingOffer(context, offer, { claimedAt, comment }) {
-  const pending = await readPendingTrades(context, {
+  const { trades: pending } = await readPendingTrades(context, {
     leagueId: offer.leagueId,
     seasonId: offer.seasonId,
+    teamId: offer.fromTeamId,
   });
   const want = JSON.stringify(expectedItemKeys(offer));
   // null would be the epoch (match anything), so a missing claim time is NaN: no match.
@@ -331,7 +332,7 @@ async function findPendingOffer(context, offer, { claimedAt, comment }) {
     pending.find(
       (t) =>
         t.type === "TRADE_PROPOSAL" &&
-        String(t.teamId) === String(offer.fromTeamId) &&
+        t.proposingTeamId === String(offer.fromTeamId) &&
         JSON.stringify(tradeItemKeys(t.items)) === want &&
         new Date(t.proposedDate ?? NaN).getTime() >= notBefore &&
         (!("comment" in t) || (t.comment ?? "") === (comment ?? "")),

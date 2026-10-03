@@ -121,6 +121,53 @@ Host: `lm-api-reads.fantasy.espn.com` / `lm-api-writes.fantasy.espn.com` (`apis/
 - **`leaguedirectory/MOCKDRAFT_LOBBY`**: polled by the mock draft lobby page itself while waiting
   to join a room.
 
+## Clubhouse: pending trades and league chat (issue #101, recon 2026-10-03)
+
+Read-only headless probe against league 1248158344, team 8. `installWriteGuard` was on the whole
+BrowserContext before the first navigation: it blocked 0 and allowed 0 writes, and both probes
+only navigated and read. No trade was pending in the league, so only the empty state was observed.
+
+- **Pending trades come from `view=mPendingTransactions`.** The clubhouse page's own bootstrap read
+  is `GET .../leagues/{id}?rosterForTeamId={team}&view=mDraftDetail&view=mLiveScoring&view=mMatchupScore&view=mPendingTransactions&view=mPositionalRatings&view=mRoster&view=mSettings&view=mTeam&view=modular&view=mNav`.
+  That is the only pending-specific view it requests, and the clubhouse makes no other
+  trade-related call. With nothing pending, the response has **no `transactions` /
+  `pendingTransactions` key at all**: ESPN omits the empty array rather than returning `[]`. The
+  populated shape is UNVERIFIED. Presumably it carries `transactions[]` entries with
+  `type: "TRADE_PROPOSAL"`, `status: "PENDING"` and `items[].{playerId, fromTeamId, toTeamId}`,
+  matching the shape below. Confirm it against the first real pending trade.
+- **`view=mTransactions2`** returns the league's executed transaction history (`type`
+  ROSTER/FREEAGENT/WAIVER, `status: "EXECUTED"`, `isPending: false`). Each `items[]` entry carries
+  real ESPN `playerId`s (negative for D/ST) plus `fromTeamId` / `toTeamId`. Filtering it with
+  `x-fantasy-filter: {"transactions":{"filterType":{"value":["TRADE_PROPOSAL", ...]}}}` returned
+  nothing this season, which is consistent with team 8's `mTeam`
+  `transactionCounter.trades: 0`.
+- **The clubhouse page has no inline trade section.** There is no `.trade-container`,
+  `.no-pending-trades` or `.trade-card-wrapper`, and no empty-state "no pending trades" element.
+  The only trade-related DOM is the "Trade & Acquisition Limits" tooltip and the nav's "Transaction
+  Counter" link. The modal containers present (`changes-confirmation-modal`, `success-lightbox`)
+  are empty and belong to lineup moves. Whether a real pending trade adds an inline card, a
+  banner or a modal is still unobserved, so that half of #101's open question stays open until
+  one exists.
+- **League chat.** `CHAT_IFRAME_SELECTOR` (`iframe.chat--container--iframe`) is still correct, but
+  the iframe is created only after the toggle is clicked (0 matches before the click). The
+  toggle is `span.chat--container--header--title`; `getByText(/fantasy chat/i)` matches exactly
+  one element, which is that span. The iframe loads
+  `https://chat.espn.com/1/{leagueId}/{season}/0/directory`. That URL is the **room list**
+  ("2026 League Chat", plus one entry per DM conversation), not a message feed, and it renders
+  about 1s after the click (a spinner before that). So reading `body.innerText` straight after
+  the click returns `""` or the room list, never messages.
+- **`/communication/?view=kona_league_communication`** (reads host, GET) returns the league
+  activity feed as `topics[]`: `ACTIVITY_TRANSACTIONS`, `ACTIVITY_SETTINGS`, and
+  `CHAT_ALL_MEMBERS` (league-chat posts), with `messages[].{author, date, for, to, messageTypeId}`.
+  It is a REST source for league chat that needs no iframe. An
+  `x-fantasy-filter` of `{"topics":{"filterType":{"value":["CHAT_ALL_MEMBERS"]},...}}` is honored:
+  it returns only that topic. This season it holds only ESPN's league-manager posts (`author: "LM"`;
+  `content: null` for templated cards), with no member posts yet to confirm their shape.
+
+**What the bot does now:** `trade_bot.js`'s `readTradeContext` uses `espn_api.js`'s
+`readPendingTrades` (the view set above) and `readLeagueChat` (this feed) instead of loading the
+clubhouse page. Neither negotiation nor the standalone scrape navigates anywhere any more.
+
 ## Draft-room DOM (verified 2026-08-16/17)
 
 Issue #14 confirmed the **roster** page has no per-player DOM identifier at all
@@ -486,8 +533,9 @@ The names below are the minified bundle's, so they will change between builds.
 ### Reading pending offers back
 
 - **`GET lm-api-reads…/leagues/{leagueId}?view=mPendingTransactions`** is what the clubhouse
-  (`page/football/team.js`) and league home pages read. It returns a top-level
-  `pendingTransactions[]`. The client finds trades with `type ∈ {TRADE_PROPOSAL, TRADE_ACCEPT}`
+  (`page/football/team.js`) and league home pages read. ESPN's league store reads the raw
+  response's `pendingTransactions[]` (the #101 notes assumed `transactions`, also unobserved, so
+  `espn_api.js`'s `readPendingTrades` reads both). The client finds trades with `type ∈ {TRADE_PROPOSAL, TRADE_ACCEPT}`
   where `teamId === team` or any `items[].fromTeamId/toTeamId === team`. The key is **left out
   entirely when nothing is pending**: the live read on 2026-10-03 returned 200 with no
   `pendingTransactions` key, so treat a missing key as `[]`.
