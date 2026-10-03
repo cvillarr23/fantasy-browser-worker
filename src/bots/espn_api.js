@@ -145,11 +145,17 @@ function parseTeamRoster(body, { leagueId, teamId }) {
  * mPendingTransactions is the only pending-specific view it asks for, mRoster supplies player
  * names, and mTeam's `owners` maps members to teams. The clubhouse has no trade DOM to scrape.
  *
- * Verified live: with nothing pending, ESPN omits `transactions` entirely rather than sending [].
- * UNVERIFIED: the populated shape. This assumes mTransactions2's verified per-transaction shape
- * (`type`, `status`, `teamId`, `items[].{playerId, fromTeamId, toTeamId}`) with a TRADE_* type,
- * and keeps any transactions it sees in recon-output/espn-pending-transactions.jsonl so the first
- * real pending trade can confirm or correct that.
+ * Verified live: with nothing pending, ESPN omits the key entirely rather than sending [].
+ * UNVERIFIED: the populated shape, including which key holds it. ESPN's own league store reads
+ * the raw response's `pendingTransactions` (frontend bundle, #124), so that key is read, plus
+ * `transactions` in case the view uses that instead; entries are de-duplicated by id. This
+ * assumes mTransactions2's verified per-transaction shape (`type`, `status`, `teamId`,
+ * `proposedDate`, `items[].{playerId, type, fromTeamId, toTeamId}`) with a TRADE_* type, and keeps
+ * any transactions it sees in recon-output/espn-pending-transactions.jsonl so the first real
+ * pending trade can confirm or correct that.
+ *
+ * Each trade carries `proposedDate`, and `comment` only when ESPN sends one: trade_builder.js uses
+ * both to tell our offer from an older one for the same players.
  */
 async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
   const url = buildLeagueReadUrl(leagueId, seasonId, ["mPendingTransactions", "mRoster", "mTeam"]);
@@ -161,7 +167,10 @@ async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
   }
   const body = await response.json();
 
-  const transactions = body.transactions || [];
+  const seen = new Set();
+  const transactions = [...(body.pendingTransactions || []), ...(body.transactions || [])].filter(
+    (t) => !seen.has(t.id) && seen.add(t.id),
+  );
   if (transactions.length > 0) {
     appendCapture("espn-pending-transactions.jsonl", { leagueId, teamId, transactions });
   }
@@ -187,9 +196,12 @@ async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
       type: t.type,
       status: t.status,
       proposingTeamId: String(t.teamId),
+      proposedDate: t.proposedDate,
+      ...("comment" in t ? { comment: t.comment } : {}),
       items: (t.items || []).map((i) => ({
         playerId: String(i.playerId),
         playerName: nameByPlayerId.get(String(i.playerId)) ?? null,
+        type: i.type,
         fromTeamId: String(i.fromTeamId),
         toTeamId: String(i.toTeamId),
       })),
@@ -508,6 +520,53 @@ async function submitDraftPick(
   return text ? JSON.parse(text) : {};
 }
 
+/**
+ * The body ESPN's web client POSTs to transactions/ for "Send Trade Proposal". Pure: nothing is
+ * sent from here.
+ *
+ * INFERRED, NOT YET SEEN ON THE WIRE (#124): read from ESPN's own frontend bundle
+ * (TransactionService.proposeTrade -> Transaction.get(), build 35f16ade75be, 2026-10-03), with no
+ * trade sent. The envelope is the one submitLineup verified live; a trade adds a TRADE item per
+ * player, directed by its current owner, plus `expirationDate` (now + "Keep trade open for" days,
+ * default 2, sent as an ISO UTC string) and `comment` (the note, "" when there is none). See
+ * docs/espn-reverse-engineering.md "Trade proposals". trade_builder.js compares this against the
+ * body the click path actually sends, so the first live submit verifies it before any REST
+ * submit relies on it.
+ */
+function buildTradeProposalBody({
+  teamId,
+  toTeamId,
+  memberId,
+  scoringPeriodId,
+  incomingPlayerIds,
+  outgoingPlayerIds,
+  expirationDate,
+  comment,
+}) {
+  const ours = Number(teamId);
+  const theirs = Number(toTeamId);
+  const item = (playerId, fromTeamId, toTeam) => ({
+    playerId: Number(playerId),
+    type: "TRADE",
+    fromTeamId,
+    toTeamId: toTeam,
+  });
+  return {
+    isLeagueManager: false,
+    teamId: ours,
+    type: "TRADE_PROPOSAL",
+    memberId,
+    scoringPeriodId,
+    executionType: "EXECUTE",
+    items: [
+      ...incomingPlayerIds.map((id) => item(id, theirs, ours)),
+      ...outgoingPlayerIds.map((id) => item(id, ours, theirs)),
+    ],
+    expirationDate: new Date(expirationDate).toISOString(),
+    comment: comment ?? "",
+  };
+}
+
 module.exports = {
   captureWriteArtifact,
   readRoster,
@@ -516,6 +575,7 @@ module.exports = {
   readLeagueChat,
   submitLineup,
   submitWaiverClaim,
+  buildTradeProposalBody,
   readDraftPicks,
   submitDraftPick,
   fetchDraftPlayerPool,

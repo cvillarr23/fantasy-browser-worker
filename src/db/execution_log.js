@@ -174,7 +174,7 @@ function offeringTeamFor(row) {
 
 // `submitted` sorts ahead of `submitting` so a key that was retried after an unknown outcome and
 // then confirmed reads as done.
-const FIND_CLAIM_SQL = `SELECT id, status FROM execution_log
+const FIND_CLAIM_SQL = `SELECT id, status, executed_at FROM execution_log
        WHERE transaction_type = '${TRADE_SUBMIT_TYPE}'
          AND counter_offer->>'offer_key' = $1
          AND status IN ('submitting', 'submitted')

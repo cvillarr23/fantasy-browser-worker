@@ -13,6 +13,7 @@ const {
   readRosters,
   submitLineup,
   submitWaiverClaim,
+  buildTradeProposalBody,
   readPendingTrades,
   readLeagueChat,
 } = require("../../src/bots/espn_api");
@@ -251,6 +252,43 @@ describe("submitWaiverClaim", () => {
   });
 });
 
+// Inferred 2026-10-03 (#124) from ESPN's own frontend (TransactionService.proposeTrade), not yet
+// seen on the wire: see docs/espn-reverse-engineering.md "Trade proposals".
+describe("buildTradeProposalBody", () => {
+  const base = {
+    teamId: "8",
+    toTeamId: "1",
+    memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+    scoringPeriodId: 4,
+    incomingPlayerIds: ["3117251", "-16019"],
+    outgoingPlayerIds: ["4429795"],
+    expirationDate: new Date("2026-10-05T15:04:05.123Z"),
+  };
+
+  it("builds the TRADE_PROPOSAL envelope with one directed TRADE item per player", () => {
+    expect(buildTradeProposalBody({ ...base, comment: "Let's deal" })).toEqual({
+      isLeagueManager: false,
+      teamId: 8,
+      type: "TRADE_PROPOSAL",
+      memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+      scoringPeriodId: 4,
+      executionType: "EXECUTE",
+      items: [
+        { playerId: 3117251, type: "TRADE", fromTeamId: 1, toTeamId: 8 },
+        { playerId: -16019, type: "TRADE", fromTeamId: 1, toTeamId: 8 },
+        { playerId: 4429795, type: "TRADE", fromTeamId: 8, toTeamId: 1 },
+      ],
+      expirationDate: "2026-10-05T15:04:05.123Z",
+      comment: "Let's deal",
+    });
+  });
+
+  it("sends an empty comment, as ESPN's client does, when there is no note", () => {
+    expect(buildTradeProposalBody(base).comment).toBe("");
+    expect(buildTradeProposalBody({ ...base, comment: null }).comment).toBe("");
+  });
+});
+
 describe("write-artifact capture", () => {
   let tmpDir;
   const originalDebugOutputDir = process.env.DEBUG_OUTPUT_DIR;
@@ -395,11 +433,27 @@ describe("readPendingTrades", () => {
         status: "PENDING",
         proposingTeamId: "3",
         items: [
-          { playerId: "-16021", playerName: "Eagles D/ST", fromTeamId: "3", toTeamId: "8" },
-          { playerId: "4429795", playerName: "Bijan Robinson", fromTeamId: "8", toTeamId: "3" },
+          { playerId: "-16021", playerName: "Eagles D/ST", type: "TRADE", fromTeamId: "3", toTeamId: "8" },
+          { playerId: "4429795", playerName: "Bijan Robinson", type: "TRADE", fromTeamId: "8", toTeamId: "3" },
         ],
       },
     ]);
+  });
+
+  // ESPN's own league store reads the raw `pendingTransactions` key (frontend bundle, #124).
+  it("reads pendingTransactions as well as transactions, once per id, with date and comment", async () => {
+    const proposedDate = 1791033600000;
+    const context = fakeGetContext({
+      teams: LEAGUE_TEAMS,
+      pendingTransactions: [pendingTrade({ proposedDate, comment: "Let's deal" })],
+      transactions: [pendingTrade(), pendingTrade({ id: "trade-2" })],
+    });
+
+    const { trades } = await readPendingTrades(context, ids);
+
+    expect(trades.map((t) => t.id)).toEqual(["trade-1", "trade-2"]);
+    expect(trades[0]).toMatchObject({ proposedDate, comment: "Let's deal" });
+    expect("comment" in trades[1]).toBe(false);
   });
 
   it("skips non-trade transactions and trades between two other teams", async () => {

@@ -3,7 +3,12 @@ const {
   createAuthenticatedSession,
   createSessionFromStoredState,
 } = require("./auth");
-const { readRosters, captureWriteArtifact } = require("./espn_api");
+const {
+  readRosters,
+  readPendingTrades,
+  buildTradeProposalBody,
+  captureWriteArtifact,
+} = require("./espn_api");
 const { captureDebugSnapshot } = require("./debug_capture");
 const {
   findTradeSubmission,
@@ -38,9 +43,12 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * mis-identified button still can't send.
  *
  * Idempotency: a real submit is claimed in execution_log (advisory-locked, keyed on offer_key)
- * BEFORE the click. A redelivery of an offer already `submitted` is a no-op. One stuck at
- * `submitting` (the click happened, the outcome was never confirmed) fails closed as a
- * PermanentError for a human to check in ESPN. It is never re-clicked on a guess.
+ * BEFORE the click. A redelivery of an offer already `submitted` is a no-op. When a click's
+ * outcome is unknown (no response, a 5xx/429, a throwing click), or a redelivery finds a row stuck
+ * at `submitting`, ESPN's pending trades (readPendingTrades, #124) are read: an exact match settles
+ * it as submitted. Anything else fails closed as a PermanentError for a human to check in ESPN,
+ * since "not pending" can also mean already accepted, declined or expired. It is never re-clicked
+ * on a guess.
  *
  * DOM keying: ESPN's roster tables carry no per-player id (espn_selectors.json `_comment`). Rows
  * are found by the player's headshot <img> src, which embeds the ESPN id, falling back to the
@@ -258,6 +266,166 @@ function isTradeFlowWrite({ url }) {
   return /^lm-api-writes\./i.test(host) || /trade|transaction/i.test(url);
 }
 
+// Same endpoint submitLineup posts to; ESPN's client appends ?platformVersion=<build hash>.
+const TRANSACTIONS_URL = /^https:\/\/lm-api-writes\.fantasy\.espn\.com\/.*\/transactions\/?(\?|$)/;
+
+function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `response` answers our "Send Trade Proposal". ESPN's client POSTs a TRADE_PROPOSAL whose
+ * teamId is the proposer (docs/espn-reverse-engineering.md, #124), so the body is checked too, not
+ * just the URL: any other transactions/ POST in the window can't be mistaken for the offer.
+ */
+function isTradeProposalResponse(response, offer) {
+  const request = response.request();
+  if (request.method() !== "POST" || !TRANSACTIONS_URL.test(response.url())) return false;
+  const body = parseJson(request.postData());
+  return (
+    body !== null &&
+    body.type === "TRADE_PROPOSAL" &&
+    String(body.teamId) === String(offer.fromTeamId)
+  );
+}
+
+// "playerId:from>to" for each TRADE item, sorted: the offer's identity as ESPN stores it.
+function tradeItemKeys(items) {
+  return (items || [])
+    .filter((item) => item.type === "TRADE")
+    .map((item) => `${item.playerId}:${item.fromTeamId}>${item.toTeamId}`)
+    .sort();
+}
+
+function expectedItemKeys(offer) {
+  return [
+    ...offer.incomingPlayerIds.map((id) => `${id}:${offer.toTeamId}>${offer.fromTeamId}`),
+    ...offer.outgoingPlayerIds.map((id) => `${id}:${offer.fromTeamId}>${offer.toTeamId}`),
+  ].sort();
+}
+
+// Allowance for our clock (or Postgres's, for a stored claim) running ahead of ESPN's.
+const CLAIM_CLOCK_SKEW_MS = 60000;
+
+/**
+ * Our offer among ESPN's pending trades, or null. A match is a TRADE_PROPOSAL from our team whose
+ * TRADE items are exactly the offer's players in the offer's directions, proposed no earlier than
+ * `claimedAt` (the claim is written before the click), and whose comment, when ESPN lists one, is
+ * `comment`. Without the last two, an older pending offer for the same players, or one with a
+ * different note (a different offer_key), would "confirm" a submit that never went out. A missing
+ * or unparseable proposedDate is no match. Throws when the read fails.
+ */
+async function findPendingOffer(context, offer, { claimedAt, comment }) {
+  const { trades: pending } = await readPendingTrades(context, {
+    leagueId: offer.leagueId,
+    seasonId: offer.seasonId,
+    teamId: offer.fromTeamId,
+  });
+  const want = JSON.stringify(expectedItemKeys(offer));
+  // null would be the epoch (match anything), so a missing claim time is NaN: no match.
+  const notBefore = new Date(claimedAt ?? NaN).getTime() - CLAIM_CLOCK_SKEW_MS;
+  return (
+    pending.find(
+      (t) =>
+        t.type === "TRADE_PROPOSAL" &&
+        t.proposingTeamId === String(offer.fromTeamId) &&
+        JSON.stringify(tradeItemKeys(t.items)) === want &&
+        new Date(t.proposedDate ?? NaN).getTime() >= notBefore &&
+        (!("comment" in t) || (t.comment ?? "") === (comment ?? "")),
+    ) ?? null
+  );
+}
+
+/**
+ * Where the body the click actually sent differs from buildTradeProposalBody's inference (#124).
+ * Recorded on every live submit, so the first one verifies the REST body before anything relies on
+ * it. memberId/scoringPeriodId/expirationDate values aren't known here, so only their presence is.
+ */
+function diffProposalBody(postData, offer, messageAttached) {
+  const actual = parseJson(postData);
+  if (actual === null) return ["request body is not JSON"];
+  const expected = buildTradeProposalBody({
+    teamId: offer.fromTeamId,
+    toTeamId: offer.toTeamId,
+    incomingPlayerIds: offer.incomingPlayerIds,
+    outgoingPlayerIds: offer.outgoingPlayerIds,
+    expirationDate: Date.now(),
+    comment: messageAttached ? offer.message : "",
+  });
+  const mismatches = [];
+  for (const key of ["isLeagueManager", "teamId", "type", "executionType", "comment"]) {
+    if (actual[key] !== expected[key]) {
+      mismatches.push(`${key}: sent ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])}`);
+    }
+  }
+  const sentItems = (actual.items || []).map(JSON.stringify).sort();
+  const wantItems = expected.items.map(JSON.stringify).sort();
+  if (JSON.stringify(sentItems) !== JSON.stringify(wantItems)) {
+    mismatches.push(`items: sent ${JSON.stringify(actual.items)}, expected ${JSON.stringify(expected.items)}`);
+  }
+  for (const key of ["memberId", "scoringPeriodId"]) {
+    if (actual[key] === undefined) mismatches.push(`${key}: missing`);
+  }
+  if (typeof actual.expirationDate !== "string" || Number.isNaN(Date.parse(actual.expirationDate))) {
+    mismatches.push(`expirationDate: sent ${JSON.stringify(actual.expirationDate)}, expected an ISO timestamp`);
+  }
+  const known = new Set([...Object.keys(expected)]);
+  const extra = Object.keys(actual).filter((key) => !known.has(key));
+  if (extra.length > 0) mismatches.push(`unexpected keys: ${extra.join(", ")}`);
+  return mismatches;
+}
+
+/**
+ * A redelivery found this offer's earlier attempt stuck at `submitting`. Read ESPN's pending trades
+ * instead of failing blind: a match finalizes the row as submitted (no click either way).
+ */
+async function reconcileStuckSubmission(existing, offer, { label, offerKey, providedSession }) {
+  let session = providedSession || null;
+  let found = null;
+  let readFailure = null;
+  try {
+    if (!session) {
+      session = (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
+    }
+    // messageAttached isn't recorded, so expect the offer's note; a note that never got attached
+    // then fails to match, which fails closed.
+    found = await findPendingOffer(session.context, offer, {
+      claimedAt: existing.executed_at,
+      comment: offer.message,
+    });
+  } catch (error) {
+    readFailure = error;
+  } finally {
+    if (!providedSession && session && session.browser) await session.browser.close();
+  }
+
+  if (found) {
+    await finalizeTradeSubmission(existing.id, "submitted", undefined);
+    logger.info(
+      `${label} Offer ${offerKey}'s earlier attempt (row ${existing.id}) is pending in ESPN as ` +
+        `transaction ${found.id}; marked submitted. No-op.`,
+    );
+    return {
+      status: "already_submitted",
+      offerKey,
+      dryRun: false,
+      confirmedBy: "pending_read",
+      transactionId: found.id,
+    };
+  }
+  const why = readFailure
+    ? `the pending-trades read failed (${readFailure.message})`
+    : "it is not among ESPN's pending trades (it may have been accepted, declined or expired)";
+  throw new PermanentError(
+    `${label} Offer ${offerKey} has an earlier submit attempt (row ${existing.id}) whose ` +
+      `outcome was never confirmed, and ${why}. Verify in ESPN before re-approving; not re-clicking.`,
+  );
+}
+
 /**
  * Navigates to the trade builder and ticks exactly the offer's players. `names` holds the
  * playerId -> name maps from readRoster for each side. Every row is resolved before any box is
@@ -440,10 +608,7 @@ async function submitTradeOffer(
       return { status: "already_submitted", offerKey, dryRun: false };
     }
     if (existing && existing.status === "submitting") {
-      throw new PermanentError(
-        `${label} Offer ${offerKey} has an earlier submit attempt (row ${existing.id}) whose ` +
-          "outcome was never confirmed. Verify in ESPN before re-approving; not re-clicking.",
-      );
+      return reconcileStuckSubmission(existing, offer, { label, offerKey, providedSession });
     }
   }
 
@@ -524,6 +689,7 @@ async function submitTradeOffer(
       }
     }
 
+    const claimedAt = Date.now();
     claim = await claimTradeSubmission(offerKey, { ...record, screenshotPath });
     if (!claim.claimed) {
       if (claim.existing === "submitted") {
@@ -537,31 +703,66 @@ async function submitTradeOffer(
     }
 
     const responsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        /lm-api-writes\.fantasy\.espn\.com\/.*\/transactions\/?(\?|$)/.test(response.url()),
+      (response) => isTradeProposalResponse(response, offer),
       { timeout: SUBMIT_RESPONSE_TIMEOUT_MS },
     );
     // If the click itself throws, this promise is never awaited below; without a handler it would
     // reject later (timeout, or browser.close() in finally) as an unhandled rejection.
     responsePromise.catch(() => {});
+    const submitted = (extra) => ({
+      status: "submitted",
+      offerKey,
+      dryRun: false,
+      screenshotPath,
+      messageAttached,
+      closedLocks: [],
+      blockedWrites: 0,
+      ...extra,
+    });
+    // The click's outcome wasn't observed. ESPN's pending trades are the read-side answer (#124):
+    // an exact match is a confirmed submit; anything else stays 'submitting' for a human.
+    const settleUnknown = async (detail) => {
+      let found = null;
+      let readNote = "and the offer is not among ESPN's pending trades";
+      try {
+        found = await findPendingOffer(context, offer, {
+          claimedAt,
+          comment: messageAttached ? offer.message : "",
+        });
+      } catch (readError) {
+        readNote = `and the pending-trades read also failed (${readError.message})`;
+      }
+      if (!found) throw unknownOutcome(label, offerKey, `${detail}, ${readNote}`);
+      await finalizeTradeSubmission(claim.id, "submitted", undefined);
+      logger.info(
+        `${label} Offer ${offerKey} confirmed pending in ESPN as transaction ${found.id} (${detail}).`,
+      );
+      return submitted({ confirmedBy: "pending_read", transactionId: found.id });
+    };
+
     guard.allowWrites();
     clicked = true;
     try {
       await submitButton.click();
     } catch (clickError) {
       // The click may or may not have registered, so this is an unknown outcome, not a retry.
-      throw unknownOutcome(label, offerKey, `the click itself failed (${clickError.message})`);
+      return await settleUnknown(`the click itself failed (${clickError.message})`);
     }
 
     let response;
     try {
       response = await responsePromise;
     } catch (waitError) {
-      throw unknownOutcome(label, offerKey, `saw no ESPN transactions response (${waitError.message})`);
+      return await settleUnknown(`saw no ESPN trade-proposal response (${waitError.message})`);
     }
 
     const text = await response.text().catch(() => "");
+    const bodyMismatches = diffProposalBody(response.request().postData(), offer, messageAttached);
+    if (bodyMismatches.length > 0) {
+      logger.warn(
+        `${label} ESPN's trade-proposal body differs from buildTradeProposalBody: ${bodyMismatches.join("; ")}`,
+      );
+    }
     // Every write seen after the guard lifted, alongside the transactions call itself, is the raw
     // material for replacing these clicks with a REST submit later (as submitLineup did).
     captureWriteArtifact({
@@ -571,6 +772,7 @@ async function submitTradeOffer(
       teamId: offer.fromTeamId,
       url: response.url(),
       requestBody: response.request().postData(),
+      bodyMismatches,
       responseStatus: response.status(),
       responseOk: response.ok(),
       responseBodySnippet: text.slice(0, 500),
@@ -586,21 +788,13 @@ async function submitTradeOffer(
         await finalizeTradeSubmission(claim.id, "failure", rejection);
         throw new PermanentError(rejection);
       }
-      throw unknownOutcome(label, offerKey, detail);
+      return await settleUnknown(detail);
     }
 
     await finalizeTradeSubmission(claim.id, "submitted", undefined);
     await captureDebugSnapshot(page, `${snapshotLabel}-submitted`);
     logger.info(`${label} Offer ${offerKey} submitted to team ${offer.toTeamId}.`);
-    return {
-      status: "submitted",
-      offerKey,
-      dryRun: false,
-      screenshotPath,
-      messageAttached,
-      closedLocks: [],
-      blockedWrites: 0,
-    };
+    return submitted({});
   } catch (error) {
     logger.error(
       `${label} Trade offer ${offerKey} failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
@@ -720,6 +914,7 @@ module.exports = {
   computeOfferKey,
   buildTradeBuilderUrl,
   installWriteGuard,
+  isTradeProposalResponse,
   fillTradeBuilder,
   submitTradeOffer,
   executeTradeSubmission,

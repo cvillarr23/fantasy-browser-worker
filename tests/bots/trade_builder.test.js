@@ -7,7 +7,12 @@ const {
   createAuthenticatedSession,
   createSessionFromStoredState,
 } = require("../../src/bots/auth");
-const { readRosters } = require("../../src/bots/espn_api");
+const {
+  readRosters,
+  readPendingTrades,
+  buildTradeProposalBody,
+  captureWriteArtifact,
+} = require("../../src/bots/espn_api");
 const { captureDebugSnapshot } = require("../../src/bots/debug_capture");
 const {
   findTradeSubmission,
@@ -21,6 +26,7 @@ const {
   normalizeTradeOffer,
   buildTradeBuilderUrl,
   installWriteGuard,
+  isTradeProposalResponse,
   fillTradeBuilder,
   submitTradeOffer,
   executeTradeSubmission,
@@ -80,9 +86,58 @@ function rosterFor(rows) {
  * `state.clicks` records every check() and button click in order. The dry-run/approval tests assert
  * on it, so "never clicked submit" is checked directly rather than inferred from return values.
  */
+// What ESPN's client would POST for offerFixture() (docs/espn-reverse-engineering.md, #124).
+function proposalPostData(offer = offerFixture(), overrides = {}) {
+  return JSON.stringify({
+    ...jest.requireActual("../../src/bots/espn_api").buildTradeProposalBody({
+      teamId: offer.fromTeamId,
+      toTeamId: offer.toTeamId,
+      memberId: "{SWID}",
+      scoringPeriodId: 4,
+      incomingPlayerIds: offer.incomingPlayerIds,
+      outgoingPlayerIds: offer.outgoingPlayerIds,
+      expirationDate: new Date(Date.now() + 2 * 86400000),
+      comment: offer.message ?? "",
+    }),
+    ...overrides,
+  });
+}
+
+// A pending TRADE_PROPOSAL for offerFixture() as espn_api's readPendingTrades returns it.
+function pendingProposal(offer = offerFixture(), overrides = {}) {
+  const item = (id, from, to) => ({
+    playerId: String(id),
+    playerName: null,
+    type: "TRADE",
+    fromTeamId: String(from),
+    toTeamId: String(to),
+  });
+  return {
+    id: "tx-1",
+    type: "TRADE_PROPOSAL",
+    status: "PENDING",
+    proposingTeamId: String(offer.fromTeamId),
+    // Proposed a moment after the claim, as a real submit would be.
+    proposedDate: Date.now() + 1000,
+    items: [
+      ...offer.incomingPlayerIds.map((id) => item(id, offer.toTeamId, offer.fromTeamId)),
+      ...offer.outgoingPlayerIds.map((id) => item(id, offer.fromTeamId, offer.toTeamId)),
+    ],
+    ...overrides,
+  };
+}
+
+function pendingRead(trades) {
+  return { trades, teamIdByMemberId: new Map() };
+}
+
 function makeBuilderPage(
   rows,
-  { submitResponse = { status: 200, body: "{}" }, submitClickThrows = false } = {},
+  {
+    submitResponse = { status: 200, body: "{}" },
+    submitClickThrows = false,
+    submitPostData = proposalPostData(),
+  } = {},
 ) {
   const state = {
     rows: rows.map((r) => ({ checked: false, ...r })),
@@ -136,19 +191,24 @@ function makeBuilderPage(
           throw new Error("element is detached from the DOM");
         }
         if (name === "submit" && pendingResponse) {
-          const { resolve, reject } = pendingResponse;
+          const { resolve, reject, predicate } = pendingResponse;
           pendingResponse = null;
-          if (submitResponse === null) {
+          const timeout = () =>
             reject(new Error("Timeout 30000ms exceeded while waiting for event \"response\""));
+          if (submitResponse === null) {
+            timeout();
           } else {
-            resolve({
+            const response = {
               url: () =>
-                "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/",
+                "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/?platformVersion=35f16ade",
               status: () => submitResponse.status,
               ok: () => submitResponse.status >= 200 && submitResponse.status < 300,
               text: async () => submitResponse.body,
-              request: () => ({ method: () => "POST", postData: () => '{"type":"TRADE_PROPOSAL"}' }),
-            });
+              request: () => ({ method: () => "POST", postData: () => submitPostData }),
+            };
+            // Apply the module's real predicate: a response it wouldn't match is never seen.
+            if (predicate(response)) resolve(response);
+            else timeout();
           }
         }
       },
@@ -176,9 +236,9 @@ function makeBuilderPage(
       return { __exactText: text };
     }),
     waitForResponse: jest.fn(
-      () =>
+      (predicate) =>
         new Promise((resolve, reject) => {
-          pendingResponse = { resolve, reject };
+          pendingResponse = { resolve, reject, predicate };
         }),
     ),
     locator: jest.fn((sel) => {
@@ -250,6 +310,10 @@ beforeEach(() => {
   claimTradeSubmission.mockResolvedValue({ claimed: true, id: 42 });
   finalizeTradeSubmission.mockResolvedValue(undefined);
   recordTradeOfferFill.mockResolvedValue(undefined);
+  readPendingTrades.mockResolvedValue(pendingRead([]));
+  buildTradeProposalBody.mockImplementation(
+    jest.requireActual("../../src/bots/espn_api").buildTradeProposalBody,
+  );
 });
 
 afterEach(() => {
@@ -359,6 +423,36 @@ describe("installWriteGuard", () => {
     await handler(later);
     expect(later.continue).toHaveBeenCalled();
     expect(guard.allowed).toHaveLength(1);
+  });
+});
+
+describe("isTradeProposalResponse", () => {
+  const WRITES =
+    "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/";
+  const response = (url, method, postData) => ({
+    url: () => url,
+    request: () => ({ method: () => method, postData: () => postData }),
+  });
+  const offer = normalizeTradeOffer(offerFixture());
+
+  it("matches our TRADE_PROPOSAL POST, with or without ESPN's platformVersion query", () => {
+    expect(isTradeProposalResponse(response(WRITES, "POST", proposalPostData()), offer)).toBe(true);
+    expect(
+      isTradeProposalResponse(response(`${WRITES}?platformVersion=35f16ade`, "POST", proposalPostData()), offer),
+    ).toBe(true);
+  });
+
+  it("ignores other transactions, other teams' proposals, other methods/hosts and unreadable bodies", () => {
+    const cases = [
+      response(WRITES, "POST", proposalPostData(offerFixture(), { type: "ROSTER" })),
+      response(WRITES, "POST", proposalPostData(offerFixture(), { teamId: 3 })),
+      response(WRITES, "GET", proposalPostData()),
+      response(WRITES.replace("lm-api-writes", "lm-api-reads"), "POST", proposalPostData()),
+      response(`${WRITES}123`, "POST", proposalPostData()),
+      response(WRITES, "POST", "not json"),
+      response(WRITES, "POST", null),
+    ];
+    for (const c of cases) expect(isTradeProposalResponse(c, offer)).toBe(false);
   });
 });
 
@@ -536,6 +630,27 @@ describe("submitTradeOffer: approval gate", () => {
       finalizeTradeSubmission.mock.invocationCallOrder[0],
     );
     expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined);
+    // The click path's real body is checked against the inferred REST body (#124).
+    expect(captureWriteArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "trade_proposal", bodyMismatches: [] }),
+    );
+  });
+
+  it("records, without failing the submit, where ESPN's real body differs from the inferred one", async () => {
+    armForLiveSubmit();
+    const offer = offerFixture();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], {
+      submitPostData: proposalPostData(offer, { executionType: "PROPOSE", comment: undefined }),
+    });
+    useSession(page);
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
+
+    expect(result.status).toBe("submitted");
+    const [artifact] = captureWriteArtifact.mock.calls.at(-1);
+    expect(artifact.bodyMismatches).toEqual(
+      expect.arrayContaining([expect.stringMatching(/executionType/), expect.stringMatching(/comment/)]),
+    );
   });
 
   it("attaches a message when the review screen has a note field", async () => {
@@ -629,7 +744,108 @@ describe("submitTradeOffer: approval gate", () => {
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/not among ESPN's pending trades.*outcome unknown/i),
+    });
+    expect(readPendingTrades).toHaveBeenCalledTimes(1);
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no response was seen", { submitResponse: null }],
+    ["ESPN answered 5xx", { submitResponse: { status: 503, body: "busy" } }],
+    ["the click threw", { submitClickThrows: true }],
+  ])("confirms an unknown outcome (%s) by finding the offer among pending trades", async (_label, opts) => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], opts);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue(pendingRead([
+      pendingProposal(offer, { id: "other", proposingTeamId: "3" }),
+      pendingProposal(offer),
+    ]));
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
+
+    expect(result).toMatchObject({
+      status: "submitted",
+      confirmedBy: "pending_read",
+      transactionId: "tx-1",
+    });
+    expect(readPendingTrades).toHaveBeenCalledWith(expect.anything(), {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+    });
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined);
+    expect(state.clicks.filter((c) => c === "submit")).toHaveLength(1);
+  });
+
+  it("does not count a pending trade with a different set of players as ours", async () => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture();
+    const partial = pendingProposal(offer);
+    partial.items = partial.items.slice(1);
+    const reversed = pendingProposal(offerFixture({
+      incomingPlayerIds: offer.outgoingPlayerIds,
+      outgoingPlayerIds: offer.incomingPlayerIds,
+    }));
+    const otherTeam = pendingProposal(offerFixture({ toTeamId: "5" }));
+    readPendingTrades.mockResolvedValue(pendingRead([partial, reversed, otherTeam]));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
     ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/outcome unknown/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  // Code review on #127: a different offer for the same players (an older send, or another note,
+  // which is another offer_key) must never confirm this one.
+  it.each([
+    ["was proposed before this attempt's claim", { proposedDate: Date.now() - 10 * 60000 }],
+    ["has no proposedDate", { proposedDate: undefined }],
+    ["carries a different note", { comment: "an older note" }],
+  ])("does not confirm with a matching trade that %s", async (_label, overrides) => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer, overrides)]));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/outcome unknown/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("confirms when ESPN's listed comment is the note that was attached", async () => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture({ message: "Let's deal" });
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer, { comment: "Let's deal" })]));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).resolves.toMatchObject({ status: "submitted", confirmedBy: "pending_read" });
+  });
+
+  it("still fails closed when the confirming pending-trades read itself fails", async () => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockRejectedValue(new Error("HTTP 500"));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/read also failed.*HTTP 500.*outcome unknown/i),
+    });
     expect(finalizeTradeSubmission).not.toHaveBeenCalled();
   });
 
@@ -663,12 +879,83 @@ describe("submitTradeOffer: redelivery", () => {
   it("fails closed without clicking when a previous attempt's outcome is unknown", async () => {
     armForLiveSubmit();
     findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting" });
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    const browser = useSession(page);
     const offer = offerFixture();
 
     await expect(
       submitTradeOffer(offer, { approval: approvalFor(offer) }),
     ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/verify in ESPN/i) });
-    expect(createAuthenticatedSession).not.toHaveBeenCalled();
+    expect(state.gotoUrls).toEqual([]);
+    expect(state.clicks).toEqual([]);
+    expect(claimTradeSubmission).not.toHaveBeenCalled();
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+    expect(browser.close).toHaveBeenCalled();
+  });
+
+  it("settles a stuck 'submitting' row as submitted when ESPN lists the offer as pending", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({
+      id: 7,
+      status: "submitting",
+      executed_at: new Date(Date.now() - 60000),
+    });
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
+
+    expect(result).toMatchObject({ status: "already_submitted", confirmedBy: "pending_read" });
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined);
+    expect(state.gotoUrls).toEqual([]);
+    expect(state.clicks).toEqual([]);
+  });
+
+  it("does not settle a stuck row with a matching trade proposed before that row's claim", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting", executed_at: new Date() });
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue(pendingRead([
+      pendingProposal(offer, { proposedDate: Date.now() - 10 * 60000 }),
+    ]));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/verify in ESPN/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("does not settle a stuck row whose claim time is unknown", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting", executed_at: null });
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/verify in ESPN/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("fails closed on a stuck row when the pending-trades read fails", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting" });
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    readPendingTrades.mockRejectedValue(new Error("HTTP 500"));
+    const offer = offerFixture();
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/HTTP 500/) });
+    expect(state.clicks).toEqual([]);
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
   });
 
   it("does not click when the atomic claim finds another attempt got there first", async () => {

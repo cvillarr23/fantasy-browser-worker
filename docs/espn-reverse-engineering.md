@@ -439,3 +439,110 @@ types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments
   mechanism already confirmed blocking automated login (see above). `DRAFT_ROOM_URL` (a human
   joins a room once, headless only resumes/observes it) remains the working path; don't spend more
   time trying to defeat the reCAPTCHA gate itself.
+
+## Trade proposals: the submit request (issue #124)
+
+Worked out on 2026-10-03 by **static analysis of ESPN's own frontend JS. Nothing was sent.** No
+trade was proposed and no box was ticked. The only live browser run loaded the trade builder
+(`buildTradeBuilderUrl`, league 1248158344, team 8 → team 1) to collect bundle URLs. It ran with
+`installWriteGuard` on the BrowserContext, a stricter route that aborts every non-GET request to
+any host, `routeWebSocket` closing every socket, and `serviceWorker.register` stubbed, all
+installed before the first navigation. Result: guard **blocked 0 / allowed 0**. The stricter route
+aborted 3 non-ESPN POSTs (bamgrid graphql, AWS WAF `mp_verify`). No WebSockets or service workers.
+A second run made two GET-only `context.request` reads (below) and no navigation. Guard
+0 / 0.
+
+Sources: frontend build `platformVersion=35f16ade75be0a2c2a61e24b733d8f8958c8ce35`, under
+`cdn1.espn.net/kona/35f16ade75be-1.504/_next/.../page/football/team/trade.js` (UI and `sendTrade`)
+and `.../static/commons/main-396c1392ce19efb16ea8.js` (transaction service, model and HTTP layer).
+The names below are the minified bundle's, so they will change between builds.
+
+### Request
+
+`sendTrade` (trade.js) → `TransactionService.proposeTrade` → `createTransaction` + `pushItems` →
+`saveTransaction` → the shared POST helper:
+
+- **`POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/{seasonId}/segments/0/leagues/{leagueId}/transactions/?platformVersion=<build hash>`**.
+  This is the same endpoint as `submitLineup`. The host comes from `HOST_TYPE_FANTASY_WRITE_API`.
+  `platformVersion` is added to every API call by the axios config.
+- Headers: `Accept: application/json`, `Content-Type: application/json`, `X-Fantasy-Source: kona`,
+  `X-Fantasy-Platform: espn-fantasy-web`, `withCredentials` (espn_s2/SWID cookies). These are
+  identical to `submitLineup`'s verified headers.
+- Body: `JSON.stringify` of the transaction model's `get()`:
+
+```json
+{
+  "isLeagueManager": false,
+  "teamId": 8,
+  "type": "TRADE_PROPOSAL",
+  "memberId": "{SWID-WITH-BRACES}",
+  "scoringPeriodId": 4,
+  "executionType": "EXECUTE",
+  "items": [
+    { "playerId": 3117251, "type": "TRADE", "fromTeamId": 1, "toTeamId": 8 },
+    { "playerId": -16019,  "type": "TRADE", "fromTeamId": 1, "toTeamId": 8 },
+    { "playerId": 4429795, "type": "TRADE", "fromTeamId": 8, "toTeamId": 1 },
+    { "playerId": 4362238, "type": "TRADE", "fromTeamId": 8, "toTeamId": 1 }
+  ],
+  "expirationDate": "2026-10-05T15:04:05.123Z",
+  "comment": ""
+}
+```
+
+  - `teamId` is the **proposer** (us). Each item has `type: "TRADE"`. Its direction comes from the
+    player's current team: theirs go `fromTeamId: them → toTeamId: us`, ours the reverse.
+  - `scoringPeriodId` is `league.status.latestScoringPeriod`. `proposeTrade` passes no
+    `transactionScoringPeriodId`. `memberId` is `guest.profile.swid`: the brace-wrapped SWID,
+    same as `submitLineup`.
+  - `expirationDate` is `moment().add(days, "days")`, where `days` defaults to **2** (options 1–7,
+    "Keep trade open for:"). `JSON.stringify` serializes it with moment's `toJSON()`, which gives
+    an ISO-8601 UTC timestamp with milliseconds. It is `null` when acting as LM. Only a
+    `TRADE_PROPOSAL` body carries `expirationDate`.
+  - `comment` is the note to the other manager. It is a plain string, sent as `""` when empty
+    (the store default). It's included for `TRADE_PROPOSAL`, `TRADE_DECLINE` and `TRADE_VETO`.
+  - Optional extra items: draft-pick trades (`{overallPickNumber, type: "DRAFT_TRADE", fromTeamId,
+    toTeamId}`), FAAB (`{acquisitionBudget, type: "ACQUISITION_BUDGET_TRADE", fromTeamId, toTeamId}`),
+    and roster-fix drops (`{playerId, type: "DROP", fromTeamId}`, when ESPN answers that a drop is
+    required). `relatedTransactionId` is sent only on a counter (`TRADE_PROPOSAL` with a related id).
+  - `isActingAsTeamOwner` / `skipTransactionCounters` are sent only when `isLeagueManager` is true.
+
+  `submitLineup`'s verified body is the same envelope (`isLeagueManager, teamId, type, memberId,
+  scoringPeriodId, executionType: "EXECUTE", items`). A trade changes `type`, the item shape, and
+  adds `expirationDate` and `comment`.
+
+  Confidence: **high** for endpoint, method, headers and envelope. They come from the same code
+  path `submitLineup` was verified against in a live capture. **Medium-high** for the item and
+  expiration encoding: this is read from code, not seen on the wire.
+
+### How the client judges the response
+
+- The HTTP layer resolves on every status (`validateResponse: () => true`). `saveTransaction`
+  then splits on **`status >= 400`**:
+  - **< 400 → `"success"`.** The response body is the created transaction (the client reads
+    `response.scoringPeriodId`). The UI stores a toast in `sessionStorage.transaction` and
+    redirects to our clubhouse.
+  - **≥ 400 → `"error"`.** The body has `details[]`, each `{type, message, resolution?,
+    metaData.teamid}`. `type` codes such as `TRAN_ROSTER_LIMIT_EXCEEDED_*`,
+    `TRAN_ROSTER_POSITION_LIMIT_EXCEEDED*` or `TRAN_ROSTER_SLOT_LIMIT_EXCEEDED*` set
+    `dropIsRequired`. The builder then asks for a roster-fix drop and resubmits.
+  - A thrown request (network, timeout after 50 s) → `"exception"`.
+- `trade_builder.js`'s predicate (`POST` + `lm-api-writes.fantasy.espn.com/.../transactions/` +
+  `(\?|$)`) **matches** the real URL, including the `?platformVersion=` query string. Its
+  "4xx but not 429 = definite rejection" rule matches the client's `>= 400` error branch.
+
+### Reading pending offers back
+
+- **`GET lm-api-reads…/leagues/{leagueId}?view=mPendingTransactions`** is what the clubhouse
+  (`page/football/team.js`) and league home pages read. ESPN's league store reads the raw
+  response's `pendingTransactions[]` (the #101 notes assumed `transactions`, also unobserved, so
+  `espn_api.js`'s `readPendingTrades` reads both). The client finds trades with `type ∈ {TRADE_PROPOSAL, TRADE_ACCEPT}`
+  where `teamId === team` or any `items[].fromTeamId/toTeamId === team`. The key is **left out
+  entirely when nothing is pending**: the live read on 2026-10-03 returned 200 with no
+  `pendingTransactions` key, so treat a missing key as `[]`.
+- **`view=mTransactions2`**: `transactions[]` with keys `id, type, status, isPending, teamId,
+  memberId, proposedDate, processDate, executionType, scoringPeriodId, relatedTransactionId,
+  bidAmount, rating, items[]` (items: `playerId, fromTeamId, toTeamId, type, fromLineupSlotId,
+  toLineupSlotId, overallPickNumber, isKeeper`). The live read returned 12 executed
+  ROSTER/FREEAGENT/WAIVER rows, apparently scoped to the current scoring period.
+- Neither has been seen holding one of *our* `TRADE_PROPOSAL`s yet, so the exact `status` string
+  for an open offer (likely `PENDING`) is unconfirmed.
