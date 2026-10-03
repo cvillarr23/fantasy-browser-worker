@@ -41,7 +41,9 @@ let savedVerifiedKeys;
 // keep working.
 const THEIR_ROWS = [
   { team: "3", id: "4259545", headshotId: "4259545", name: "Alpha Back" },
-  { team: "3", id: "-16021", headshotId: null, name: "Eagles D/ST" },
+  // Live recon (#123): the builder shows a D/ST as just its team name ("Eagles", position D/ST),
+  // while readRoster's fullName is "Eagles D/ST".
+  { team: "3", id: "-16021", headshotId: null, name: "Eagles", rosterName: "Eagles D/ST" },
   { team: "3", id: "3054211", headshotId: "3054211", name: "Bravo Receiver" },
 ];
 const OUR_ROWS = [
@@ -66,7 +68,7 @@ function offerFixture(overrides = {}) {
 function rosterFor(rows) {
   return {
     slotByPlayerId: new Map(rows.map((r) => [r.id, 20])),
-    nameByPlayerId: new Map(rows.map((r) => [r.id, r.name])),
+    nameByPlayerId: new Map(rows.map((r) => [r.id, r.rosterName ?? r.name])),
   };
 }
 
@@ -390,7 +392,7 @@ describe("fillTradeBuilder", () => {
     const rows = [
       ...THEIR_ROWS,
       ...OUR_ROWS,
-      { team: "8", id: "999", headshotId: "999", name: "Eagles D/ST" },
+      { team: "8", id: "999", headshotId: "999", name: "Eagles" },
     ];
     const { page } = makeBuilderPage(rows);
     await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
@@ -420,6 +422,8 @@ describe("submitTradeOffer: dry run", () => {
     ["selectors unverified", () => {
       process.env.DRY_RUN = "false";
       process.env.TRADE_SUBMIT_ENABLED = "true";
+      // The real file has them verified since #123; simulate a key being demoted again.
+      SELECTORS._verified.keys = savedVerifiedKeys.filter((k) => k !== "trade_submit_button");
     }],
   ])("with %s, fills and screenshots but never clicks Continue or submit", async (_label, setup) => {
     setup();
