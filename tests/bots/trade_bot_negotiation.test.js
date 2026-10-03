@@ -201,6 +201,34 @@ describe("negotiateTradeProposal -> pending trade and chat reads (#101)", () => 
     expect(systemPrompt).toContain("team 3: Bech for your WR2?");
   });
 
+  it("describes only the offering team's trade, not other pending ones with us", async () => {
+    readPendingTrades.mockResolvedValue({
+      trades: [
+        {
+          id: "from-7",
+          type: "TRADE_PROPOSAL",
+          status: "PENDING",
+          proposingTeamId: "7",
+          items: [{ playerId: "1", playerName: "Team Seven Guy", fromTeamId: "7", toTeamId: "8" }],
+        },
+        {
+          id: "from-3",
+          type: "TRADE_PROPOSAL",
+          status: "PENDING",
+          proposingTeamId: "3",
+          items: [{ playerId: "2", playerName: "Team Three Guy", fromTeamId: "3", toTeamId: "8" }],
+        },
+      ],
+      teamIdByMemberId: new Map(),
+    });
+
+    await negotiateTradeProposal(payload); // offering_team_id "3"
+
+    const { systemPrompt } = completeWithFallback.mock.calls[0][1];
+    expect(systemPrompt).toContain("Team Three Guy");
+    expect(systemPrompt).not.toContain("Team Seven Guy");
+  });
+
   it("still negotiates, proposals-only, when the chat read fails", async () => {
     readLeagueChat.mockRejectedValue(new Error("HTTP 500"));
 

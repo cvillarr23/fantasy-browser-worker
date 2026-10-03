@@ -495,6 +495,22 @@ describe("readLeagueChat", () => {
     ]);
   });
 
+  it("drops posts without a numeric date rather than breaking the ordering", async () => {
+    const context = fakeGetContext({
+      topics: [
+        chatTopic([
+          { author: "LM", date: 2, content: "kept", isDeleted: false },
+          { author: "LM", content: "no date", isDeleted: false },
+          { author: "LM", date: "yesterday", content: "bad date", isDeleted: false },
+        ]),
+      ],
+    });
+
+    const messages = await readLeagueChat(context, ids);
+
+    expect(messages.map((m) => m.content)).toEqual(["kept"]);
+  });
+
   it("keeps only the most recent `limit` posts", async () => {
     const posts = [1, 2, 3].map((n) => ({ author: "LM", date: n, content: `post ${n}`, isDeleted: false }));
     const messages = await readLeagueChat(fakeGetContext({ topics: [chatTopic(posts)] }), {

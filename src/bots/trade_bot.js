@@ -89,13 +89,25 @@ function formatLeagueChat(messages, teamIdByMemberId) {
  * `.trade-container`/`.no-pending-trades` selectors never existed), and the chat iframe opens on a
  * room list rather than messages. Both reads are GETs on the session's context. The chat read is
  * best-effort; a failed pending-trade read throws, since the negotiation has nothing to work from.
+ *
+ * `offeringTeamId` narrows the proposals to trades with that team, so the negotiator's prompt
+ * can't describe a different team's offer than the one its counter is staged against.
  */
-async function readTradeContext(context, { leagueId, seasonId, teamId }) {
-  const { trades, teamIdByMemberId } = await readPendingTrades(context, {
+async function readTradeContext(context, { leagueId, seasonId, teamId, offeringTeamId }) {
+  const { trades: allTrades, teamIdByMemberId } = await readPendingTrades(context, {
     leagueId,
     seasonId,
     teamId,
   });
+  const trades = offeringTeamId
+    ? allTrades.filter(
+        (trade) =>
+          trade.proposingTeamId === String(offeringTeamId) ||
+          trade.items.some(
+            (i) => i.fromTeamId === String(offeringTeamId) || i.toTeamId === String(offeringTeamId),
+          ),
+      )
+    : allTrades;
 
   let chatLog = "CHAT_LOG_UNAVAILABLE";
   try {
@@ -512,6 +524,7 @@ async function negotiateTradeProposal(payload) {
       leagueId,
       seasonId: season,
       teamId: process.env.ESPN_TEAM_ID,
+      offeringTeamId,
     });
 
     const [deficits, evaluation] = await Promise.all([

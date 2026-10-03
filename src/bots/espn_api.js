@@ -232,6 +232,8 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
     .filter((topic) => topic.type === "CHAT_ALL_MEMBERS")
     .flatMap((topic) => topic.messages || [])
     .filter((m) => !m.isDeleted && typeof m.content === "string" && m.content.trim() !== "")
+    // Member posts' shape is unconfirmed; without a numeric date the sort and slice go wrong.
+    .filter((m) => Number.isFinite(m.date))
     .map((m) => ({ authorId: m.author, date: m.date, content: m.content }))
     .sort((a, b) => a.date - b.date)
     .slice(-limit);
