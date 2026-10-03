@@ -13,6 +13,8 @@ const {
   readRosters,
   submitLineup,
   submitWaiverClaim,
+  buildTradeProposalBody,
+  readPendingTrades,
 } = require("../../src/bots/espn_api");
 
 afterAll(() => {
@@ -246,6 +248,89 @@ describe("submitWaiverClaim", () => {
         addPlayerId: "111",
       }),
     ).rejects.toMatchObject({ permanent: true });
+  });
+});
+
+// Inferred 2026-10-03 (#124) from ESPN's own frontend (TransactionService.proposeTrade), not yet
+// seen on the wire: see docs/espn-reverse-engineering.md "Trade proposals".
+describe("buildTradeProposalBody", () => {
+  const base = {
+    teamId: "8",
+    toTeamId: "1",
+    memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+    scoringPeriodId: 4,
+    incomingPlayerIds: ["3117251", "-16019"],
+    outgoingPlayerIds: ["4429795"],
+    expirationDate: new Date("2026-10-05T15:04:05.123Z"),
+  };
+
+  it("builds the TRADE_PROPOSAL envelope with one directed TRADE item per player", () => {
+    expect(buildTradeProposalBody({ ...base, comment: "Let's deal" })).toEqual({
+      isLeagueManager: false,
+      teamId: 8,
+      type: "TRADE_PROPOSAL",
+      memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+      scoringPeriodId: 4,
+      executionType: "EXECUTE",
+      items: [
+        { playerId: 3117251, type: "TRADE", fromTeamId: 1, toTeamId: 8 },
+        { playerId: -16019, type: "TRADE", fromTeamId: 1, toTeamId: 8 },
+        { playerId: 4429795, type: "TRADE", fromTeamId: 8, toTeamId: 1 },
+      ],
+      expirationDate: "2026-10-05T15:04:05.123Z",
+      comment: "Let's deal",
+    });
+  });
+
+  it("sends an empty comment, as ESPN's client does, when there is no note", () => {
+    expect(buildTradeProposalBody(base).comment).toBe("");
+    expect(buildTradeProposalBody({ ...base, comment: null }).comment).toBe("");
+  });
+});
+
+describe("readPendingTrades", () => {
+  function getContext(body, status = 200) {
+    return {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => status >= 200 && status < 300,
+          status: () => status,
+          json: async () => body,
+          text: async () => JSON.stringify(body),
+        }),
+      },
+    };
+  }
+
+  it("reads mPendingTransactions and returns only pending trade proposals/acceptances", async () => {
+    const context = getContext({
+      pendingTransactions: [
+        { id: "a", type: "TRADE_PROPOSAL", teamId: 8, items: [] },
+        { id: "b", type: "WAIVER", teamId: 8, items: [] },
+        { id: "c", type: "TRADE_ACCEPT", teamId: 1, items: [] },
+      ],
+    });
+
+    const trades = await readPendingTrades(context, { leagueId: "1248158344", seasonId: "2026" });
+
+    expect(context.request.get).toHaveBeenCalledWith(
+      "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344?view=mPendingTransactions",
+    );
+    expect(trades.map((t) => t.id)).toEqual(["a", "c"]);
+  });
+
+  it("treats a missing pendingTransactions key as none pending (ESPN omits it when empty)", async () => {
+    const context = getContext({ id: 1248158344, seasonId: 2026 });
+    await expect(
+      readPendingTrades(context, { leagueId: "1248158344", seasonId: "2026" }),
+    ).resolves.toEqual([]);
+  });
+
+  it("throws on a failed read rather than reporting nothing pending", async () => {
+    const context = getContext({ messages: ["nope"] }, 500);
+    await expect(
+      readPendingTrades(context, { leagueId: "1248158344", seasonId: "2026" }),
+    ).rejects.toThrow(/HTTP 500/);
   });
 });
 

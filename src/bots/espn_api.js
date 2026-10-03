@@ -403,12 +403,82 @@ async function submitDraftPick(
   return text ? JSON.parse(text) : {};
 }
 
+/**
+ * The body ESPN's web client POSTs to transactions/ for "Send Trade Proposal". Pure: nothing is
+ * sent from here.
+ *
+ * INFERRED, NOT YET SEEN ON THE WIRE (#124): read from ESPN's own frontend bundle
+ * (TransactionService.proposeTrade -> Transaction.get(), build 35f16ade75be, 2026-10-03), with no
+ * trade sent. The envelope is the one submitLineup verified live; a trade adds a TRADE item per
+ * player, directed by its current owner, plus `expirationDate` (now + "Keep trade open for" days,
+ * default 2, sent as an ISO UTC string) and `comment` (the note, "" when there is none). See
+ * docs/espn-reverse-engineering.md "Trade proposals". trade_builder.js compares this against the
+ * body the click path actually sends, so the first live submit verifies it before any REST
+ * submit relies on it.
+ */
+function buildTradeProposalBody({
+  teamId,
+  toTeamId,
+  memberId,
+  scoringPeriodId,
+  incomingPlayerIds,
+  outgoingPlayerIds,
+  expirationDate,
+  comment,
+}) {
+  const ours = Number(teamId);
+  const theirs = Number(toTeamId);
+  const item = (playerId, fromTeamId, toTeam) => ({
+    playerId: Number(playerId),
+    type: "TRADE",
+    fromTeamId,
+    toTeamId: toTeam,
+  });
+  return {
+    isLeagueManager: false,
+    teamId: ours,
+    type: "TRADE_PROPOSAL",
+    memberId,
+    scoringPeriodId,
+    executionType: "EXECUTE",
+    items: [
+      ...incomingPlayerIds.map((id) => item(id, theirs, ours)),
+      ...outgoingPlayerIds.map((id) => item(id, ours, theirs)),
+    ],
+    expirationDate: new Date(expirationDate).toISOString(),
+    comment: comment ?? "",
+  };
+}
+
+const PENDING_TRADE_TYPES = new Set(["TRADE_PROPOSAL", "TRADE_ACCEPT"]);
+
+/**
+ * The league's pending trades, read the way ESPN's clubhouse does (#124): `view=mPendingTransactions`
+ * returns a top-level `pendingTransactions[]` of whole transactions (id, type, teamId = proposer,
+ * items[] with fromTeamId/toTeamId), and the client keeps TRADE_PROPOSAL/TRADE_ACCEPT. ESPN omits
+ * the key entirely when nothing is pending (confirmed live 2026-10-03), so absent means [].
+ * A failed read throws: "couldn't tell" must never read as "nothing pending".
+ */
+async function readPendingTrades(context, { leagueId, seasonId }) {
+  const url = buildLeagueReadUrl(leagueId, seasonId, ["mPendingTransactions"]);
+  const response = await context.request.get(url);
+  if (!response.ok()) {
+    throw new Error(
+      `[ESPN API] Pending-transactions read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
+    );
+  }
+  const body = await response.json();
+  return (body.pendingTransactions || []).filter((t) => PENDING_TRADE_TYPES.has(t.type));
+}
+
 module.exports = {
   captureWriteArtifact,
   readRoster,
   readRosters,
   submitLineup,
   submitWaiverClaim,
+  buildTradeProposalBody,
+  readPendingTrades,
   readDraftPicks,
   submitDraftPick,
   fetchDraftPlayerPool,
