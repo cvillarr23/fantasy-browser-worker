@@ -278,9 +278,49 @@ async function createAuthenticatedSession({ headless = true } = {}) {
  * createAuthenticatedSession() instead; leaves that function itself untouched, so WORKER-06's
  * cookie-only WS submission path is unaffected either way.
  */
+/**
+ * A stored login whose espn_s2 is missing or past its expiry can't be logged in, so don't launch
+ * Chromium for it. A session-lifetime cookie (expires -1) is left to storedLoginRejected.
+ */
+function storedLoginExpired(storageState, now = Date.now()) {
+  const espnS2 = (storageState.cookies || []).find((c) => c.name === "espn_s2");
+  if (!espnS2) return true;
+  return typeof espnS2.expires === "number" && espnS2.expires > 0 && espnS2.expires * 1000 <= now;
+}
+
+/**
+ * Whether ESPN rejects the stored login: the same authenticated mTeam read as
+ * session_health.assertCookieSessionValid (401/403 = logged out). Only a definite rejection
+ * counts. A network error or 5xx can't tell us anything, and the cookie pair would hit the same
+ * outage, so those keep the stored session. Skipped without ESPN_LEAGUE_ID/CURRENT_YEAR. A league
+ * readable without login would also pass, so this catches a dead login, not every degraded one.
+ */
+async function storedLoginRejected(context) {
+  const leagueId = process.env.ESPN_LEAGUE_ID;
+  const seasonId = process.env.CURRENT_YEAR;
+  if (!leagueId || !seasonId) return false;
+  try {
+    const response = await context.request.get(
+      `https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/${seasonId}/segments/0/leagues/${leagueId}?view=mTeam`,
+    );
+    return response.status() === 401 || response.status() === 403;
+  } catch {
+    return false;
+  }
+}
+
 async function createSessionFromStoredState({ headless = true } = {}) {
   const storageState = fetchStoredSessionState();
   if (!storageState) {
+    return null;
+  }
+  // Every caller falls back to createAuthenticatedSession() (the ESPN_S2/SWID pair) on null, and
+  // the pair is refreshed separately from this state (#128). So a stored login that's expired or
+  // rejected returns null rather than running a logged-out session.
+  if (storedLoginExpired(storageState)) {
+    logger.warn(
+      "[Auth Engine] Stored session state has no unexpired espn_s2 cookie; falling back to cookie auth.",
+    );
     return null;
   }
 
@@ -315,6 +355,14 @@ async function createSessionFromStoredState({ headless = true } = {}) {
     // Callers (e.g. draft_room_dom.js's buildDraftUrl) expect `swid` back the same way
     // createAuthenticatedSession() provides it, even though it came from the stored state's
     // cookies rather than ESPN_S2/SWID env/OpenBao fields.
+    if (await storedLoginRejected(context)) {
+      logger.warn(
+        "[Auth Engine] ESPN rejected the stored session state (401/403); falling back to cookie auth.",
+      );
+      await browser.close().catch(() => {});
+      return null;
+    }
+
     const cookies = await context.cookies();
     const swid = cookies.find((c) => c.name === "SWID")?.value;
 
