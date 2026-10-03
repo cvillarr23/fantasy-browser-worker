@@ -308,24 +308,33 @@ function expectedItemKeys(offer) {
   ].sort();
 }
 
+// Allowance for our clock (or Postgres's, for a stored claim) running ahead of ESPN's.
+const CLAIM_CLOCK_SKEW_MS = 60000;
+
 /**
  * Our offer among ESPN's pending trades, or null. A match is a TRADE_PROPOSAL from our team whose
- * TRADE items are exactly the offer's players in the offer's directions. An identical offer a human
- * sent by hand would also match; for "was this offer sent?" that's the right answer anyway.
- * Throws when the read fails.
+ * TRADE items are exactly the offer's players in the offer's directions, proposed no earlier than
+ * `claimedAt` (the claim is written before the click), and whose comment, when ESPN lists one, is
+ * `comment`. Without the last two, an older pending offer for the same players, or one with a
+ * different note (a different offer_key), would "confirm" a submit that never went out. A missing
+ * or unparseable proposedDate is no match. Throws when the read fails.
  */
-async function findPendingOffer(context, offer) {
+async function findPendingOffer(context, offer, { claimedAt, comment }) {
   const pending = await readPendingTrades(context, {
     leagueId: offer.leagueId,
     seasonId: offer.seasonId,
   });
   const want = JSON.stringify(expectedItemKeys(offer));
+  // null would be the epoch (match anything), so a missing claim time is NaN: no match.
+  const notBefore = new Date(claimedAt ?? NaN).getTime() - CLAIM_CLOCK_SKEW_MS;
   return (
     pending.find(
       (t) =>
         t.type === "TRADE_PROPOSAL" &&
         String(t.teamId) === String(offer.fromTeamId) &&
-        JSON.stringify(tradeItemKeys(t.items)) === want,
+        JSON.stringify(tradeItemKeys(t.items)) === want &&
+        new Date(t.proposedDate ?? NaN).getTime() >= notBefore &&
+        (!("comment" in t) || (t.comment ?? "") === (comment ?? "")),
     ) ?? null
   );
 }
@@ -381,7 +390,12 @@ async function reconcileStuckSubmission(existing, offer, { label, offerKey, prov
     if (!session) {
       session = (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     }
-    found = await findPendingOffer(session.context, offer);
+    // messageAttached isn't recorded, so expect the offer's note; a note that never got attached
+    // then fails to match, which fails closed.
+    found = await findPendingOffer(session.context, offer, {
+      claimedAt: existing.executed_at,
+      comment: offer.message,
+    });
   } catch (error) {
     readFailure = error;
   } finally {
@@ -674,6 +688,7 @@ async function submitTradeOffer(
       }
     }
 
+    const claimedAt = Date.now();
     claim = await claimTradeSubmission(offerKey, { ...record, screenshotPath });
     if (!claim.claimed) {
       if (claim.existing === "submitted") {
@@ -709,7 +724,10 @@ async function submitTradeOffer(
       let found = null;
       let readNote = "and the offer is not among ESPN's pending trades";
       try {
-        found = await findPendingOffer(context, offer);
+        found = await findPendingOffer(context, offer, {
+          claimedAt,
+          comment: messageAttached ? offer.message : "",
+        });
       } catch (readError) {
         readNote = `and the pending-trades read also failed (${readError.message})`;
       }

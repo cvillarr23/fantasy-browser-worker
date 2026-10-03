@@ -109,6 +109,8 @@ function pendingProposal(offer = offerFixture(), overrides = {}) {
     id: "tx-1",
     type: "TRADE_PROPOSAL",
     status: "PENDING",
+    // Proposed a moment after the claim, as a real submit would be.
+    proposedDate: Date.now() + 1000,
     teamId: Number(offer.fromTeamId),
     items: [
       ...offer.incomingPlayerIds.map((id) => ({
@@ -798,6 +800,37 @@ describe("submitTradeOffer: approval gate", () => {
     expect(finalizeTradeSubmission).not.toHaveBeenCalled();
   });
 
+  // Code review on #127: a different offer for the same players (an older send, or another note,
+  // which is another offer_key) must never confirm this one.
+  it.each([
+    ["was proposed before this attempt's claim", { proposedDate: Date.now() - 10 * 60000 }],
+    ["has no proposedDate", { proposedDate: undefined }],
+    ["carries a different note", { comment: "an older note" }],
+  ])("does not confirm with a matching trade that %s", async (_label, overrides) => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue([pendingProposal(offer, overrides)]);
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/outcome unknown/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("confirms when ESPN's listed comment is the note that was attached", async () => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
+    useSession(page);
+    const offer = offerFixture({ message: "Let's deal" });
+    readPendingTrades.mockResolvedValue([pendingProposal(offer, { comment: "Let's deal" })]);
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).resolves.toMatchObject({ status: "submitted", confirmedBy: "pending_read" });
+  });
+
   it("still fails closed when the confirming pending-trades read itself fails", async () => {
     armForLiveSubmit();
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitResponse: null });
@@ -860,7 +893,11 @@ describe("submitTradeOffer: redelivery", () => {
 
   it("settles a stuck 'submitting' row as submitted when ESPN lists the offer as pending", async () => {
     armForLiveSubmit();
-    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting" });
+    findTradeSubmission.mockResolvedValue({
+      id: 7,
+      status: "submitting",
+      executed_at: new Date(Date.now() - 60000),
+    });
     const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);
     const offer = offerFixture();
@@ -872,6 +909,36 @@ describe("submitTradeOffer: redelivery", () => {
     expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined);
     expect(state.gotoUrls).toEqual([]);
     expect(state.clicks).toEqual([]);
+  });
+
+  it("does not settle a stuck row with a matching trade proposed before that row's claim", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting", executed_at: new Date() });
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue([
+      pendingProposal(offer, { proposedDate: Date.now() - 10 * 60000 }),
+    ]);
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/verify in ESPN/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("does not settle a stuck row whose claim time is unknown", async () => {
+    armForLiveSubmit();
+    findTradeSubmission.mockResolvedValue({ id: 7, status: "submitting", executed_at: null });
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    readPendingTrades.mockResolvedValue([pendingProposal(offer)]);
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/verify in ESPN/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
   });
 
   it("fails closed on a stuck row when the pending-trades read fails", async () => {
