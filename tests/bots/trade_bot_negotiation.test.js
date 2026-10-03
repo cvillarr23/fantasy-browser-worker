@@ -5,6 +5,7 @@ jest.mock("../../src/bots/debug_capture");
 jest.mock("../../src/lib/llm_client");
 jest.mock("../../src/db/execution_log");
 jest.mock("../../src/bots/trade_builder");
+jest.mock("../../src/bots/espn_api");
 
 const {
   createAuthenticatedSession,
@@ -13,6 +14,7 @@ const {
 const { completeWithFallback } = require("../../src/lib/llm_client");
 const { recordTradeNegotiation } = require("../../src/db/execution_log");
 const { submitTradeOffer } = require("../../src/bots/trade_builder");
+const { readPendingTrades, readLeagueChat } = require("../../src/bots/espn_api");
 const { PermanentError } = require("../../src/errors");
 const { negotiateTradeProposal } = require("../../src/bots/trade_bot");
 
@@ -64,15 +66,25 @@ beforeEach(() => {
   process.env.ESPN_TEAM_ID = "8";
 
   session = {
-    page: {
-      goto: jest.fn(async () => {}),
-      waitForSelector: jest.fn(async () => {}),
-      evaluate: jest.fn(async () => "Team 3 offers X for Y"),
-      getByText: jest.fn(() => ({ first: () => ({ click: async () => { throw new Error("no chat"); } }) })),
-    },
-    context: {},
+    page: { goto: jest.fn(async () => {}) },
+    context: { request: {} },
     browser: { close: jest.fn(async () => {}) },
   };
+  readPendingTrades.mockResolvedValue({
+    trades: [
+      {
+        id: "trade-1",
+        type: "TRADE_PROPOSAL",
+        status: "PENDING",
+        proposingTeamId: "3",
+        items: [{ playerId: "4685720", playerName: "Jack Bech", fromTeamId: "3", toTeamId: "8" }],
+      },
+    ],
+    teamIdByMemberId: new Map([["{OWNER-3}", "3"]]),
+  });
+  readLeagueChat.mockResolvedValue([
+    { authorId: "{OWNER-3}", date: Date.UTC(2026, 9, 1), content: "Bech for your WR2?" },
+  ]);
   createSessionFromStoredState.mockResolvedValue(session);
   createAuthenticatedSession.mockResolvedValue(session);
   global.fetch = jest.fn(async (url) => routeFetch(url));
@@ -162,5 +174,64 @@ describe("negotiateTradeProposal -> trade builder", () => {
 
     expect(submitTradeOffer).not.toHaveBeenCalled();
     expect(result.submission).toMatchObject({ status: "fill_failed", error: expect.stringMatching(/777/) });
+  });
+});
+
+describe("negotiateTradeProposal -> pending trade and chat reads (#101)", () => {
+  beforeEach(() => {
+    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
+  });
+
+  it("reads the pending trade and league chat over REST, never loading the clubhouse page", async () => {
+    await negotiateTradeProposal(payload);
+
+    expect(readPendingTrades).toHaveBeenCalledWith(session.context, {
+      leagueId: "1248158344",
+      seasonId: 2026,
+      teamId: "8",
+    });
+    expect(readLeagueChat).toHaveBeenCalledWith(session.context, {
+      leagueId: "1248158344",
+      seasonId: 2026,
+    });
+    expect(session.page.goto).not.toHaveBeenCalled();
+
+    const { systemPrompt } = completeWithFallback.mock.calls[0][1];
+    expect(systemPrompt).toContain("TRADE_PROPOSAL from team 3 (PENDING): team 3 sends Jack Bech");
+    expect(systemPrompt).toContain("team 3: Bech for your WR2?");
+  });
+
+  it("still negotiates, proposals-only, when the chat read fails", async () => {
+    readLeagueChat.mockRejectedValue(new Error("HTTP 500"));
+
+    const result = await negotiateTradeProposal(payload);
+
+    expect(completeWithFallback.mock.calls[0][1].systemPrompt).toContain(
+      "Recent league chat: CHAT_LOG_UNAVAILABLE",
+    );
+    expect(result.submission).toMatchObject({ status: "awaiting_approval" });
+  });
+
+  it("tells the model when nothing is pending", async () => {
+    readPendingTrades.mockResolvedValue({ trades: [], teamIdByMemberId: new Map() });
+
+    await negotiateTradeProposal(payload);
+
+    expect(completeWithFallback.mock.calls[0][1].systemPrompt).toContain(
+      "Pending trade proposal(s): NO_PENDING_PROPOSALS",
+    );
+  });
+
+  it("fails with a retry delay when the pending-trade read fails, recording the failure", async () => {
+    readPendingTrades.mockRejectedValue(new Error("[ESPN API] Pending-trade read failed with HTTP 503"));
+
+    await expect(negotiateTradeProposal(payload)).rejects.toMatchObject({
+      retryDelayMs: expect.any(Number),
+    });
+    expect(completeWithFallback).not.toHaveBeenCalled();
+    expect(recordTradeNegotiation).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "failure", errorMessage: expect.stringMatching(/HTTP 503/) }),
+    );
+    expect(session.browser.close).toHaveBeenCalled();
   });
 });

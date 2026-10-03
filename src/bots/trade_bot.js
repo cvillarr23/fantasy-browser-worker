@@ -1,11 +1,8 @@
-/* eslint-env browser */
-// The page.evaluate() callback below runs inside the browser page, not Node — document/window
-// are real globals there, hence the browser env for this file.
 const {
   createAuthenticatedSession,
   createSessionFromStoredState,
 } = require("./auth");
-const { captureDebugSnapshot } = require("./debug_capture");
+const { readPendingTrades, readLeagueChat } = require("./espn_api");
 const {
   PermanentError,
   requirePlainObjectPayload,
@@ -44,63 +41,72 @@ function withRetryDelay(error) {
 }
 
 // Confirmed live 2026-09-22: /football/team without a teamId renders ESPN's "Invalid Team ID"
-// error page, not the clubhouse — teamId is required, not optional.
+// error page, not the clubhouse — teamId is required, not optional. No longer read by the bot
+// (see readTradeContext); trade_recon.js still opens it.
 function buildTradePortalUrl(leagueId, seasonId, teamId) {
   return `https://fantasy.espn.com/football/team?leagueId=${leagueId}&seasonId=${seasonId}&teamId=${teamId}`;
 }
 
-// Cross-origin iframe hosting the entire "Fantasy Chat" widget (room list, message feed, compose
-// box) — confirmed live 2026-09-16 against a real league (see the plan's recon findings). Neither
-// a top-level page.locator() nor page.evaluate() can reach inside it; Playwright's frameLocator
-// is required.
-const CHAT_IFRAME_SELECTOR = "iframe.chat--container--iframe";
+/** Prompt text for readPendingTrades' trades. Names only, never ESPN ids: those collide with
+ * core-pipeline's internal ids, the space the LLM's counter-offer is in (see
+ * resolveEspnPlayerIds), so an ESPN id in the prompt could come back as a counter id naming a
+ * different player. */
+function formatPendingTrades(trades) {
+  if (trades.length === 0) return "NO_PENDING_PROPOSALS";
+
+  return trades
+    .map((trade) => {
+      const sentByTeam = new Map();
+      for (const item of trade.items) {
+        if (!sentByTeam.has(item.fromTeamId)) sentByTeam.set(item.fromTeamId, []);
+        sentByTeam.get(item.fromTeamId).push(item.playerName ?? "an unnamed player");
+      }
+      const sides = Array.from(sentByTeam, ([teamId, names]) => `team ${teamId} sends ${names.join(", ")}`);
+      return `${trade.type} from team ${trade.proposingTeamId} (${trade.status}): ${sides.join("; ")}`;
+    })
+    .join(" | ");
+}
+
+/** Prompt text for readLeagueChat's posts, attributed to a team where the author owns one. */
+function formatLeagueChat(messages, teamIdByMemberId) {
+  if (messages.length === 0) return "NO_RECENT_CHAT";
+
+  return messages
+    .map(({ authorId, date, content }) => {
+      const teamId = teamIdByMemberId.get(authorId);
+      const who =
+        authorId === "LM" ? "League Manager" : teamId ? `team ${teamId}` : "a league member";
+      return `${new Date(date).toISOString()} ${who}: ${content}`;
+    })
+    .join("\n");
+}
 
 /**
- * Page-level scrape shared by scrapePendingTradeProposals (standalone read-only entrypoint) and
- * negotiateTradeProposal (WORKER-04's queue entrypoint), so both draw on the same selectors
- * instead of duplicating them. Assumes `page` is already navigated to the trade portal URL.
+ * The pending trade(s) and recent league chat, as prompt text. Shared by
+ * scrapePendingTradeProposals (standalone read-only entrypoint) and negotiateTradeProposal.
  *
- * The `.trade-container`/`.no-pending-trades`/`.trade-card-wrapper` selectors are still
- * UNVERIFIED — recon 2026-09-16 confirmed the auth surface and the chat mechanism live, but found
- * no pending trade in the test league to check these against. captureDebugSnapshot calls below
- * exist so the first live run against a real trade can correct them from the captured DOM.
+ * REST, not DOM (#101): the clubhouse page has no trade markup to scrape (the old
+ * `.trade-container`/`.no-pending-trades` selectors never existed), and the chat iframe opens on a
+ * room list rather than messages. Both reads are GETs on the session's context. The chat read is
+ * best-effort; a failed pending-trade read throws, since the negotiation has nothing to work from.
  */
-async function scrapeTradePortalContent(page) {
-  await page.waitForSelector(".trade-container, .no-pending-trades", {
-    timeout: 10000,
-  });
-  await captureDebugSnapshot(page, "trade-portal-loaded");
-
-  const proposals = await page.evaluate(() => {
-    const tradeCards = document.querySelectorAll(".trade-card-wrapper");
-    if (tradeCards.length === 0) return "NO_PENDING_PROPOSALS";
-
-    return Array.from(tradeCards)
-      .map((card) => card.innerText.replace(/\s+/g, " ").trim())
-      .join(" | ");
+async function readTradeContext(context, { leagueId, seasonId, teamId }) {
+  const { trades, teamIdByMemberId } = await readPendingTrades(context, {
+    leagueId,
+    seasonId,
+    teamId,
   });
 
-  // UNVERIFIED — recon pending: the chat widget is collapsed by default and its toggle's
-  // selector wasn't confirmed live (only its rough screen position was, via a coordinate click,
-  // which isn't something automation should rely on). Text-based, matching the role-locator
-  // lesson mock_draft.js already learned the hard way for a similarly ambiguous button.
   let chatLog = "CHAT_LOG_UNAVAILABLE";
   try {
-    await page
-      .getByText(/fantasy chat/i)
-      .first()
-      .click({ timeout: 5000 });
-    chatLog = await page
-      .frameLocator(CHAT_IFRAME_SELECTOR)
-      .locator("body")
-      .innerText({ timeout: 5000 });
+    chatLog = formatLeagueChat(await readLeagueChat(context, { leagueId, seasonId }), teamIdByMemberId);
   } catch (chatError) {
     logger.warn(
       `[Trade Scraper] Could not read the league chat feed — leaving proposals-only: ${chatError.message}`,
     );
   }
 
-  return { proposals, chatLog };
+  return { proposals: formatPendingTrades(trades), chatLog };
 }
 
 /**
@@ -112,25 +118,20 @@ async function scrapePendingTradeProposals() {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const teamId = process.env.ESPN_TEAM_ID;
   const currentYear = process.env.CURRENT_YEAR || "2026";
-  const tradeUrl = buildTradePortalUrl(leagueId, currentYear, teamId);
 
   logger.info(
-    `[Trade Scraper] Scanning portal execution files for incoming offers at: ${tradeUrl}`,
+    `[Trade Scraper] Reading pending trades for team ${teamId} in league ${leagueId}...`,
   );
 
   let session = null;
   try {
-    // Cookie-only auth (createAuthenticatedSession) shows ESPN's client-side "Log in Required"
-    // gate on a rendered page like this one — see docs/espn-reverse-engineering.md's auth-surface
-    // split — so prefer a real stored login session first, same as draft_room_dom.js.
     session =
       (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
-    await session.page.goto(tradeUrl, {
-      waitUntil: "networkidle",
-      timeout: 20000,
+    const content = await readTradeContext(session.context, {
+      leagueId,
+      seasonId: currentYear,
+      teamId,
     });
-
-    const content = await scrapeTradePortalContent(session.page);
 
     logger.info(
       `[Trade Scraper] Extraction loop finished cleanly. Payload: "${content.proposals}"`,
@@ -138,14 +139,11 @@ async function scrapePendingTradeProposals() {
     return content;
   } catch (error) {
     logger.error(
-      `[Trade Scraper] Failed to extract page details from trade matrix portal: ${error.message}`,
+      `[Trade Scraper] Failed to read pending trades: ${error.message}`,
       {
         err: error,
       },
     );
-    if (session && session.page) {
-      await captureDebugSnapshot(session.page, "trade-portal-failure");
-    }
     return null;
   } finally {
     if (session && session.browser) {
@@ -480,7 +478,7 @@ async function executeTradeEvaluation(payload) {
 }
 
 /**
- * Queue-shaped entrypoint for WORKER-04/#4: scrapes the pending trade + league chat, grounds it
+ * Queue-shaped entrypoint for WORKER-04/#4: reads the pending trade + league chat, grounds it
  * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, and asks the LLM (via
  * WORKER-12's completeWithFallback) for a structured counter-offer.
  *
@@ -510,12 +508,11 @@ async function negotiateTradeProposal(payload) {
   try {
     session =
       (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
-    await session.page.goto(buildTradePortalUrl(leagueId, season, process.env.ESPN_TEAM_ID), {
-      waitUntil: "networkidle",
-      timeout: 20000,
+    const { proposals, chatLog } = await readTradeContext(session.context, {
+      leagueId,
+      seasonId: season,
+      teamId: process.env.ESPN_TEAM_ID,
     });
-
-    const { proposals, chatLog } = await scrapeTradePortalContent(session.page);
 
     const [deficits, evaluation] = await Promise.all([
       fetchRosterDeficits({ season, week }),
@@ -539,7 +536,6 @@ async function negotiateTradeProposal(payload) {
       `[Trade Negotiator][${tracking}] Computed counter-offer ${JSON.stringify(counterOffer)} — ` +
         "staging it for approval, nothing sent.",
     );
-    await captureDebugSnapshot(session.page, "trade-negotiation-computed");
     status = "computed";
 
     // Staging failures (an LLM-invented id, a selector miss) must not fail the negotiation: a
@@ -572,17 +568,12 @@ async function negotiateTradeProposal(payload) {
     return { ...negotiation, submission };
   } catch (error) {
     errorMessage = error.message;
-    if (session && session.page) {
-      await captureDebugSnapshot(session.page, "trade-negotiation-failure");
-    }
-    // Every throw site above this point — session/navigation, the scrape, completeWithFallback
+    // Every throw site above this point — session creation, the pending-trade read, completeWithFallback
     // exhausting every provider, a flaky non-JSON LLM response — is a novel failure mode this
     // function introduces beyond the two REST calls that already opt into withRetryDelay
     // individually. Without this, any of them nacks with an instant requeue under connection.js's
     // channel-wide prefetch(1), hot-looping a fresh Chromium launch exactly the way PR #42 already
-    // fixed once for SessionExpiredError — and since the trade-card selectors are still UNVERIFIED
-    // (see scrapeTradePortalContent), a selector miss on the first live run is a realistic
-    // trigger, not just a rare edge case.
+    // fixed once for SessionExpiredError.
     if (!error.permanent && error.retryDelayMs === undefined) {
       withRetryDelay(error);
     }
@@ -643,4 +634,6 @@ module.exports = {
   negotiateTradeProposal,
   resolveEspnPlayerIds,
   buildTradePortalUrl,
+  formatPendingTrades,
+  formatLeagueChat,
 };

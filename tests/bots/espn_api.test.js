@@ -13,6 +13,8 @@ const {
   readRosters,
   submitLineup,
   submitWaiverClaim,
+  readPendingTrades,
+  readLeagueChat,
 } = require("../../src/bots/espn_api");
 
 afterAll(() => {
@@ -313,5 +315,199 @@ describe("write-artifact capture", () => {
     });
 
     expect(fs.existsSync(path.join(tmpDir, "espn-write-log.jsonl"))).toBe(false);
+  });
+});
+
+function fakeGetContext(responseBody, status = 200) {
+  return {
+    request: {
+      get: jest.fn().mockResolvedValue({
+        ok: () => status >= 200 && status < 300,
+        status: () => status,
+        json: async () => responseBody,
+        text: async () => JSON.stringify(responseBody),
+      }),
+    },
+  };
+}
+
+const LEAGUE_READ_URL =
+  "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344";
+
+// Rosters/owners as mRoster+mTeam return them. The pending-trade entries are a GUESS at the
+// populated shape (only the empty state has been observed live, #101): mTransactions2's verified
+// executed-transaction shape with a trade type, which is how other views shape transactions.
+const LEAGUE_TEAMS = [
+  {
+    id: 8,
+    owners: ["{OWNER-8}"],
+    roster: { entries: [{ playerId: 4429795, playerPoolEntry: { player: { fullName: "Bijan Robinson" } } }] },
+  },
+  {
+    id: 3,
+    owners: ["{OWNER-3A}", "{OWNER-3B}"],
+    roster: { entries: [{ playerId: -16021, playerPoolEntry: { player: { fullName: "Eagles D/ST" } } }] },
+  },
+];
+
+function pendingTrade(overrides = {}) {
+  return {
+    id: "trade-1",
+    type: "TRADE_PROPOSAL",
+    status: "PENDING",
+    teamId: 3,
+    items: [
+      { playerId: -16021, type: "TRADE", fromTeamId: 3, toTeamId: 8 },
+      { playerId: 4429795, type: "TRADE", fromTeamId: 8, toTeamId: 3 },
+    ],
+    ...overrides,
+  };
+}
+
+describe("readPendingTrades", () => {
+  const ids = { leagueId: "1248158344", seasonId: "2026", teamId: "8" };
+
+  it("reads the same views the clubhouse page loads", async () => {
+    const context = fakeGetContext({ teams: LEAGUE_TEAMS });
+
+    await readPendingTrades(context, ids);
+
+    expect(context.request.get).toHaveBeenCalledWith(
+      `${LEAGUE_READ_URL}?view=mPendingTransactions&view=mRoster&view=mTeam`,
+    );
+  });
+
+  // Confirmed live 2026-10-03: with nothing pending ESPN omits the key rather than sending [].
+  it("returns no trades when the response has no transactions key", async () => {
+    const { trades } = await readPendingTrades(fakeGetContext({ teams: LEAGUE_TEAMS }), ids);
+    expect(trades).toEqual([]);
+  });
+
+  it("returns a trade involving our team with signed ESPN ids and roster names", async () => {
+    const context = fakeGetContext({ teams: LEAGUE_TEAMS, transactions: [pendingTrade()] });
+
+    const { trades } = await readPendingTrades(context, ids);
+
+    expect(trades).toEqual([
+      {
+        id: "trade-1",
+        type: "TRADE_PROPOSAL",
+        status: "PENDING",
+        proposingTeamId: "3",
+        items: [
+          { playerId: "-16021", playerName: "Eagles D/ST", fromTeamId: "3", toTeamId: "8" },
+          { playerId: "4429795", playerName: "Bijan Robinson", fromTeamId: "8", toTeamId: "3" },
+        ],
+      },
+    ]);
+  });
+
+  it("skips non-trade transactions and trades between two other teams", async () => {
+    const context = fakeGetContext({
+      teams: LEAGUE_TEAMS,
+      transactions: [
+        pendingTrade({ id: "waiver", type: "WAIVER" }),
+        pendingTrade({
+          id: "other-teams",
+          teamId: 5,
+          items: [{ playerId: 1, type: "TRADE", fromTeamId: 5, toTeamId: 6 }],
+        }),
+      ],
+    });
+
+    const { trades } = await readPendingTrades(context, ids);
+
+    expect(trades).toEqual([]);
+  });
+
+  it("maps every owner's member id to their team, for attributing chat posts", async () => {
+    const { teamIdByMemberId } = await readPendingTrades(fakeGetContext({ teams: LEAGUE_TEAMS }), ids);
+
+    expect(teamIdByMemberId.get("{OWNER-8}")).toBe("8");
+    expect(teamIdByMemberId.get("{OWNER-3B}")).toBe("3");
+  });
+
+  it("throws on a non-2xx read", async () => {
+    await expect(readPendingTrades(fakeGetContext({ message: "nope" }, 503), ids)).rejects.toThrow(
+      /Pending-trade read failed with HTTP 503/,
+    );
+  });
+
+  it("keeps the raw transactions when any are present, since the populated shape is unverified", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "espn-pending-"));
+    const originalDir = process.env.DEBUG_OUTPUT_DIR;
+    process.env.DEBUG_OUTPUT_DIR = tmpDir;
+    try {
+      jest.resetModules();
+      const { readPendingTrades: fresh } = require("../../src/bots/espn_api");
+      await fresh(fakeGetContext({ teams: LEAGUE_TEAMS, transactions: [pendingTrade()] }), ids);
+
+      const lines = fs
+        .readFileSync(path.join(tmpDir, "espn-pending-transactions.jsonl"), "utf8")
+        .trim()
+        .split("\n");
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]).transactions[0].id).toBe("trade-1");
+    } finally {
+      process.env.DEBUG_OUTPUT_DIR = originalDir;
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("readLeagueChat", () => {
+  const ids = { leagueId: "1248158344", seasonId: "2026" };
+
+  function chatTopic(messages) {
+    return { id: "bde68199", type: "CHAT_ALL_MEMBERS", messages };
+  }
+
+  it("asks the communication feed for the league-chat topic only", async () => {
+    const context = fakeGetContext({ topics: [] });
+
+    await readLeagueChat(context, ids);
+
+    const [url, opts] = context.request.get.mock.calls[0];
+    expect(url).toBe(`${LEAGUE_READ_URL}/communication/?view=kona_league_communication`);
+    const filter = JSON.parse(opts.headers["x-fantasy-filter"]);
+    expect(filter.topics.filterType.value).toEqual(["CHAT_ALL_MEMBERS"]);
+  });
+
+  it("returns posts with text oldest first, skipping system cards and deleted posts", async () => {
+    const context = fakeGetContext({
+      topics: [
+        chatTopic([
+          { author: "{OWNER-3A}", date: 3000, content: "still want Bijan?", isDeleted: false },
+          { author: "LM", date: 2500, content: null, messageTypeId: 266, isDeleted: false },
+          { author: "{OWNER-8}", date: 2000, content: "deleted", isDeleted: true },
+          { author: "{OWNER-8}", date: 1000, content: "anyone trading a WR", isDeleted: false },
+        ]),
+        // The server-side filter is unverified, so other topic types must be dropped here too.
+        { type: "ACTIVITY_TRANSACTIONS", messages: [{ author: "x", date: 1, content: "nope" }] },
+      ],
+    });
+
+    const messages = await readLeagueChat(context, ids);
+
+    expect(messages).toEqual([
+      { authorId: "{OWNER-8}", date: 1000, content: "anyone trading a WR" },
+      { authorId: "{OWNER-3A}", date: 3000, content: "still want Bijan?" },
+    ]);
+  });
+
+  it("keeps only the most recent `limit` posts", async () => {
+    const posts = [1, 2, 3].map((n) => ({ author: "LM", date: n, content: `post ${n}`, isDeleted: false }));
+    const messages = await readLeagueChat(fakeGetContext({ topics: [chatTopic(posts)] }), {
+      ...ids,
+      limit: 2,
+    });
+
+    expect(messages.map((m) => m.content)).toEqual(["post 2", "post 3"]);
+  });
+
+  it("throws on a non-2xx read", async () => {
+    await expect(readLeagueChat(fakeGetContext({}, 500), ids)).rejects.toThrow(
+      /League chat read failed with HTTP 500/,
+    );
   });
 });
