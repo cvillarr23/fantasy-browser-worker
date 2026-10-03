@@ -22,7 +22,15 @@
     "single move/swap — clicking `here_button` fires the `transactions/` POST immediately (confirmed",
     "via network capture); `button:has-text(\"Save\")` matched zero elements throughout. This is still",
     "just a documented record for any future DOM-driven UI work — espn_api.js's REST path (verified",
-    "against this same capture) remains the only production write path; nothing wires these up."
+    "against this same capture) remains the only production write path; nothing wires these up.",
+    "",
+    "trade_* keys (#90) drive the trade-builder page (/football/team/trade?teamId=<them>&fromTeamId=<us>).",
+    "All of them are UNVERIFIED guesses until `node src/bots/trade_recon.js` (safe mode, writes blocked)",
+    "confirms them against the live page. trade_builder.js REFUSES a real submit until every key in its",
+    "TRADE_SUBMIT_SELECTOR_KEYS has been moved from `_unverified` to `_verified` below, so promote a key",
+    "only after seeing it match the right element in a recon capture. trade_headshot_img is a template:",
+    "`{id}` is replaced with the ESPN player id (D/ST rows show a team logo instead, so they fall back to",
+    "matching the player's name from readRoster)."
   ],
 
   "_verified": {
@@ -31,7 +39,19 @@
   },
   "_unverified": {
     "warning": "Never matched against a real page. Do not assume these work.",
-    "keys": ["search_input", "draft_button", "waiver_confirm_button"]
+    "keys": [
+      "search_input",
+      "draft_button",
+      "waiver_confirm_button",
+      "trade_player_row",
+      "trade_player_checkbox",
+      "trade_checked_checkbox",
+      "trade_headshot_img",
+      "trade_continue_button",
+      "trade_submit_button",
+      "trade_cancel_button",
+      "trade_message_input"
+    ]
   },
   "_confirmed_absent": {
     "note": "No separate Save control exists for a single move — here_button alone commits it.",
@@ -47,5 +67,14 @@
   "save_button": "button:has-text(\"Save\")",
   "search_input": "input[placeholder*=\"Search\"]",
   "draft_button": "button.draft-player-action",
-  "waiver_confirm_button": "button:has-text(\"Continue\")"
+  "waiver_confirm_button": "button:has-text(\"Continue\")",
+
+  "trade_player_row": ".Table__TR",
+  "trade_player_checkbox": "input[type=\"checkbox\"], [role=\"checkbox\"]",
+  "trade_checked_checkbox": "input[type=\"checkbox\"]:checked, [role=\"checkbox\"][aria-checked=\"true\"]",
+  "trade_headshot_img": "img[src*=\"/headshots/nfl/players/full/{id}.\"]",
+  "trade_continue_button": "button:has-text(\"Continue\")",
+  "trade_submit_button": "button:has-text(\"Propose Trade\"), button:has-text(\"Send Trade\")",
+  "trade_cancel_button": "button:has-text(\"Cancel Trade\")",
+  "trade_message_input": "textarea"
 }

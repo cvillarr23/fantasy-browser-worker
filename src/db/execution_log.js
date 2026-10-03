@@ -135,4 +135,137 @@ async function recordTradeNegotiation({
   }
 }
 
-module.exports = { recordExecution, recordDraftPickClick, recordTradeNegotiation };
+// --- Trade-builder submissions (#90) ---------------------------------------------------------
+//
+// Every trade_builder.js outcome is a transaction_type='trade_offer_submit' row. The offer itself
+// (plus its offer_key, the sha256 idempotency/approval key from trade_builder.computeOfferKey)
+// lives in the existing counter_offer JSONB column, and offering_team_id is set only when the
+// offer is a counter to that team, so no execution_log migration is needed. Statuses:
+//   awaiting_approval / submit_blocked / dry_run_filled — a dry fill (recordTradeOfferFill)
+//   submitting — a claim taken just before the irreversible click (claimTradeSubmission)
+//   submitted / failure — that claim, finalized (finalizeTradeSubmission)
+//
+// Unlike every other writer in this file, findTradeSubmission and claimTradeSubmission THROW on a
+// DB error. They are the only thing standing between a redelivered approval and a duplicate trade
+// offer sent to a real manager, so when they can't answer, the caller must not click.
+
+const TRADE_SUBMIT_TYPE = "trade_offer_submit";
+
+function tradeOfferJson(offerKey, row) {
+  return JSON.stringify({
+    offer_key: offerKey,
+    source: row.source || null,
+    from_team_id: row.fromTeamId,
+    to_team_id: row.toTeamId,
+    incoming_player_ids: row.incomingPlayerIds,
+    outgoing_player_ids: row.outgoingPlayerIds,
+    approved_by: row.approvedBy || null,
+    // Part of the offer_key, so an approver must see it: it's what the other manager will read.
+    message: row.message || null,
+    screenshot_path: row.screenshotPath || null,
+    reasons: row.reasons || undefined,
+  });
+}
+
+// A counter is addressed to the manager who offered; a fresh #93 proposal has no offering team.
+function offeringTeamFor(row) {
+  return row.source === "counter_offer" ? row.toTeamId : null;
+}
+
+// `submitted` sorts ahead of `submitting` so a key that was retried after an unknown outcome and
+// then confirmed reads as done.
+const FIND_CLAIM_SQL = `SELECT id, status FROM execution_log
+       WHERE transaction_type = '${TRADE_SUBMIT_TYPE}'
+         AND counter_offer->>'offer_key' = $1
+         AND status IN ('submitting', 'submitted')
+       ORDER BY (status = 'submitted') DESC, executed_at DESC
+       LIMIT 1`;
+
+async function findTradeSubmission(offerKey) {
+  const { rows } = await pool.query(FIND_CLAIM_SQL, [offerKey]);
+  return rows[0] || null;
+}
+
+/**
+ * Atomically claims offerKey for a real submit. The advisory lock serializes two workers handed
+ * the same approval (a redelivery racing a slow first attempt) without needing a unique index on
+ * a JSONB expression in core-pipeline's schema. Returns {claimed: true, id}, or {claimed: false,
+ * existing} when a submitting/submitted row already holds the key.
+ */
+async function claimTradeSubmission(offerKey, row) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [offerKey]);
+    const existing = await client.query(FIND_CLAIM_SQL, [offerKey]);
+    if (existing.rows.length > 0) {
+      await client.query("COMMIT");
+      return { claimed: false, existing: existing.rows[0].status };
+    }
+    const inserted = await client.query(
+      `INSERT INTO execution_log (transaction_type, bot_name, status, league_id, season, offering_team_id, counter_offer, dry_run)
+       VALUES ($1, $2, 'submitting', $3, $4, $5, $6, false)
+       RETURNING id`,
+      [
+        TRADE_SUBMIT_TYPE,
+        "trade_builder",
+        row.leagueId || null,
+        row.season || null,
+        offeringTeamFor(row),
+        tradeOfferJson(offerKey, row),
+      ],
+    );
+    await client.query("COMMIT");
+    return { claimed: true, id: inserted.rows[0].id };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Best-effort: if this fails the row stays `submitting`, which fails closed on any redelivery. */
+async function finalizeTradeSubmission(id, status, errorMessage) {
+  try {
+    await pool.query(
+      "UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1",
+      [id, status, errorMessage || null],
+    );
+  } catch (err) {
+    logger.error("[Execution Log] Failed to finalize trade submission", { err });
+  }
+}
+
+/** Best-effort record of a dry fill, same never-throw contract as recordTradeNegotiation. */
+async function recordTradeOfferFill({ offerKey, status, dryRun, errorMessage, ...row }) {
+  try {
+    await pool.query(
+      `INSERT INTO execution_log (transaction_type, bot_name, status, error_message, league_id, season, offering_team_id, counter_offer, dry_run)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        TRADE_SUBMIT_TYPE,
+        "trade_builder",
+        status,
+        errorMessage || null,
+        row.leagueId || null,
+        row.season || null,
+        offeringTeamFor(row),
+        tradeOfferJson(offerKey, row),
+        dryRun,
+      ],
+    );
+  } catch (err) {
+    logger.error("[Execution Log] Failed to record trade offer fill", { err });
+  }
+}
+
+module.exports = {
+  recordExecution,
+  recordDraftPickClick,
+  recordTradeNegotiation,
+  findTradeSubmission,
+  claimTradeSubmission,
+  finalizeTradeSubmission,
+  recordTradeOfferFill,
+};

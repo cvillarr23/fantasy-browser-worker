@@ -1,7 +1,10 @@
+/* eslint-env browser */
+// dumpRows' page.evaluate() callback runs inside the browser page, hence the browser env.
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession, resolveEspnCookies } = require("./auth");
 const { buildTradePortalUrl } = require("./trade_bot");
+const { buildTradeBuilderUrl, installWriteGuard } = require("./trade_builder");
 const { captureDebugSnapshot } = require("./debug_capture");
 const {
   tryLoadStoredSession,
@@ -13,18 +16,21 @@ const {
 /**
  * One-off recon tool — NOT part of the production worker pipeline.
  *
- * Prerequisite for issue #90's submitCounterOffer: nothing has ever touched ESPN's actual
- * trade-builder form (unlike the draft room, or the trade portal's read-only pending-trade
- * list — see trade_bot.js's scrapeTradePortalContent, confirmed live 2026-09-16/2026-09-22).
- * Run this by hand against a real pending trade to capture the form's DOM/network shape before
- * writing submitCounterOffer's real selectors — do not guess them.
+ * Verifies trade_builder.js's (#90) trade_* selectors in espn_selectors.json against the real
+ * trade-builder page, WITHOUT SENDING ANYTHING. We only have the live league, so this runs
+ * trade_builder.js's write guard for the whole session: every non-GET request to an ESPN host is
+ * aborted and logged. The operator ticks boxes and clicks Continue by hand, and the tool captures
+ * DOM/screenshot/network at each step plus a per-row dump of what each table row exposes
+ * (headshot src, text, checkbox type), then clicks Cancel Trade. It never clicks the final submit,
+ * so the final-submit request body stays uncaptured until a sandbox league (or a deliberate,
+ * human-sent offer) is available.
  *
  * Usage:
- *   node src/bots/trade_recon.js
+ *   TRADE_RECON_TO_TEAM_ID=3 node src/bots/trade_recon.js
  *
  * Needs ESPN_LEAGUE_ID / ESPN_TEAM_ID / CURRENT_YEAR (same env vars negotiateTradeProposal and
- * scrapePendingTradeProposals already use) and a real pending trade waiting in that league/team's
- * trade portal.
+ * scrapePendingTradeProposals already use), plus TRADE_RECON_TO_TEAM_ID, the other manager's team
+ * whose roster the builder shows on the left.
  *
  * Auth: same priority order and same rationale as draft_recon.js (FORCE_MANUAL_LOGIN=1 -> saved
  * session -> cookie injection -> manual login) — the trade portal is a rendered page, so it's
@@ -50,6 +56,38 @@ function appendJsonLine(filename, record) {
 // Fixed filename (truncated fresh each run, not timestamped) — same "check the latest run"
 // convention draft_recon.js uses, kept in its own file so the two tools' logs don't interleave.
 const LOG_FILE = path.join(OUTPUT_DIR, "trade-recon-latest.log");
+const SELECTORS = require("../selectors/espn_selectors.json");
+
+/**
+ * Per-row dump of what the trade builder exposes, the evidence for promoting trade_* selectors to
+ * `_verified`: does each row carry a headshot whose src embeds the ESPN id? What text does a D/ST
+ * row show? Is the checkbox a real <input> or an ARIA widget, and is it reported as checked?
+ */
+async function dumpRows(page, label, log) {
+  const rows = await page.evaluate(
+    ({ rowSel, checkboxSel }) =>
+      Array.from(document.querySelectorAll(rowSel)).map((row, index) => {
+        const box = row.querySelector(checkboxSel);
+        return {
+          index,
+          text: row.innerText.replace(/\s+/g, " ").trim().slice(0, 120),
+          imgSrcs: Array.from(row.querySelectorAll("img")).map((img) => img.getAttribute("src")),
+          checkbox: box
+            ? {
+                tag: box.tagName,
+                type: box.getAttribute("type"),
+                role: box.getAttribute("role"),
+                checked: box.checked ?? null,
+                ariaChecked: box.getAttribute("aria-checked"),
+              }
+            : null,
+        };
+      }),
+    { rowSel: SELECTORS.trade_player_row, checkboxSel: SELECTORS.trade_player_checkbox },
+  );
+  appendJsonLine("trade-recon-rows.jsonl", { label, rows });
+  log.log(`[Trade Recon] ${label}: ${rows.length} row(s) matched trade_player_row, dumped to trade-recon-rows.jsonl.`);
+}
 
 function openLog() {
   ensureOutputDir();
@@ -136,6 +174,10 @@ async function runTradeRecon() {
     const currentYear = process.env.CURRENT_YEAR || "2026";
     const tradeUrl = buildTradePortalUrl(leagueId, currentYear, teamId);
 
+    // On the whole BrowserContext (not just this page) and before any navigation, so nothing the
+    // operator clicks, including in a popup the app opens, can send. Page and context share route().
+    const guard = await installWriteGuard(session.context);
+
     session.browser.on("disconnected", () =>
       log.log("[Trade Recon] Browser disconnected."),
     );
@@ -149,26 +191,50 @@ async function runTradeRecon() {
     log.log(`[Trade Recon] Navigating to trade portal: ${tradeUrl}`);
     await session.page.goto(tradeUrl, { waitUntil: "networkidle", timeout: 20000 });
     await captureDebugSnapshot(session.page, "trade-recon-portal-loaded");
-    log.log(
-      "[Trade Recon] Portal loaded — captured debug-trade-recon-portal-loaded.html/.png.",
-    );
 
-    await waitForEnter(
-      "[Trade Recon] Manually open the Counter/trade-builder flow for the pending trade now, " +
-        "then press Enter once the builder form is visible... ",
-    );
+    const toTeamId = process.env.TRADE_RECON_TO_TEAM_ID;
+    if (!toTeamId) {
+      throw new Error("TRADE_RECON_TO_TEAM_ID is not set — which team's trade builder to open?");
+    }
+    const builderUrl = buildTradeBuilderUrl({
+      leagueId,
+      seasonId: currentYear,
+      fromTeamId: teamId,
+      toTeamId,
+    });
+    log.log(`[Trade Recon] Write guard on. Opening trade builder: ${builderUrl}`);
+    await session.page.goto(builderUrl, { waitUntil: "networkidle", timeout: 20000 });
     await captureDebugSnapshot(session.page, "trade-recon-builder-opened");
-    log.log(
-      "[Trade Recon] Captured debug-trade-recon-builder-opened.html/.png. Every relevant " +
-        `HTTP request/response since navigation is logged to ${OUTPUT_DIR}.`,
-    );
+    await dumpRows(session.page, "builder-opened", log);
 
     await waitForEnter(
-      "[Trade Recon] Manually submit the counter-offer through ESPN's UI now (or go as far as " +
-        "you're comfortable going), then press Enter once done... ",
+      "[Trade Recon] Tick a few players on BOTH sides (include a D/ST if you can), then press Enter... ",
     );
-    await captureDebugSnapshot(session.page, "trade-recon-post-submit");
-    log.log("[Trade Recon] Captured debug-trade-recon-post-submit.html/.png.");
+    await captureDebugSnapshot(session.page, "trade-recon-builder-checked");
+    await dumpRows(session.page, "builder-checked", log);
+
+    await waitForEnter(
+      "[Trade Recon] Click Continue to reach the review screen (writes are blocked either way). " +
+        "DO NOT click the final propose/send button. Press Enter once the review screen shows... ",
+    );
+    await captureDebugSnapshot(session.page, "trade-recon-review");
+    log.log(
+      "[Trade Recon] Captured debug-trade-recon-review.html/.png. Check it for the final submit " +
+        "button's text and whether there's a note field (trade_submit_button / trade_message_input).",
+    );
+
+    try {
+      await session.page.locator(SELECTORS.trade_cancel_button).first().click({ timeout: 5000 });
+      log.log("[Trade Recon] Clicked Cancel Trade.");
+    } catch (cancelError) {
+      log.warn(`[Trade Recon] Could not click Cancel Trade (${cancelError.message}); closing the browser abandons the draft offer anyway.`);
+    }
+
+    log.log(
+      `[Trade Recon] Write guard blocked ${guard.blocked.length} request(s)` +
+        (guard.blocked.length ? `: ${guard.blocked.map((r) => `${r.method} ${r.url}`).join(" | ")}` : "."),
+    );
+    appendJsonLine("trade-recon-blocked-writes.jsonl", { blocked: guard.blocked });
   } catch (error) {
     log.error(`[Trade Recon] Fatal error: ${error.message}`);
     process.exitCode = 1;

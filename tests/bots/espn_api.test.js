@@ -10,6 +10,7 @@ process.env.DEBUG_OUTPUT_DIR = MODULE_TMP_DIR;
 
 const {
   readRoster,
+  readRosters,
   submitLineup,
   submitWaiverClaim,
 } = require("../../src/bots/espn_api");
@@ -75,6 +76,65 @@ describe("D/ST negative player ids", () => {
 
     expect(roster.slotByPlayerId.get("-16021")).toBe(16);
     expect(roster.slotByPlayerId.has("16021")).toBe(false);
+  });
+
+  it("readRoster exposes each rostered player's name by signed id, null when ESPN omits it", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          json: async () => ({
+            scoringPeriodId: 4,
+            teams: [
+              {
+                id: 8,
+                roster: {
+                  entries: [
+                    {
+                      playerId: -16021,
+                      lineupSlotId: 16,
+                      playerPoolEntry: { player: { fullName: "Eagles D/ST" } },
+                    },
+                    { playerId: 4239996, lineupSlotId: 20 },
+                  ],
+                },
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const roster = await readRoster(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+    });
+
+    expect(roster.nameByPlayerId.get("-16021")).toBe("Eagles D/ST");
+    expect(roster.nameByPlayerId.get("4239996")).toBeNull();
+  });
+
+  it("readRosters returns several teams from a single league read", async () => {
+    const get = jest.fn().mockResolvedValue({
+      ok: () => true,
+      json: async () => ({
+        scoringPeriodId: 4,
+        teams: [
+          { id: 3, roster: { entries: [{ playerId: 1, lineupSlotId: 20 }] } },
+          { id: 8, roster: { entries: [{ playerId: -16021, lineupSlotId: 16 }] } },
+        ],
+      }),
+    });
+
+    const rosters = await readRosters(
+      { request: { get } },
+      { leagueId: "1248158344", seasonId: "2026", teamIds: ["3", "8"] },
+    );
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(rosters.get("3").slotByPlayerId.has("1")).toBe(true);
+    expect(rosters.get("8").slotByPlayerId.get("-16021")).toBe(16);
   });
 
   it("submitWaiverClaim keeps the sign on D/ST ADD and DROP items", async () => {

@@ -63,6 +63,23 @@ function buildTransactionsUrl(leagueId, seasonId) {
  * league settings change can't silently invalidate the bot.
  */
 async function readRoster(context, { leagueId, seasonId, teamId }) {
+  const body = await fetchLeagueRosters(context, { leagueId, seasonId });
+  return parseTeamRoster(body, { leagueId, teamId });
+}
+
+/**
+ * Several teams' rosters from ONE league read. The mRoster view already carries every team, so a
+ * caller that needs both sides of a trade (trade_builder.js) shouldn't fetch the league twice.
+ * Returns a Map of teamId (as given) -> the same shape readRoster returns.
+ */
+async function readRosters(context, { leagueId, seasonId, teamIds }) {
+  const body = await fetchLeagueRosters(context, { leagueId, seasonId });
+  return new Map(
+    teamIds.map((teamId) => [teamId, parseTeamRoster(body, { leagueId, teamId })]),
+  );
+}
+
+async function fetchLeagueRosters(context, { leagueId, seasonId }) {
   const url = buildLeagueReadUrl(leagueId, seasonId, [
     "mRoster",
     "mSettings",
@@ -76,7 +93,10 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
     );
   }
 
-  const body = await response.json();
+  return response.json();
+}
+
+function parseTeamRoster(body, { leagueId, teamId }) {
   const team = (body.teams || []).find((t) => String(t.id) === String(teamId));
   if (!team) {
     throw new Error(
@@ -88,12 +108,21 @@ async function readRoster(context, { leagueId, seasonId, teamId }) {
 
   // playerId -> lineupSlotId for everyone currently rostered.
   const slotByPlayerId = new Map();
+  // playerId -> display name (null when ESPN omits playerPoolEntry). trade_builder.js needs this:
+  // the trade-builder DOM is keyed by what's rendered, not by player id, and a D/ST row's logo
+  // carries no id at all, so its name is the only way to find it.
+  const nameByPlayerId = new Map();
   for (const entry of team.roster?.entries || []) {
     slotByPlayerId.set(String(entry.playerId), entry.lineupSlotId);
+    nameByPlayerId.set(
+      String(entry.playerId),
+      entry.playerPoolEntry?.player?.fullName ?? null,
+    );
   }
 
   return {
     slotByPlayerId,
+    nameByPlayerId,
     scoringPeriodId: body.scoringPeriodId,
     slotCounts: body.settings?.rosterSettings?.lineupSlotCounts || {},
     entryCount: slotByPlayerId.size,
@@ -375,7 +404,9 @@ async function submitDraftPick(
 }
 
 module.exports = {
+  captureWriteArtifact,
   readRoster,
+  readRosters,
   submitLineup,
   submitWaiverClaim,
   readDraftPicks,

@@ -28,18 +28,21 @@ function isEnabled() {
   return !/^(0|false|no)$/i.test(raw);
 }
 
+// Returns the screenshot's path, or null when capture is disabled or failed, so a caller that
+// points a human at the image (trade_builder.js's approval flow) never records a path that
+// wasn't actually written.
 async function captureDebugSnapshot(page, label) {
-  if (!isEnabled()) return;
+  if (!isEnabled()) return null;
   try {
     fs.mkdirSync(OUTPUT_DIR, { recursive: true });
     const html = await page.content();
     fs.writeFileSync(path.join(OUTPUT_DIR, `debug-${label}-latest.html`), html);
-    await page.screenshot({
-      path: path.join(OUTPUT_DIR, `debug-${label}-latest.png`),
-    });
+    const screenshotPath = path.join(OUTPUT_DIR, `debug-${label}-latest.png`);
+    await page.screenshot({ path: screenshotPath });
     logger.info(
       `[Debug Capture] Saved "${label}" DOM/screenshot to ${OUTPUT_DIR}`,
     );
+    return screenshotPath;
   } catch (err) {
     logger.error(
       `[Debug Capture] Failed to capture "${label}": ${err.message}`,
@@ -47,6 +50,7 @@ async function captureDebugSnapshot(page, label) {
         err,
       },
     );
+    return null;
   }
 }
 

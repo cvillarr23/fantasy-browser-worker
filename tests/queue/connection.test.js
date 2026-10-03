@@ -80,6 +80,7 @@ describe("initializeQueueConsumer", () => {
       "trade_evaluations",
       "trade_negotiations",
       "llm_requests",
+      "trade_submissions",
     ]) {
       if (
         ["lineup_updates", "waiver_actions", "draft_targets"].includes(queue)

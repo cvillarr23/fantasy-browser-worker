@@ -12,6 +12,7 @@ const {
   classifyHttpStatusError,
 } = require("../errors");
 const { completeWithFallback } = require("../lib/llm_client");
+const { submitTradeOffer } = require("./trade_builder");
 const { recordTradeNegotiation } = require("../db/execution_log");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -321,6 +322,58 @@ async function fetchRosterDeficits({ season, week }) {
   }
 }
 
+/**
+ * Translates core-pipeline internal (Sleeper) player ids to ESPN ids for trade_builder.js.
+ *
+ * negotiateTradeProposal's ids, and so the LLM's counter, live in core-pipeline's internal id
+ * space (the one /v1/trade/evaluate takes), NOT ESPN's. The two spaces collide numerically:
+ * internal 12483 is Jack Bech, ESPN 12483 is Matthew Stafford. So forwarding them untranslated
+ * would silently target real, different players. See core-pipeline's README "id-space contract".
+ *
+ * core-pipeline exposes the players.espn_id crosswalk only through /v1/players/search (by name),
+ * so this looks the name up via /summary, searches it, and takes the result whose player_id is
+ * exactly ours. Fails closed with a PermanentError when the id is unknown, missing from the
+ * (limited) search results, or has a null espn_id. The crosswalk covers about 82% of players and
+ * no K or D/ST at all, so a counter involving one can't be staged until core-pipeline fills that in.
+ */
+async function resolveEspnPlayerIds(internalIds) {
+  const espnIds = [];
+  for (const internalId of internalIds) {
+    const summaryUrl = `${CORE_PIPELINE_URL}/v1/players/${encodeURIComponent(internalId)}/summary`;
+    const summaryResponse = await fetch(summaryUrl, {
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
+    });
+    if (!summaryResponse.ok) {
+      throw new PermanentError(
+        `[Trade Negotiator] Internal player ${internalId} could not be looked up ` +
+          `(GET /v1/players/${internalId}/summary -> HTTP ${summaryResponse.status}).`,
+      );
+    }
+    const { name } = await summaryResponse.json();
+
+    const searchUrl = `${CORE_PIPELINE_URL}/v1/players/search?q=${encodeURIComponent(name)}`;
+    const searchResponse = await fetch(searchUrl, {
+      signal: AbortSignal.timeout(evaluateTimeoutMs()),
+    });
+    if (!searchResponse.ok) {
+      throw new Error(
+        `[Trade Negotiator] Player search for "${name}" failed with HTTP ${searchResponse.status}.`,
+      );
+    }
+    const match = (await searchResponse.json()).find(
+      (result) => String(result.player_id) === String(internalId),
+    );
+    if (!match || match.espn_id === null || match.espn_id === undefined || match.espn_id === "") {
+      throw new PermanentError(
+        `[Trade Negotiator] Internal player ${internalId} ("${name}") has no ESPN id in ` +
+          "core-pipeline's crosswalk, so the counter can't be staged.",
+      );
+    }
+    espnIds.push(String(match.espn_id));
+  }
+  return espnIds;
+}
+
 /** Builds the system prompt for negotiateTradeProposal's completeWithFallback call.
  * completeWithFallback (src/lib/llm_client.js) has no native JSON-mode opts field, so strict-JSON
  * output can only be enforced by instruction — parseNegotiationResponse below is the other half
@@ -339,7 +392,8 @@ function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog
       '"outgoing_player_ids": ["..."]}}.',
     "counter_offer.incoming_player_ids and counter_offer.outgoing_player_ids are the player ids",
     "for the counter-trade you propose. Do not draft any message to the offering manager — the",
-    "counter-offer is surfaced for a human to send themselves, never posted automatically.",
+    "counter-offer is staged in ESPN's trade builder for a human to review, and is only ever sent",
+    "after that human explicitly approves it.",
     "",
     `Roster deficits: ${JSON.stringify(deficits)}`,
     `Trade evaluation: ${JSON.stringify(evaluation)}`,
@@ -428,10 +482,15 @@ async function executeTradeEvaluation(payload) {
 /**
  * Queue-shaped entrypoint for WORKER-04/#4: scrapes the pending trade + league chat, grounds it
  * against fantasy-core-pipeline's roster-deficit and VORP-evaluation data, and asks the LLM (via
- * WORKER-12's completeWithFallback) for a structured counter-offer. Advisory only — it never
- * posts anything to ESPN on a human's behalf; no AI-drafted message is generated or sent. Acting
- * on a negotiation (formally re-submitting a counter-offer via ESPN's trade-builder UI) is
- * separate, unbuilt follow-up work.
+ * WORKER-12's completeWithFallback) for a structured counter-offer.
+ *
+ * It never sends anything to ESPN itself, and no AI-drafted message is generated. Since #90 it
+ * STAGES the counter in ESPN's trade builder via trade_builder.js's submitTradeOffer (after
+ * translating its internal player ids to ESPN ids, see resolveEspnPlayerIds), which ticks
+ * the boxes, screenshots them, and records an `awaiting_approval` execution_log row with the
+ * offer's offer_key. It does that WITHOUT an approval, so submitTradeOffer's gate can't open here
+ * whatever DRY_RUN/TRADE_SUBMIT_ENABLED say. The real send is a separate, human-approved
+ * "trade_submissions" message carrying that offer_key (see trade_builder.js's header).
  */
 async function negotiateTradeProposal(payload) {
   const { incoming, outgoing, season, week, offeringTeamId } =
@@ -478,11 +537,39 @@ async function negotiateTradeProposal(payload) {
 
     logger.info(
       `[Trade Negotiator][${tracking}] Computed counter-offer ${JSON.stringify(counterOffer)} — ` +
-        "advisory only, nothing sent.",
+        "staging it for approval, nothing sent.",
     );
     await captureDebugSnapshot(session.page, "trade-negotiation-computed");
     status = "computed";
-    return negotiation;
+
+    // Staging failures (an LLM-invented id, a selector miss) must not fail the negotiation: a
+    // requeue would re-run the LLM call for a counter we already have. The counter still stands;
+    // it just has no staged offer to approve yet.
+    let submission;
+    try {
+      const [incomingEspnIds, outgoingEspnIds] = [
+        await resolveEspnPlayerIds(counterOffer.incomingPlayerIds),
+        await resolveEspnPlayerIds(counterOffer.outgoingPlayerIds),
+      ];
+      submission = await submitTradeOffer(
+        {
+          leagueId,
+          seasonId: String(season),
+          fromTeamId: process.env.ESPN_TEAM_ID,
+          toTeamId: offeringTeamId,
+          incomingPlayerIds: incomingEspnIds,
+          outgoingPlayerIds: outgoingEspnIds,
+        },
+        { source: "counter_offer", trackingId: tracking, session },
+      );
+    } catch (stageError) {
+      logger.warn(
+        `[Trade Negotiator][${tracking}] Could not stage the counter-offer in ESPN's trade ` +
+          `builder: ${stageError.message}`,
+      );
+      submission = { status: "fill_failed", error: stageError.message };
+    }
+    return { ...negotiation, submission };
   } catch (error) {
     errorMessage = error.message;
     if (session && session.page) {
@@ -506,7 +593,7 @@ async function negotiateTradeProposal(payload) {
       season,
       offeringTeamId,
       counterOffer,
-      dryRun: true, // this function never sends anything live — see the function doc comment
+      dryRun: true, // never sends: staging is approval-less, see the function doc comment
       status,
       errorMessage,
     });
@@ -554,5 +641,6 @@ module.exports = {
   buildNegotiationSystemPrompt,
   parseNegotiationResponse,
   negotiateTradeProposal,
+  resolveEspnPlayerIds,
   buildTradePortalUrl,
 };
