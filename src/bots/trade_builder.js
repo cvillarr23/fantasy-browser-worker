@@ -45,7 +45,8 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * DOM keying: ESPN's roster tables carry no per-player id (espn_selectors.json `_comment`). Rows
  * are found by the player's headshot <img> src, which embeds the ESPN id, falling back to the
  * name from readRoster, matched as the exact text of one element in the row (always the case for
- * D/ST, whose logo has no id). Anything that doesn't resolve to exactly one row fails closed, and
+ * D/ST, whose logo has no id; the builder shows a D/ST by team name alone, "Giants", where
+ * readRoster says "Giants D/ST", so the suffix is dropped for negative ids). Anything that doesn't resolve to exactly one row fails closed, and
  * after ticking, the number of rows with a checked box must equal the requested count. All of this is UNVERIFIED against the live page until
  * trade_recon.js's safe mode confirms it; see espn_selectors.json.
  */
@@ -285,6 +286,12 @@ async function fillTradeBuilder(page, offer, names) {
   const resolvedBy = {};
   for (const target of targets) {
     let row = null;
+    // Confirmed live (#123): a D/ST row's name link reads just "Giants" (position column "D/ST"),
+    // while readRoster's fullName is "Giants D/ST".
+    const displayName =
+      target.name && target.id.startsWith("-")
+        ? target.name.replace(/\s*D\/ST$/i, "")
+        : target.name;
     // D/ST rows render a team logo, not an id-bearing headshot, so negative ids go by name.
     if (!target.id.startsWith("-")) {
       const byHeadshot = rows.filter({
@@ -310,11 +317,11 @@ async function fillTradeBuilder(page, offer, names) {
       }
       // Exact text of one element (the name link), not a substring of the row: the row's
       // textContent runs the name into the team/position spans ("Eagles D/STPhiD/ST").
-      const byName = rows.filter({ has: page.getByText(target.name, { exact: true }) });
+      const byName = rows.filter({ has: page.getByText(displayName, { exact: true }) });
       const count = await byName.count();
       if (count !== 1) {
         throw new PermanentError(
-          `[Trade Builder] Player ${target.id} ("${target.name}") matched ${count} rows on the ` +
+          `[Trade Builder] Player ${target.id} ("${displayName}") matched ${count} rows on the ` +
             "trade builder; refusing to guess.",
         );
       }
@@ -324,9 +331,8 @@ async function fillTradeBuilder(page, offer, names) {
     resolved.push({ ...target, row });
   }
 
-  // .first(): trade_player_checkbox is a union (native input OR ARIA widget), and a row with an
-  // ARIA wrapper around a hidden input would match both, a strict-mode violation. The outer
-  // element comes first in DOM order and is the clickable one.
+  // trade_player_checkbox is the visible span[role=checkbox] (it wraps a hidden input; confirmed
+  // live in #123). .first() is defensive: a row is expected to hold exactly one.
   for (const { row } of resolved) {
     await row.locator(SELECTORS.trade_player_checkbox).first().check();
   }

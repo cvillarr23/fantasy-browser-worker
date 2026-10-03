@@ -25,24 +25,32 @@
     "against this same capture) remains the only production write path; nothing wires these up.",
     "",
     "trade_* keys (#90) drive the trade-builder page (/football/team/trade?teamId=<them>&fromTeamId=<us>).",
-    "All of them are UNVERIFIED guesses until `node src/bots/trade_recon.js` (safe mode, writes blocked)",
-    "confirms them against the live page. trade_builder.js REFUSES a real submit until every key in its",
-    "TRADE_SUBMIT_SELECTOR_KEYS has been moved from `_unverified` to `_verified` below, so promote a key",
-    "only after seeing it match the right element in a recon capture. trade_headshot_img is a template:",
-    "`{id}` is replaced with the ESPN player id (D/ST rows show a team logo instead, so they fall back to",
-    "matching the player's name from readRoster)."
+    "trade_builder.js REFUSES a real submit until every key in its TRADE_SUBMIT_SELECTOR_KEYS is listed",
+    "under `_verified`. trade_headshot_img is a template: `{id}` is replaced with the ESPN player id.",
+    "",
+    "Verified 2026-10-03 (#123) by a scripted no-send recon against league 1248158344, team 8 vs team 1,",
+    "with trade_builder's write guard on the whole BrowserContext (0 ESPN writes blocked or allowed):",
+    "- Each roster row is a .Table__TR holding a visible span[role=checkbox] (aria-checked tracks state)",
+    "  that wraps a hidden input[type=checkbox]. Playwright check() on the span works.",
+    "- Player rows carry img src .../headshots/nfl/players/full/<espnId>.png. A D/ST row instead shows",
+    "  a team logo and its name link reads just the team name (\"Giants\"), not readRoster's \"Giants D/ST\".",
+    "- Continue stays on the same URL and opens a review panel: a \"Send Trade Proposal\" button, a",
+    "  \"Cancel\" button, and a textarea with placeholder \"Comments to include on the trade proposal\".",
+    "  Continue itself sent no ESPN write.",
+    "- The OneTrust consent dialog in the same page has its own \"Submit\"/\"Cancel\" buttons and checkbox",
+    "  toggles, which is why trade_submit_button is the full \"Send Trade Proposal\" text.",
+    "Seen but deliberately NEVER clicked: trade_submit_button. What ESPN sends when it IS clicked is",
+    "still uncaptured (#124); until then a live submit can end as an \"outcome unknown\" fail-closed."
   ],
 
   "_verified": {
-    "source": "lineup_recon.js + a live driven swap against league 1248158344 team 8, 2026-08-11 / 2026-09-12",
-    "keys": ["roster_table", "roster_row", "player_column", "move_button", "here_button"]
-  },
-  "_unverified": {
-    "warning": "Never matched against a real page. Do not assume these work.",
+    "source": "lineup_recon.js + a live driven swap against league 1248158344 team 8, 2026-08-11 / 2026-09-12; trade_* keys: no-send trade-builder recon, 2026-10-03 (#123)",
     "keys": [
-      "search_input",
-      "draft_button",
-      "waiver_confirm_button",
+      "roster_table",
+      "roster_row",
+      "player_column",
+      "move_button",
+      "here_button",
       "trade_player_row",
       "trade_player_checkbox",
       "trade_checked_checkbox",
@@ -51,6 +59,14 @@
       "trade_submit_button",
       "trade_cancel_button",
       "trade_message_input"
+    ]
+  },
+  "_unverified": {
+    "warning": "Never matched against a real page. Do not assume these work.",
+    "keys": [
+      "search_input",
+      "draft_button",
+      "waiver_confirm_button"
     ]
   },
   "_confirmed_absent": {
@@ -70,11 +86,11 @@
   "waiver_confirm_button": "button:has-text(\"Continue\")",
 
   "trade_player_row": ".Table__TR",
-  "trade_player_checkbox": "input[type=\"checkbox\"], [role=\"checkbox\"]",
-  "trade_checked_checkbox": "input[type=\"checkbox\"]:checked, [role=\"checkbox\"][aria-checked=\"true\"]",
+  "trade_player_checkbox": "[role=\"checkbox\"]",
+  "trade_checked_checkbox": "[role=\"checkbox\"][aria-checked=\"true\"]",
   "trade_headshot_img": "img[src*=\"/headshots/nfl/players/full/{id}.\"]",
   "trade_continue_button": "button:has-text(\"Continue\")",
-  "trade_submit_button": "button:has-text(\"Propose Trade\"), button:has-text(\"Send Trade\")",
+  "trade_submit_button": "button:has-text(\"Send Trade Proposal\")",
   "trade_cancel_button": "button:has-text(\"Cancel Trade\")",
-  "trade_message_input": "textarea"
+  "trade_message_input": "textarea[placeholder*=\"Comments to include\"]"
 }
