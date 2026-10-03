@@ -7,7 +7,7 @@ const {
   createAuthenticatedSession,
   createSessionFromStoredState,
 } = require("../../src/bots/auth");
-const { readRoster } = require("../../src/bots/espn_api");
+const { readRosters } = require("../../src/bots/espn_api");
 const { captureDebugSnapshot } = require("../../src/bots/debug_capture");
 const {
   findTradeSubmission,
@@ -78,7 +78,10 @@ function rosterFor(rows) {
  * `state.clicks` records every check() and button click in order. The dry-run/approval tests assert
  * on it, so "never clicked submit" is checked directly rather than inferred from return values.
  */
-function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } = {}) {
+function makeBuilderPage(
+  rows,
+  { submitResponse = { status: 200, body: "{}" }, submitClickThrows = false } = {},
+) {
   const state = {
     rows: rows.map((r) => ({ checked: false, ...r })),
     clicks: [],
@@ -89,6 +92,7 @@ function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } 
   let pendingResponse = null;
 
   const checkboxLocator = (set) => ({
+    first: () => checkboxLocator(set),
     check: async () => {
       if (set.length !== 1) {
         throw new Error(`strict mode violation: ${set.length} elements`);
@@ -101,12 +105,17 @@ function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } 
 
   const rowsLocator = (set) => ({
     filter: ({ has, hasText }) => {
-      if (has) {
+      if (has && has.__headshotId !== undefined) {
         return rowsLocator(
           set.filter((r) => r.headshotId !== null && r.headshotId === has.__headshotId),
         );
       }
-      return rowsLocator(set.filter((r) => hasText.test(r.name)));
+      // getByText(name, {exact: true}) matches the name element, not the row's run-together text.
+      if (has && has.__exactText !== undefined) {
+        return rowsLocator(set.filter((r) => r.name === has.__exactText));
+      }
+      if (has && has.__checked) return rowsLocator(set.filter((r) => r.checked));
+      throw new Error(`fake rows.filter: unsupported ${JSON.stringify({ has, hasText })}`);
     },
     count: async () => set.length,
     locator: (sel) => {
@@ -121,6 +130,9 @@ function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } 
     const self = {
       click: async () => {
         state.clicks.push(name);
+        if (name === "submit" && submitClickThrows) {
+          throw new Error("element is detached from the DOM");
+        }
         if (name === "submit" && pendingResponse) {
           const { resolve, reject } = pendingResponse;
           pendingResponse = null;
@@ -157,6 +169,10 @@ function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } 
     route: jest.fn(async (_pattern, handler) => {
       state.routeHandlers.push(handler);
     }),
+    getByText: jest.fn((text, { exact } = {}) => {
+      if (!exact) throw new Error("fake page: getByText must be exact");
+      return { __exactText: text };
+    }),
     waitForResponse: jest.fn(
       () =>
         new Promise((resolve, reject) => {
@@ -165,9 +181,7 @@ function makeBuilderPage(rows, { submitResponse = { status: 200, body: "{}" } } 
     ),
     locator: jest.fn((sel) => {
       if (sel === SELECTORS.trade_player_row) return rowsLocator(state.rows);
-      if (sel === SELECTORS.trade_checked_checkbox) {
-        return { count: async () => state.rows.filter((r) => r.checked).length };
-      }
+      if (sel === SELECTORS.trade_checked_checkbox) return { __checked: true };
       if (sel === SELECTORS.trade_continue_button) return button("continue");
       if (sel === SELECTORS.trade_submit_button) return button("submit");
       if (sel === SELECTORS.trade_cancel_button) return button("cancel");
@@ -188,16 +202,23 @@ function fakeRoute(method, url) {
   };
 }
 
+// The write guard goes on the BrowserContext; the fake context shares the page's route log so
+// tests can drive the installed handler either way.
+function fakeContext(page) {
+  return { route: page.route };
+}
+
 function useSession(page) {
   const browser = { close: jest.fn(async () => {}) };
   createSessionFromStoredState.mockResolvedValue(null);
-  createAuthenticatedSession.mockResolvedValue({ page, context: {}, browser });
+  createAuthenticatedSession.mockResolvedValue({ page, context: fakeContext(page), browser });
   return browser;
 }
 
 function mockRosters() {
-  readRoster.mockImplementation(async (_context, { teamId }) =>
-    rosterFor(teamId === "3" ? THEIR_ROWS : OUR_ROWS),
+  readRosters.mockImplementation(
+    async (_context, { teamIds }) =>
+      new Map(teamIds.map((id) => [id, rosterFor(id === "3" ? THEIR_ROWS : OUR_ROWS)])),
   );
 }
 
@@ -256,6 +277,7 @@ describe("computeOfferKey", () => {
     expect(
       computeOfferKey(offerFixture({ outgoingPlayerIds: ["3139477", "4362628"] })),
     ).not.toBe(base);
+    expect(computeOfferKey(offerFixture({ message: "hi" }))).not.toBe(base);
     // Swapping sides is a different trade, not the same one.
     expect(
       computeOfferKey(
@@ -320,6 +342,10 @@ describe("installWriteGuard", () => {
     await handler(get);
     expect(get.continue).toHaveBeenCalled();
 
+    const preflight = fakeRoute("OPTIONS", "https://lm-api-writes.fantasy.espn.com/x");
+    await handler(preflight);
+    expect(preflight.continue).toHaveBeenCalled();
+
     const thirdParty = fakeRoute("POST", "https://analytics.example.com/collect");
     await handler(thirdParty);
     expect(thirdParty.continue).toHaveBeenCalled();
@@ -378,9 +404,10 @@ describe("fillTradeBuilder", () => {
       r.id === "2976499" ? { ...r, checked: true } : r,
     );
     const { page } = makeBuilderPage(rows);
-    await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toThrow(
-      /6 checked, expected 5/,
-    );
+    await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/6 checked, expected 5/),
+    });
   });
 });
 
@@ -449,7 +476,9 @@ describe("submitTradeOffer: dry run", () => {
     const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     const browser = { close: jest.fn() };
 
-    await submitTradeOffer(offerFixture(), { session: { page, context: {}, browser } });
+    await submitTradeOffer(offerFixture(), {
+      session: { page, context: fakeContext(page), browser },
+    });
 
     expect(createAuthenticatedSession).not.toHaveBeenCalled();
     expect(browser.close).not.toHaveBeenCalled();
@@ -509,15 +538,69 @@ describe("submitTradeOffer: approval gate", () => {
     armForLiveSubmit();
     const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);
-    const offer = offerFixture();
+    const offer = offerFixture({ message: "Let's deal" });
 
-    const result = await submitTradeOffer(offer, {
-      approval: approvalFor(offer),
-      message: "Let's deal",
-    });
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
 
     expect(state.filledMessage).toBe("Let's deal");
     expect(result.messageAttached).toBe(true);
+  });
+
+  it("rejects an approval for the same trade carrying a different note", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const reviewed = offerFixture();
+
+    await expect(
+      submitTradeOffer(offerFixture({ message: "unreviewed text" }), {
+        approval: approvalFor(reviewed),
+      }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/offer_key/) });
+    expect(state.clicks).toEqual([]);
+  });
+
+  it("ignores blocked analytics beacons but refuses if a trade write fired before submit", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    // Fire requests through the installed guard as the page loads.
+    page.goto.mockImplementation(async () => {
+      const [handler] = state.routeHandlers;
+      await handler(fakeRoute("POST", "https://sw88.espn.com/b/ss/analytics"));
+    });
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).resolves.toMatchObject({ status: "submitted" });
+
+    const second = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(second.page);
+    second.page.goto.mockImplementation(async () => {
+      const [handler] = second.state.routeHandlers;
+      await handler(
+        fakeRoute("POST", "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/x/transactions/"),
+      );
+    });
+    findTradeSubmission.mockResolvedValue(null);
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/trade write/) });
+    expect(second.state.clicks).not.toContain("submit");
+  });
+
+  it("treats a throwing submit click as an unknown outcome, not a retry", async () => {
+    armForLiveSubmit();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS], { submitClickThrows: true });
+    useSession(page);
+    const offer = offerFixture();
+
+    await expect(
+      submitTradeOffer(offer, { approval: approvalFor(offer) }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/outcome unknown/i) });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
   });
 
   it("finalizes failure and throws permanent on a 4xx rejection from ESPN", async () => {
@@ -605,8 +688,8 @@ describe("submitTradeOffer: redelivery", () => {
     const second = makeBuilderPage(rows);
     createSessionFromStoredState.mockResolvedValue(null);
     createAuthenticatedSession
-      .mockResolvedValueOnce({ page: first.page, context: {}, browser: { close: jest.fn() } })
-      .mockResolvedValueOnce({ page: second.page, context: {}, browser: { close: jest.fn() } });
+      .mockResolvedValueOnce({ page: first.page, context: fakeContext(first.page), browser: { close: jest.fn() } })
+      .mockResolvedValueOnce({ page: second.page, context: fakeContext(second.page), browser: { close: jest.fn() } });
 
     // Stand-in for execution_log: the first run's claim/finalize is what the second run reads.
     const ledger = new Map();

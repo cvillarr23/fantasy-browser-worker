@@ -160,6 +160,8 @@ function tradeOfferJson(offerKey, row) {
     incoming_player_ids: row.incomingPlayerIds,
     outgoing_player_ids: row.outgoingPlayerIds,
     approved_by: row.approvedBy || null,
+    // Part of the offer_key, so an approver must see it: it's what the other manager will read.
+    message: row.message || null,
     screenshot_path: row.screenshotPath || null,
     reasons: row.reasons || undefined,
   });

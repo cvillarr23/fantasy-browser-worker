@@ -1,15 +1,10 @@
 const crypto = require("crypto");
-const path = require("path");
 const {
   createAuthenticatedSession,
   createSessionFromStoredState,
 } = require("./auth");
-const { readRoster, captureWriteArtifact } = require("./espn_api");
-const {
-  captureDebugSnapshot,
-  isEnabled: isDebugCaptureEnabled,
-  OUTPUT_DIR: DEBUG_OUTPUT_DIR,
-} = require("./debug_capture");
+const { readRosters, captureWriteArtifact } = require("./espn_api");
+const { captureDebugSnapshot } = require("./debug_capture");
 const {
   findTradeSubmission,
   claimTradeSubmission,
@@ -33,12 +28,14 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *                                   lineup/waiver work on the same pod doesn't also arm this.
  *   3. a per-offer approval       — {offer_key, approved_by}; offer_key must equal
  *                                   computeOfferKey(offer), so an approval can't be replayed onto a
- *                                   different offer (an LLM re-roll, swapped ids, another team).
+ *                                   different offer (an LLM re-roll, swapped ids, another team, or
+ *                                   a different note to the manager: the message is in the key).
  *   4. verified selectors         — every TRADE_SUBMIT_SELECTOR_KEYS entry must be listed under
  *                                   espn_selectors.json's `_verified`. They start out unverified.
  * With any lock closed the run is a dry fill: tick the boxes, verify them, screenshot, and stop on
- * the first screen without clicking Continue. A page.route write guard aborts every non-GET ESPN
- * request until the instant before the final click, so a mis-identified button still can't send.
+ * the first screen without clicking Continue. A BrowserContext-wide write guard (covering popups
+ * too) aborts every non-GET ESPN request until the instant before the final click, so a
+ * mis-identified button still can't send.
  *
  * Idempotency: a real submit is claimed in execution_log (advisory-locked, keyed on offer_key)
  * BEFORE the click. A redelivery of an offer already `submitted` is a no-op. One stuck at
@@ -47,9 +44,9 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *
  * DOM keying: ESPN's roster tables carry no per-player id (espn_selectors.json `_comment`). Rows
  * are found by the player's headshot <img> src, which embeds the ESPN id, falling back to the
- * exact name from readRoster (always the case for D/ST, whose logo has no id). Anything that
- * doesn't resolve to exactly one row fails closed, and after ticking, the page's total checked
- * count must equal the requested count. All of this is UNVERIFIED against the live page until
+ * name from readRoster, matched as the exact text of one element in the row (always the case for
+ * D/ST, whose logo has no id). Anything that doesn't resolve to exactly one row fails closed, and
+ * after ticking, the number of rows with a checked box must equal the requested count. All of this is UNVERIFIED against the live page until
  * trade_recon.js's safe mode confirms it; see espn_selectors.json.
  */
 
@@ -142,13 +139,27 @@ function normalizeTradeOffer(raw) {
     );
   }
 
-  return { leagueId, seasonId, fromTeamId, toTeamId, incomingPlayerIds, outgoingPlayerIds };
+  if (raw.message !== undefined && raw.message !== null && typeof raw.message !== "string") {
+    throw new PermanentError("[Trade Builder] message must be a string when present.");
+  }
+  const message = raw.message && raw.message.trim() !== "" ? raw.message : null;
+
+  return {
+    leagueId,
+    seasonId,
+    fromTeamId,
+    toTeamId,
+    incomingPlayerIds,
+    outgoingPlayerIds,
+    message,
+  };
 }
 
 /**
  * The idempotency and approval key: sha256 over a canonical form of the offer. Ids are sorted
  * within each side, so LLM re-ordering doesn't change it, but the sides stay distinct, so a
- * mirrored trade does.
+ * mirrored trade does. The note to the other manager is included: approving an offer approves
+ * exactly what they'll read, so a redelivered message with an edited note can't ride an old key.
  */
 function computeOfferKey(offer) {
   const canonical = JSON.stringify([
@@ -159,6 +170,7 @@ function computeOfferKey(offer) {
     String(offer.toTeamId),
     offer.incomingPlayerIds.map(String).sort(),
     offer.outgoingPlayerIds.map(String).sort(),
+    offer.message ?? null,
   ]);
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
@@ -190,9 +202,10 @@ function requireApproval(approval, offerKey) {
 
 /**
  * Aborts every non-GET request to an ESPN host until allowWrites() is called, recording what it
- * blocked. `target` is a Page or a BrowserContext (both have route()); trade_recon.js guards the
- * whole context because a human is clicking around in it. Installed for every run, dry or live. On a live run it is lifted only immediately
- * before the final click, so nothing earlier in the flow (a tick, Continue) can send.
+ * blocked. `target` is a BrowserContext (covers popups/new tabs, which a Page route misses) or a
+ * Page. Installed for every run, dry or live; on a live run it is lifted only immediately before
+ * the final click, so nothing earlier in the flow (a tick, Continue) can send. OPTIONS is let
+ * through: a CORS preflight writes nothing, and blocking it could break the page's own reads.
  */
 async function installWriteGuard(target) {
   const guard = {
@@ -214,7 +227,7 @@ async function installWriteGuard(target) {
       // Unparseable URL: not an ESPN write, let it through.
     }
     const isEspnWrite =
-      method !== "GET" && method !== "HEAD" && /(^|\.)espn\.com$/i.test(host);
+      !["GET", "HEAD", "OPTIONS"].includes(method) && /(^|\.)espn\.com$/i.test(host);
     if (!isEspnWrite) return route.continue();
 
     const record = { method, url: request.url(), postData: request.postData() };
@@ -230,14 +243,18 @@ async function installWriteGuard(target) {
   return guard;
 }
 
-function escapeRegExp(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Whole-name match: "Mike Williams" must not match inside "Mike Williamson". It still matches
-// inside "Mike Williams Jr.", which surfaces as a 2-row ambiguity and fails closed.
-function nameMatcher(name) {
-  return new RegExp(`(?<![\\w'])${escapeRegExp(name)}(?![\\w'])`);
+/**
+ * A blocked write that looks like it belongs to the trade flow itself, as opposed to an analytics
+ * beacon that also happens to POST to an espn.com host. Only these make a live submit refuse.
+ */
+function isTradeFlowWrite({ url }) {
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return true; // can't tell, so treat it as the flow's
+  }
+  return /^lm-api-writes\./i.test(host) || /trade|transaction/i.test(url);
 }
 
 /**
@@ -247,7 +264,16 @@ function nameMatcher(name) {
  */
 async function fillTradeBuilder(page, offer, names) {
   await page.goto(buildTradeBuilderUrl(offer), { waitUntil: "networkidle", timeout: 20000 });
-  await page.waitForSelector(SELECTORS.trade_player_row, { timeout: 10000 });
+  try {
+    await page.waitForSelector(SELECTORS.trade_player_row, { timeout: 10000 });
+  } catch (waitError) {
+    // Permanent: trade_player_row is unverified, and a selector that doesn't match will keep not
+    // matching. A plain Error would requeue forever under connection.js's prefetch(1).
+    throw new PermanentError(
+      `[Trade Builder] No trade-builder rows (${SELECTORS.trade_player_row}) appeared: ` +
+        `${waitError.message}. Re-run trade_recon.js to check the selectors.`,
+    );
+  }
   const rows = page.locator(SELECTORS.trade_player_row);
 
   const targets = [
@@ -282,7 +308,9 @@ async function fillTradeBuilder(page, offer, names) {
             "readRoster returned no name to match on instead.",
         );
       }
-      const byName = rows.filter({ hasText: nameMatcher(target.name) });
+      // Exact text of one element (the name link), not a substring of the row: the row's
+      // textContent runs the name into the team/position spans ("Eagles D/STPhiD/ST").
+      const byName = rows.filter({ has: page.getByText(target.name, { exact: true }) });
       const count = await byName.count();
       if (count !== 1) {
         throw new PermanentError(
@@ -296,18 +324,25 @@ async function fillTradeBuilder(page, offer, names) {
     resolved.push({ ...target, row });
   }
 
+  // .first(): trade_player_checkbox is a union (native input OR ARIA widget), and a row with an
+  // ARIA wrapper around a hidden input would match both, a strict-mode violation. The outer
+  // element comes first in DOM order and is the clickable one.
   for (const { row } of resolved) {
-    await row.locator(SELECTORS.trade_player_checkbox).check();
+    await row.locator(SELECTORS.trade_player_checkbox).first().check();
   }
 
+  // Both checks are PermanentErrors: the same page will fail them the same way on every redelivery.
   for (const { id, row } of resolved) {
-    if (!(await row.locator(SELECTORS.trade_player_checkbox).isChecked())) {
-      throw new Error(`[Trade Builder] Player ${id}'s box did not stay checked.`);
+    if (!(await row.locator(SELECTORS.trade_player_checkbox).first().isChecked())) {
+      throw new PermanentError(`[Trade Builder] Player ${id}'s box did not stay checked.`);
     }
   }
-  const checked = await page.locator(SELECTORS.trade_checked_checkbox).count();
+  // Rows with a checked box, not checked elements, so a wrapper+input pair counts once.
+  const checked = await rows
+    .filter({ has: page.locator(SELECTORS.trade_checked_checkbox) })
+    .count();
   if (checked !== targets.length) {
-    throw new Error(
+    throw new PermanentError(
       `[Trade Builder] Trade builder shows ${checked} checked, expected ${targets.length}; refusing to continue.`,
     );
   }
@@ -343,7 +378,7 @@ function unknownOutcome(label, offerKey, detail) {
  */
 async function submitTradeOffer(
   rawOffer,
-  { approval, source = "manual", trackingId = "no-tracking-id", message, session: providedSession } = {},
+  { approval, source = "manual", trackingId = "no-tracking-id", session: providedSession } = {},
 ) {
   const offer = normalizeTradeOffer(rawOffer);
   const offerKey = computeOfferKey(offer);
@@ -372,6 +407,7 @@ async function submitTradeOffer(
     incomingPlayerIds: offer.incomingPlayerIds,
     outgoingPlayerIds: offer.outgoingPlayerIds,
     approvedBy: approval ? approval.approved_by : null,
+    message: offer.message,
   };
 
   logger.info(
@@ -418,24 +454,24 @@ async function submitTradeOffer(
 
     // REST first: it's authoritative about who owns whom, and it supplies the names the DOM
     // fallback needs. A player who moved since the offer was drafted fails here, before any form.
-    const [theirs, ours] = await Promise.all([
-      readRoster(context, { leagueId: offer.leagueId, seasonId: offer.seasonId, teamId: offer.toTeamId }),
-      readRoster(context, { leagueId: offer.leagueId, seasonId: offer.seasonId, teamId: offer.fromTeamId }),
-    ]);
+    const rosters = await readRosters(context, {
+      leagueId: offer.leagueId,
+      seasonId: offer.seasonId,
+      teamIds: [offer.toTeamId, offer.fromTeamId],
+    });
+    const theirs = rosters.get(offer.toTeamId);
+    const ours = rosters.get(offer.fromTeamId);
     requireOnRoster(offer.incomingPlayerIds, theirs, offer.toTeamId);
     requireOnRoster(offer.outgoingPlayerIds, ours, offer.fromTeamId);
 
-    const guard = await installWriteGuard(page);
+    const guard = await installWriteGuard(context);
     await fillTradeBuilder(page, offer, {
       incoming: theirs.nameByPlayerId,
       outgoing: ours.nameByPlayerId,
     });
 
     const snapshotLabel = `trade-offer-${offerKey}`;
-    await captureDebugSnapshot(page, snapshotLabel);
-    if (isDebugCaptureEnabled()) {
-      screenshotPath = path.join(DEBUG_OUTPUT_DIR, `debug-${snapshotLabel}-latest.png`);
-    }
+    screenshotPath = (await captureDebugSnapshot(page, snapshotLabel)) ?? null;
 
     if (!live) {
       const status = approval ? "submit_blocked" : "awaiting_approval";
@@ -462,19 +498,20 @@ async function submitTradeOffer(
     await page.locator(SELECTORS.trade_continue_button).first().click();
     const submitButton = page.locator(SELECTORS.trade_submit_button).first();
     await submitButton.waitFor({ state: "visible", timeout: 10000 });
-    if (guard.blocked.length > 0) {
-      const [first] = guard.blocked;
+    const flowWrites = guard.blocked.filter(isTradeFlowWrite);
+    if (flowWrites.length > 0) {
+      const [first] = flowWrites;
       throw new PermanentError(
-        `${label} ESPN attempted ${guard.blocked.length} write(s) before the final submit ` +
+        `${label} ESPN attempted ${flowWrites.length} trade write(s) before the final submit ` +
           `(first: ${first.method} ${first.url}). The flow differs from what this module expects; refusing to submit.`,
       );
     }
 
     let messageAttached = false;
-    if (message) {
+    if (offer.message) {
       const input = page.locator(SELECTORS.trade_message_input).first();
       if ((await input.count()) > 0) {
-        await input.fill(message);
+        await input.fill(offer.message);
         messageAttached = true;
       } else {
         logger.warn(`${label} No note field on the review screen; message not attached.`);
@@ -499,9 +536,17 @@ async function submitTradeOffer(
         /lm-api-writes\.fantasy\.espn\.com\/.*\/transactions\/?(\?|$)/.test(response.url()),
       { timeout: SUBMIT_RESPONSE_TIMEOUT_MS },
     );
+    // If the click itself throws, this promise is never awaited below; without a handler it would
+    // reject later (timeout, or browser.close() in finally) as an unhandled rejection.
+    responsePromise.catch(() => {});
     guard.allowWrites();
     clicked = true;
-    await submitButton.click();
+    try {
+      await submitButton.click();
+    } catch (clickError) {
+      // The click may or may not have registered, so this is an unknown outcome, not a retry.
+      throw unknownOutcome(label, offerKey, `the click itself failed (${clickError.message})`);
+    }
 
     let response;
     try {
@@ -622,10 +667,10 @@ async function executeTradeSubmission(payload) {
       toTeamId: String(toTeamId),
       incomingPlayerIds: payload.incoming_player_ids,
       outgoingPlayerIds: payload.outgoing_player_ids,
+      message,
     },
     {
       approval,
-      message,
       source: payload.source ?? "manual",
       trackingId: payload.tracking_id ?? "no-tracking-id",
     },
