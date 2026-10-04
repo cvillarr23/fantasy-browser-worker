@@ -116,8 +116,13 @@ function parseTeamRoster(body, { leagueId, teamId }) {
   // the trade-builder DOM is keyed by what's rendered, not by player id, and a D/ST row's logo
   // carries no id at all, so its name is the only way to find it.
   const nameByPlayerId = new Map();
+  const positionByPlayerId = new Map();
   for (const entry of team.roster?.entries || []) {
     slotByPlayerId.set(String(entry.playerId), entry.lineupSlotId);
+    positionByPlayerId.set(
+      String(entry.playerId),
+      entry.playerPoolEntry?.player?.defaultPositionId ?? null,
+    );
     nameByPlayerId.set(
       String(entry.playerId),
       entry.playerPoolEntry?.player?.fullName ?? null,
@@ -127,6 +132,7 @@ function parseTeamRoster(body, { leagueId, teamId }) {
   return {
     slotByPlayerId,
     nameByPlayerId,
+    positionByPlayerId,
     scoringPeriodId: body.scoringPeriodId,
     slotCounts: body.settings?.rosterSettings?.lineupSlotCounts || {},
     entryCount: slotByPlayerId.size,
