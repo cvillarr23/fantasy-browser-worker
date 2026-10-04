@@ -81,8 +81,8 @@ Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvi
 
 ### Outgoing trade proposals (#93)
 
-Publish `{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}` to
-`trade_proposals`. The worker ranks other teams' positional deficits, reads our
+The low-level `trade_proposals` consumer accepts
+`{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. The worker ranks other teams' positional deficits, reads our
 roster and the highest-ranked target's live ESPN roster, and uses
 `completeWithFallback` to draft one fresh offer and a pitch. It can return
 `no_target` or `no_offer` without staging anything. Ownership, duplicate ids,
@@ -101,6 +101,63 @@ failures return `fill_failed` with the computed offer rather than regenerating
 on a queue retry. Model/read failures use delayed retries; invalid requests are
 permanent failures.
 
-This adds a worker consumer, not a scheduled producer. Production scale-from-zero
-also needs a `trade_proposals` queue trigger in fantasy-infra before publishing to
-an idle ScaledJob deployment.
+### Outgoing scan cadence (#94)
+
+Production uses one standalone `trade-scan` CronJob in fantasy-infra, Wednesday
+10:00 America/Chicago, after the daily projection/VORP refresh and waiver window.
+One candidate per week limits LLM cost and review noise while leaving time before
+Thursday games. Like rumor digest, it calls a bot entrypoint directly. There is
+no scheduled queue producer and deliberately no `trade_proposals` KEDA trigger;
+do not publish manual scans to that queue (an idle worker will not wake for it).
+The low-level consumer remains compatible for existing callers but bypasses the
+scheduled scan claim; use the CLI below for operational scans.
+
+The [Sleeper NFL state endpoint](https://docs.sleeper.com/#get-nfl-state) supplies
+`season` and `week`, not `league_season`, `display_week`, or a hardcoded year.
+Only regular-season weeks 1–18 run; preseason/postseason/week zero and February–
+August are successful no-ops before claims/browser/LLM access. Invalid, unavailable,
+or stale season data fails closed. This is an NFL calendar gate, not a check of
+the ESPN league's trade deadline; suspend the CronJob when that league closes
+trading. Existing ESPN staging validation and all approval/submission gates apply.
+
+An atomic Postgres advisory transaction lock plus a durable `execution_log`
+`trade_scan_claim` row allows one attempt per ESPN league/team/season/week,
+including overlapping manual Jobs. Claims persist on no-target/no-offer, errors,
+and timeouts. There are no automatic scan retries: different generated pitches
+have different approval keys. Failures require inspection; ordinarily wait for
+next week. Do not delete claim rows in execution-log retention during the current
+season. No new schema is required, but existing `counter_offer` JSONB and `dry_run`
+columns and DB write permissions are required. Unlike best-effort telemetry,
+claim writes fail closed. Claims are not proof an offer was staged: inspect the
+`trade_scan` outcome and `trade_offer_submit` rows too.
+
+Safe manual check (live calendar read only; no claim, DB write, browser or LLM):
+
+```bash
+ESPN_LEAGUE_ID=123 ESPN_TEAM_ID=7 node src/bots/trade_scan.js --check
+```
+
+An explicit `--stage` runs the same weekly claim and proposal path as the CronJob,
+and can fill an ESPN trade form for review; it never supplies an approval or sends
+league chat. There is no force/bypass flag. For an in-cluster read-only check after
+rollout, create a Job manifest locally and change its command before creating it:
+
+```bash
+kubectl create job trade-scan-check --from=cronjob/trade-scan --dry-run=client -o json > /tmp/trade-scan-check.json
+python3 -c 'import json; p="/tmp/trade-scan-check.json"; d=json.load(open(p)); d["spec"]["template"]["spec"]["containers"][0]["command"]=["node","src/bots/trade_scan.js","--check"]; json.dump(d,open(p,"w"))'
+kubectl create -f /tmp/trade-scan-check.json
+kubectl logs -f job/trade-scan-check
+```
+
+The CLI has a 15-minute hard deadline; Kubernetes additionally bounds Pending
+and Running time to 16 minutes, allows a 30-minute late start, forbids concurrent
+scheduled Jobs, and uses `backoffLimit: 0`. Structured completion logs include
+status, season/week, scan key, tracking ID and staging status; `--stage` records
+`trade_scan` spans/execution outcomes. Unexpected errors exit nonzero. Existing
+infra CronJob missed-schedule/failed-Job alerts include `trade-scan`.
+
+Deployment order: release the worker image containing this entrypoint, confirm
+fantasy-infra's production image digest includes it, then sync the new CronJob.
+It reuses fantasy-league-config, ESPN cookies, DB credentials, Groq/Gemini keys,
+core-pipeline roster deficits and the existing LLM fallback/telemetry services.
+No queue declaration, KEDA trigger, core-pipeline change or new secret is needed.
