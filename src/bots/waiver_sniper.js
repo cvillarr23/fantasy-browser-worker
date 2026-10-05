@@ -1,3 +1,4 @@
+const activity = require("../db/activity");
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
@@ -145,6 +146,12 @@ async function executeInstantWaiverClaim(payload) {
       Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
 
     if (!needsAdd && !needsDrop) {
+      await activity.event(
+        "verified_complete",
+        { addPlayerId, dropPlayerId, source: "ESPN roster" },
+        "submitted",
+        "verified_complete",
+      );
       log(
         `${addPlayerId} already on roster${dropPlayerId ? " and drop already applied" : ""}. No-op.`,
       );
@@ -164,6 +171,7 @@ async function executeInstantWaiverClaim(payload) {
       `${needsAdd ? ` add=${addPlayerId}` : ""}${needsDrop ? ` drop=${dropPlayerId}` : ""}`;
 
     if (dryRun) {
+      await activity.event("dry_run", { addPlayerId, dropPlayerId }, "skipped", "unknown");
       log(
         `DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`,
       );
@@ -171,6 +179,7 @@ async function executeInstantWaiverClaim(payload) {
     }
 
     log(`Submitting claim:${describeItems()}...`);
+    await activity.beforeExternalWrite();
     await submitWaiverClaim(session.context, {
       ...target,
       memberId: session.swid,
@@ -180,13 +189,25 @@ async function executeInstantWaiverClaim(payload) {
       trackingId: tracking,
     });
 
+    await activity.event(
+      "submitted_to_espn",
+      { addPlayerId, dropPlayerId },
+      "submitted",
+      "awaiting_processing",
+    );
+
     // Best-effort only: if this league is mid-waiver-period, a genuine waiver claim (as opposed to
     // an immediate free-agent pickup) is queued and processed later — the roster read right after
     // submit legitimately won't show it yet. So this only confirms the fast path; it does not fail
     // the run when it can't.
-    const confirmed = (
-      await readRoster(session.context, target)
-    ).slotByPlayerId.has(addPlayerId);
+    const confirmed = (await readRoster(session.context, target)).slotByPlayerId.has(addPlayerId);
+    if (confirmed && !dropPlayerId)
+      await activity.event(
+        "verified_complete",
+        { addPlayerId, source: "ESPN roster" },
+        "submitted",
+        "verified_complete",
+      );
     log(
       confirmed
         ? `Confirmed: ${addPlayerId} now on roster.`
@@ -194,10 +215,10 @@ async function executeInstantWaiverClaim(payload) {
             "rather than an immediate pickup; this does not mean it failed.",
     );
   } catch (error) {
-    logger.error(
-      `Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
-      { err: error, permanent: error.permanent === true },
-    );
+    logger.error(`Claim failed${error.permanent ? " (permanent)" : ""}: ${error.message}`, {
+      err: error,
+      permanent: error.permanent === true,
+    });
     captureFailure(tracking, {
       tracking_id: tracking,
       league_id: leagueId,

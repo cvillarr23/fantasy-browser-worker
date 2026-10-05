@@ -1,3 +1,4 @@
+const activityHistory = require("../db/activity");
 const { execFileSync } = require("child_process");
 const http = require("node:http");
 const https = require("node:https");
@@ -179,30 +180,23 @@ function classifyHttpError(status, body) {
 }
 
 async function callGroq(model, prompt, opts, apiKey) {
-  const response = await fetch(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          ...(opts.systemPrompt
-            ? [{ role: "system", content: opts.systemPrompt }]
-            : []),
-          { role: "user", content: prompt },
-        ],
-        ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
-        ...(opts.temperature !== undefined
-          ? { temperature: opts.temperature }
-          : {}),
-      }),
-      signal: AbortSignal.timeout(requestTimeoutMs("groq")),
+  const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
     },
-  );
+    body: JSON.stringify({
+      model,
+      messages: [
+        ...(opts.systemPrompt ? [{ role: "system", content: opts.systemPrompt }] : []),
+        { role: "user", content: prompt },
+      ],
+      ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+    }),
+    signal: AbortSignal.timeout(requestTimeoutMs("groq")),
+  });
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => "");
@@ -491,6 +485,11 @@ async function recordLlmCallMetric({
  * provider in the chain has been skipped or has failed.
  */
 async function completeWithFallback(prompt, opts = {}) {
+  const sessionId = await activityHistory.startSession(opts.callSite || "LLM run");
+  activityHistory.sessionEvent(sessionId, "prompt", {
+    system: opts.systemPrompt,
+    user: prompt,
+  });
   const chain = parsePriorityChain();
   const { callSite } = opts;
 
@@ -548,6 +547,11 @@ async function completeWithFallback(prompt, opts = {}) {
         try {
           // eslint-disable-next-line no-loop-func -- provider/model are captured per-iteration
           // and this closure is awaited immediately, so there's no stale-variable risk here.
+          activityHistory.sessionEvent(sessionId, "provider_attempt", {
+            provider,
+            model,
+            attemptNumber,
+          });
           const text = await tracer.startActiveSpan(
             `llm.attempt.${provider}`,
             async (attemptSpan) => {
@@ -591,6 +595,12 @@ async function completeWithFallback(prompt, opts = {}) {
             traceId,
           });
           span.setStatus({ code: SpanStatusCode.OK });
+          activityHistory.sessionEvent(
+            sessionId,
+            "response",
+            { text, provider, model, attempt: attemptNumber, latencyMs },
+            "completed",
+          );
           return { text, provider, model, attempt: attemptNumber, latencyMs };
         } catch (error) {
           const latencyMs = Date.now() - startedAt;
@@ -615,6 +625,12 @@ async function completeWithFallback(prompt, opts = {}) {
             fallbackTriggered: attemptNumber > 1,
             traceId,
           });
+          activityHistory.sessionEvent(sessionId, "provider_error", {
+            provider,
+            model,
+            attemptNumber,
+            error: error.message,
+          });
           lastError = error;
         }
       }
@@ -628,6 +644,7 @@ async function completeWithFallback(prompt, opts = {}) {
         code: SpanStatusCode.ERROR,
         message: finalError.message,
       });
+      activityHistory.sessionEvent(sessionId, "error", finalError.message, "failed");
       throw finalError;
     } finally {
       span.end();

@@ -1,3 +1,4 @@
+const activity = require("./activity");
 const { Pool } = require("pg");
 const { logger } = require("../telemetry/logger");
 
@@ -67,7 +68,14 @@ async function recordDraftPickClick({
   roundNumber,
   status,
   errorMessage,
+  confirmedBy,
 }) {
+  await activity.event(
+    "draft_" + status,
+    { playerId, playerName, errorMessage, confirmedBy },
+    status === "success" ? "submitted" : status === "skipped_dry_run" ? "skipped" : "failed",
+    status === "success" ? (confirmedBy ? "verified_complete" : "awaiting_processing") : "unknown",
+  );
   try {
     await pool.query(
       `INSERT INTO execution_log (transaction_type, bot_name, status, error_message, league_id, season, player_id, player_name, round_number)
@@ -227,6 +235,12 @@ async function claimTradeSubmission(offerKey, row) {
 
 /** Best-effort: if this fails the row stays `submitting`, which fails closed on any redelivery. */
 async function finalizeTradeSubmission(id, status, errorMessage) {
+  await activity.event(
+    "trade_" + status,
+    { ledgerId: id, errorMessage },
+    status === "submitted" ? "submitted" : "failed",
+    status === "submitted" ? "awaiting_other_manager" : "unknown",
+  );
   try {
     await pool.query(
       "UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1",
@@ -239,6 +253,12 @@ async function finalizeTradeSubmission(id, status, errorMessage) {
 
 /** Best-effort record of a dry fill, same never-throw contract as recordTradeNegotiation. */
 async function recordTradeOfferFill({ offerKey, status, dryRun, errorMessage, ...row }) {
+  await activity.event(
+    status,
+    { offerKey, dryRun, errorMessage },
+    "skipped",
+    status === "awaiting_approval" ? "awaiting_approval" : "unknown",
+  );
   try {
     await pool.query(
       `INSERT INTO execution_log (transaction_type, bot_name, status, error_message, league_id, season, offering_team_id, counter_offer, dry_run)

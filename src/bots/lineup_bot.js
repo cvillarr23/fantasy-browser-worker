@@ -1,3 +1,4 @@
+const activity = require("../db/activity");
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
@@ -389,9 +390,13 @@ async function executeLineupAdjustments(payload) {
     // blocks the whole queue under connection.js's prefetch(1). A retry with nothing left to do
     // must succeed.
     if (items.length === 0) {
-      log(
-        `All ${skipped} requested swap(s) already satisfied. No transaction submitted.`,
+      await activity.event(
+        "verified_complete",
+        { source: "ESPN roster; requested slots already satisfied" },
+        "submitted",
+        "verified_complete",
       );
+      log(`All ${skipped} requested swap(s) already satisfied. No transaction submitted.`);
       return;
     }
 
@@ -405,9 +410,8 @@ async function executeLineupAdjustments(payload) {
     }
 
     if (dryRun) {
-      log(
-        `DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`,
-      );
+      await activity.event("dry_run", {}, "skipped", "unknown");
+      log(`DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`);
       return;
     }
 
@@ -421,17 +425,27 @@ async function executeLineupAdjustments(payload) {
       items,
       trackingId: tracking,
     });
-    log(
-      "Transaction accepted by ESPN. Verifying against a fresh roster read...",
-    );
+    log("Transaction accepted by ESPN. Verifying against a fresh roster read...");
 
+    await activity.event(
+      "submitted_to_espn",
+      { items: Array.from(intended.entries()) },
+      "submitted",
+      "awaiting_processing",
+    );
     await verifyLineup(session.context, target, intended, log);
+    await activity.event(
+      "verified_complete",
+      { items: Array.from(intended.entries()), source: "ESPN roster slots" },
+      "submitted",
+      "verified_complete",
+    );
     log("Lineup realignment complete and verified.");
   } catch (error) {
-    logger.error(
-      `Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
-      { err: error, permanent: error.permanent === true },
-    );
+    logger.error(`Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`, {
+      err: error,
+      permanent: error.permanent === true,
+    });
     captureFailure(tracking, {
       tracking_id: tracking,
       league_id: leagueId,

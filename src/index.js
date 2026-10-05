@@ -1,3 +1,5 @@
+const activity = require("./db/activity");
+const MILLISECONDS_PER_SECOND = 1000;
 const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
@@ -62,12 +64,23 @@ async function dispatch(queueName, payload) {
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
   logger.info(`Routing task parameters for queue event: "${queueName}"`);
+  if (!(await activity.claim(queueName, payload))) return true;
+  try {
+  if (
+    queueName === "draft_targets" &&
+    payload.expires_at != null &&
+    Date.now() / MILLISECONDS_PER_SECOND >= payload.expires_at
+  ) {
+    await activity.event("expired_before_execution", {}, "skipped", "expired", payload.tracking_id);
+    return true;
+  }
   await withInstrumentation(
     queueName,
     { queueName, trackingId: payload && payload.tracking_id },
     () => dispatch(queueName, payload),
   );
-  return true; // Return true on successful completion code run
+  return true;
+  } finally { await activity.release(payload.tracking_id); }
 }
 
 async function bootDaemon() {

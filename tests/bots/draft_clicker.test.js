@@ -283,6 +283,7 @@ describe("executeAutomatedDraftSelection", () => {
         playerName: "Breece Hall",
         roundNumber: null,
         status: "success",
+        confirmedBy: "delegated SELECTED confirmation",
       });
     });
 
@@ -405,6 +406,7 @@ describe("executeAutomatedDraftSelection", () => {
       playerName: "Breece Hall",
       roundNumber: null,
       status: "success",
+        confirmedBy: "ESPN SELECTED frame",
     });
   });
 
@@ -470,6 +472,7 @@ describe("executeAutomatedDraftSelection", () => {
       playerId: "4360438",
       playerName: "Breece Hall",
       status: "success",
+        confirmedBy: "draft board DOM confirmation",
     });
   });
 

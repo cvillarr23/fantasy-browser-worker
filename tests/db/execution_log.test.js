@@ -1,3 +1,4 @@
+jest.mock("../../src/db/activity", () => ({ event: jest.fn().mockResolvedValue(undefined) }));
 jest.mock("pg", () => ({
   Pool: jest.fn().mockImplementation(() => ({
     query: jest.fn(),

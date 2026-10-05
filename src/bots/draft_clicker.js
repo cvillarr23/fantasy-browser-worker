@@ -392,6 +392,7 @@ async function executeAutomatedDraftSelection(payload) {
             playerName: targetName,
             roundNumber: null,
             status: "success",
+            confirmedBy: "delegated SELECTED confirmation",
           });
           return;
         }
@@ -494,6 +495,7 @@ async function executeAutomatedDraftSelection(payload) {
           // execution_log.round_number; null is the honest value until a round is available.
           roundNumber: null,
           status: "success",
+            confirmedBy: "ESPN SELECTED frame",
         });
       } finally {
         socket.close();
@@ -567,6 +569,7 @@ async function executeAutomatedDraftSelection(payload) {
           playerId,
           playerName: targetName,
           status: "success",
+            confirmedBy: "draft board DOM confirmation",
         });
       } catch (domError) {
         log(`DOM fallback also failed: ${domError.message}`);
