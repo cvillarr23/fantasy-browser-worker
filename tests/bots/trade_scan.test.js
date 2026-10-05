@@ -86,7 +86,7 @@ test("claims once and forwards only period/tracking, never approval", async () =
   await runTradeScan({ stage: true, trackingId: "scan", approved: true }, deps);
   expect(deps.claim).toHaveBeenCalledWith(
     deps.pool,
-    "trade-scan:123:7:2026:4",
+    "trade-scan:123:7:2026-10-04",
     "scan",
   );
   expect(deps.generate).toHaveBeenCalledWith({
@@ -155,12 +155,10 @@ test("claim rolls back and releases on DB errors", async () => {
 
 test("CLI check emits structured status through the repository logger", async () => {
   const savedFetch = global.fetch;
-  global.fetch = jest
-    .fn()
-    .mockResolvedValue({
-      ok: true,
-      json: async () => ({ season_type: "pre" }),
-    });
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ season_type: "pre" }),
+  });
   try {
     await main(["--check"]);
     expect(
@@ -175,4 +173,37 @@ test("CLI check emits structured status through the repository logger", async ()
   } finally {
     global.fetch = savedFetch;
   }
+});
+
+test("Wednesday and Friday run independently; same-day repeats are suppressed", async () => {
+  const claims = new Set();
+  deps.claim.mockImplementation(async (_pool, key) => {
+    if (claims.has(key)) return false;
+    claims.add(key);
+    return true;
+  });
+  deps.now = new Date("2026-10-07T18:00:00Z");
+  expect((await runTradeScan({ stage: true }, deps)).status).toBe("no_target");
+  deps.now = new Date("2026-10-08T01:00:00Z"); // still Wednesday in Chicago
+  expect((await runTradeScan({ stage: true }, deps)).status).toBe("duplicate");
+  deps.now = new Date("2026-10-09T18:00:00Z");
+  expect((await runTradeScan({ stage: true }, deps)).status).toBe("no_target");
+  expect(deps.generate).toHaveBeenCalledTimes(2);
+});
+test.each([
+  ["2026-10-08T04:59:59Z", "2026-10-07"],
+  ["2026-10-08T05:00:00Z", "2026-10-08"],
+  ["2026-11-05T05:59:59Z", "2026-11-04"],
+  ["2026-11-05T06:00:00Z", "2026-11-05"],
+])("claim date respects Chicago midnight and DST at %s", async (time, date) => {
+  deps.now = new Date(time);
+  expect((await runTradeScan({}, deps)).scanKey).toBe(
+    `trade-scan:123:7:${date}`,
+  );
+});
+test("NFL week metadata changes do not bypass the daily claim key", async () => {
+  const first = await runTradeScan({}, deps);
+  deps.readState.mockResolvedValue({ ...state, week: 5 });
+  const second = await runTradeScan({}, deps);
+  expect(second.scanKey).toBe(first.scanKey);
 });

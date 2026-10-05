@@ -99,9 +99,11 @@ permanent failures.
 ### Outgoing scan cadence
 
 Production uses one standalone `trade-scan` CronJob in fantasy-infra, Wednesday
-10:00 America/Chicago, after the daily projection/VORP refresh and waiver window.
-One candidate per week limits LLM cost and review noise while leaving time before
-Thursday games. Like rumor digest, it calls a bot entrypoint directly. There is
+and Friday at 13:00 America/Chicago. Wednesday reviews post-waiver rosters; Friday
+provides another look after Thursday's game. Both run after the daily projection/
+VORP refresh and 11:00 rumor digest. Trade prompts do not yet consume rumor signals;
+this ordering leaves room for a future integration without implying news grounding.
+Two scheduled candidates per week limit LLM cost and review noise. Like rumor digest, it calls a bot entrypoint directly. There is
 no scheduled queue producer and deliberately no `trade_proposals` KEDA trigger;
 do not publish manual scans to that queue (an idle worker will not wake for it).
 The low-level consumer remains compatible for existing callers but bypasses the
@@ -116,11 +118,15 @@ the ESPN league's trade deadline; suspend the CronJob when that league closes
 trading. Existing ESPN staging validation and all approval/submission gates apply.
 
 An atomic Postgres advisory transaction lock plus a durable `execution_log`
-`trade_scan_claim` row allows one attempt per ESPN league/team/season/week,
+`trade_scan_claim` row allows one attempt per ESPN league/team/Chicago calendar date,
 including overlapping manual Jobs. Claims persist on no-target/no-offer, errors,
 and timeouts. There are no automatic scan retries: different generated pitches
 have different approval keys. Failures require inspection; ordinarily wait for
-next week. Do not delete claim rows in execution-log retention during the current
+the next scheduled day. A manual staging run on an unscheduled day is permitted,
+but all same-day runs share a claim, including across UTC midnight and NFL week
+metadata changes. Date boundaries follow Chicago daylight saving time. This is
+scan deduplication, not a semantic duplicate-offer filter across separate days;
+existing offer-key and approval gates remain in force. Do not delete claim rows in execution-log retention during the current
 season. No new schema is required, but existing `counter_offer` JSONB and `dry_run`
 columns and DB write permissions are required. Unlike best-effort telemetry,
 claim writes fail closed. Claims are not proof an offer was staged: inspect the
@@ -132,7 +138,7 @@ Safe manual check (live calendar read only; no claim, DB write, browser or LLM):
 ESPN_LEAGUE_ID=123 ESPN_TEAM_ID=7 node src/bots/trade_scan.js --check
 ```
 
-An explicit `--stage` runs the same weekly claim and proposal path as the CronJob,
+An explicit `--stage` runs the same daily claim and proposal path as the CronJob,
 and can fill an ESPN trade form for review; it never supplies an approval or sends
 league chat. There is no force/bypass flag. For an in-cluster read-only check after
 rollout, create a Job manifest locally and change its command before creating it:

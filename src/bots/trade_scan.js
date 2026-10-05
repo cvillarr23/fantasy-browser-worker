@@ -60,6 +60,19 @@ function resolvePeriod(state, now = new Date()) {
   return week === PRESEASON_WEEK ? null : { season, week };
 }
 
+// Use the CronJob timezone, including DST, so manual and scheduled runs share
+// one daily claim even across UTC midnight. Week changes cannot bypass this cap.
+function scanDate(now) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const value = (type) => parts.find((part) => part.type === type).value;
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
 // Durable claims use existing execution_log columns (no new schema). Redis here is
 // an evictable cache, unsuitable for preventing repeated LLM-generated pitches.
 async function claimScan(pool, key, trackingId) {
@@ -105,7 +118,7 @@ async function runTradeScan(
   const team = process.env.ESPN_TEAM_ID;
   if (![league, team].every((id) => /^[1-9]\d*$/.test(id || "")))
     throw new Error("ESPN_LEAGUE_ID and ESPN_TEAM_ID must be positive ids");
-  const key = `trade-scan:${league}:${team}:${period.season}:${period.week}`;
+  const key = `trade-scan:${league}:${team}:${scanDate(now)}`;
   if (!stage) return { status: "check_only", ...period, scanKey: key };
   const ownedPool = pool
     ? null
@@ -122,7 +135,7 @@ async function runTradeScan(
     if (!(await claim(pool || ownedPool, key, trackingId)))
       return { status: "duplicate", ...period, scanKey: key };
     // Retain the claim even on errors/timeouts: a generated pitch changes offer_key,
-    // so blind retries could stage a different offer. Next week's scan can proceed.
+    // so blind retries could stage a different offer. The next scheduled day's scan can proceed.
     const result = await generate({ ...period, tracking_id: trackingId });
     if (result.submission?.status === "fill_failed")
       throw new Error(`Trade scan staging failed: ${result.submission.error}`);
