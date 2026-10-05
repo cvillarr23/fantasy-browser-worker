@@ -1,3 +1,5 @@
+const activity = require("./db/activity");
+const MILLISECONDS_PER_SECOND = 1000;
 const amqpConnectionManager = require("./queue/connection");
 const { executeLineupAdjustments } = require("./bots/lineup_bot");
 const { executeInstantWaiverClaim } = require("./bots/waiver_sniper");
@@ -52,9 +54,7 @@ async function dispatch(queueName, payload) {
       return processAsyncLlmRequest(payload);
 
     default:
-      logger.warn(
-        `Intercepted unsupported message format signature: ${queueName}`,
-      );
+      logger.warn(`Intercepted unsupported message format signature: ${queueName}`);
       return undefined;
   }
 }
@@ -62,6 +62,15 @@ async function dispatch(queueName, payload) {
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
   logger.info(`Routing task parameters for queue event: "${queueName}"`);
+  if (!(await activity.claim(queueName, payload))) return true;
+  if (
+    queueName === "draft_targets" &&
+    payload.expires_at != null &&
+    Date.now() / MILLISECONDS_PER_SECOND >= payload.expires_at
+  ) {
+    await activity.event("expired_before_execution", {}, "skipped", "expired", payload.tracking_id);
+    return true;
+  }
   await withInstrumentation(
     queueName,
     { queueName, trackingId: payload && payload.tracking_id },
@@ -71,9 +80,7 @@ async function handleIncomingMessage(queueName, payload) {
 }
 
 async function bootDaemon() {
-  logger.info(
-    "[Worker Engine] Launching browser worker orchestrator background daemon...",
-  );
+  logger.info("[Worker Engine] Launching browser worker orchestrator background daemon...");
 
   try {
     // Initialize our managed RabbitMQ connection framework loops
@@ -84,9 +91,7 @@ async function bootDaemon() {
     await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage, {
       idleExitMs: idleExitSeconds > 0 ? idleExitSeconds * 1000 : undefined,
     });
-    logger.info(
-      "[Worker Engine] Background listener threads fully initialized. Standing by...",
-    );
+    logger.info("[Worker Engine] Background listener threads fully initialized. Standing by...");
   } catch (error) {
     logger.error("[Worker Engine] Critical cluster initialization failure", {
       err: error,

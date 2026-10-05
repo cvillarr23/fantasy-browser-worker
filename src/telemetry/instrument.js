@@ -1,3 +1,4 @@
+const activity = require("../db/activity");
 const { trace, SpanStatusCode } = require("@opentelemetry/api");
 const { runWithContext } = require("./context");
 const { recordExecution } = require("../db/execution_log");
@@ -9,6 +10,10 @@ const tracer = trace.getTracer("fantasy-browser-worker");
 // writes the execution_log row -- all in one place instead of each bot/entrypoint hand-rolling
 // its own try/catch + logging + recordExecution call.
 async function withInstrumentation(botName, contextFields, handler) {
+  if (!contextFields.queueName) {
+    const trackingId = await activity.observe(botName, contextFields.trackingId);
+    contextFields = { ...contextFields, trackingId };
+  }
   return runWithContext({ botName, ...contextFields }, () =>
     tracer.startActiveSpan(`bot.${botName}`, async (span) => {
       const startedAt = Date.now();
@@ -31,6 +36,7 @@ async function withInstrumentation(botName, contextFields, handler) {
           durationMs: Date.now() - startedAt,
           traceId: span.spanContext().traceId,
         });
+        await activity.event("worker_finished", { result: result || null }, "finished");
         return result;
       } catch (error) {
         span.recordException(error);
@@ -44,6 +50,11 @@ async function withInstrumentation(botName, contextFields, handler) {
           errorMessage: error.message,
           traceId: span.spanContext().traceId,
         });
+        await activity.event(
+          "worker_error",
+          { message: error.message, permanent: Boolean(error.permanent) },
+          "failed",
+        );
         throw error;
       } finally {
         span.end();

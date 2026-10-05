@@ -1,3 +1,4 @@
+const activity = require("../db/activity");
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
@@ -33,9 +34,7 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *   - failure capture — dump roster state + a screenshot to DEBUG_OUTPUT_DIR before rethrowing.
  */
 
-const DEBUG_DIR =
-  process.env.DEBUG_OUTPUT_DIR ||
-  path.join(__dirname, "..", "..", "recon-output");
+const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
 
 // Bounded poll rather than a fixed sleep: REST is authoritative and usually reflects the write
 // immediately, so this normally exits on the first read.
@@ -121,9 +120,7 @@ function requirePlayerId(raw, label, index) {
  */
 function planSwaps(swaps, roster, log) {
   if (!Array.isArray(swaps)) {
-    throw new PermanentError(
-      `optimized_swaps must be an array, got ${typeof swaps}.`,
-    );
+    throw new PermanentError(`optimized_swaps must be an array, got ${typeof swaps}.`);
   }
 
   const benchSlotId = slotConfig.bench_slot_id;
@@ -134,11 +131,7 @@ function planSwaps(swaps, roster, log) {
   let skipped = 0;
 
   for (const [index, swap] of swaps.entries()) {
-    const dropId = requirePlayerId(
-      swap.drop_player_id,
-      "drop_player_id",
-      index,
-    );
+    const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
     const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
     const targetSlotId = resolveSlotId(swap.slot);
 
@@ -186,10 +179,8 @@ function planSwaps(swaps, roster, log) {
 
     // Demote before promoting, so the target slot is free by the time the promotion lands.
     const moves = [];
-    if (dropFrom !== benchSlotId)
-      moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
-    if (addFrom !== targetSlotId)
-      moves.push({ id: addId, from: addFrom, to: targetSlotId });
+    if (dropFrom !== benchSlotId) moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
+    if (addFrom !== targetSlotId) moves.push({ id: addId, from: addFrom, to: targetSlotId });
 
     // Both halves already hold — nothing to do. This is what makes a redelivered message a no-op.
     if (moves.length === 0) {
@@ -201,9 +192,7 @@ function planSwaps(swaps, roster, log) {
     }
 
     for (const move of moves) {
-      log(
-        `Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`,
-      );
+      log(`Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`);
       items.push({
         playerId: Number(move.id),
         type: "LINEUP",
@@ -237,9 +226,7 @@ function assertSlotCapacity(items, finalRoster, slotCounts) {
     const capacity = slotCounts[String(slotId)] || 0;
     const used = occupancy.get(slotId) || 0;
     if (used > capacity) {
-      overfilled.push(
-        `${describeSlot(slotId)}: ${used} players for ${capacity} spot(s)`,
-      );
+      overfilled.push(`${describeSlot(slotId)}: ${used} players for ${capacity} spot(s)`);
     }
   }
 
@@ -271,9 +258,7 @@ async function verifyLineup(context, target, intended, log) {
     }
 
     if (mismatches.length === 0) {
-      log(
-        `Verification passed on attempt ${attempt}: all ${intended.size} placements confirmed.`,
-      );
+      log(`Verification passed on attempt ${attempt}: all ${intended.size} placements confirmed.`);
       return;
     }
 
@@ -303,12 +288,9 @@ function captureFailure(tracking, details) {
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
     logger.error(`Failure context written to: ${file}`);
   } catch (captureError) {
-    logger.error(
-      `Could not capture failure context: ${captureError.message}`,
-      {
-        err: captureError,
-      },
-    );
+    logger.error(`Could not capture failure context: ${captureError.message}`, {
+      err: captureError,
+    });
   }
 }
 
@@ -330,9 +312,7 @@ async function executeLineupAdjustments(payload) {
     );
   }
   if (teamId === undefined || teamId === null || teamId === "") {
-    throw new PermanentError(
-      `[Lineup Bot][${tracking}] Payload is missing team_id.`,
-    );
+    throw new PermanentError(`[Lineup Bot][${tracking}] Payload is missing team_id.`);
   }
   if (!Array.isArray(swaps)) {
     throw new PermanentError(
@@ -367,9 +347,7 @@ async function executeLineupAdjustments(payload) {
     session = await createAuthenticatedSession();
 
     roster = await readRoster(session.context, target);
-    log(
-      `Roster read: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`,
-    );
+    log(`Roster read: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}.`);
 
     // Permanent rather than retriable: a draft is days or weeks away, and hot-looping until then
     // would pin the queue. The producer can republish once there's a roster to realign.
@@ -389,9 +367,13 @@ async function executeLineupAdjustments(payload) {
     // blocks the whole queue under connection.js's prefetch(1). A retry with nothing left to do
     // must succeed.
     if (items.length === 0) {
-      log(
-        `All ${skipped} requested swap(s) already satisfied. No transaction submitted.`,
+      await activity.event(
+        "verified_complete",
+        { source: "ESPN roster; requested slots already satisfied" },
+        "submitted",
+        "verified_complete",
       );
+      log(`All ${skipped} requested swap(s) already satisfied. No transaction submitted.`);
       return;
     }
 
@@ -405,15 +387,12 @@ async function executeLineupAdjustments(payload) {
     }
 
     if (dryRun) {
-      log(
-        `DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`,
-      );
+      await activity.event("dry_run", {}, "skipped", "unknown");
+      log(`DRY_RUN set — would submit ${items.length} item(s):\n${JSON.stringify(items, null, 2)}`);
       return;
     }
 
-    log(
-      `Submitting ${items.length} lineup item(s) across ${swaps.length - skipped} swap(s)...`,
-    );
+    log(`Submitting ${items.length} lineup item(s) across ${swaps.length - skipped} swap(s)...`);
     await submitLineup(session.context, {
       ...target,
       memberId: session.swid,
@@ -421,17 +400,27 @@ async function executeLineupAdjustments(payload) {
       items,
       trackingId: tracking,
     });
-    log(
-      "Transaction accepted by ESPN. Verifying against a fresh roster read...",
-    );
+    log("Transaction accepted by ESPN. Verifying against a fresh roster read...");
 
+    await activity.event(
+      "submitted_to_espn",
+      { items: Array.from(intended.entries()) },
+      "submitted",
+      "awaiting_processing",
+    );
     await verifyLineup(session.context, target, intended, log);
+    await activity.event(
+      "verified_complete",
+      { items: Array.from(intended.entries()), source: "ESPN roster slots" },
+      "submitted",
+      "verified_complete",
+    );
     log("Lineup realignment complete and verified.");
   } catch (error) {
-    logger.error(
-      `Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
-      { err: error, permanent: error.permanent === true },
-    );
+    logger.error(`Transaction failed${error.permanent ? " (permanent)" : ""}: ${error.message}`, {
+      err: error,
+      permanent: error.permanent === true,
+    });
     captureFailure(tracking, {
       tracking_id: tracking,
       league_id: leagueId,
