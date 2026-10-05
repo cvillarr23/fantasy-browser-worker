@@ -9,7 +9,7 @@ The headless execution worker layer of your automated fantasy football platform.
 *   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
 
 ## Documentation
-[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end). A `CLAUDE.md` with a shorter, ticket-oriented summary of the same and other project-specific gotchas exists locally for AI-assisted development but isn't tracked in this repo (gitignored, matching the other `fantasy-*` repos' convention) — not linked here since the path wouldn't resolve on GitHub.
+[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end).
 
 ## Local Configuration
 Make sure your system layout supports local browser binaries before launching:
@@ -31,7 +31,7 @@ flowchart TD
     selectors --> espn["ESPN fantasy site\n(Playwright/Chromium)"]
 ```
 
-### WORKER-12: LLM client provider fallback chain
+### LLM client provider fallback chain
 
 `src/lib/llm_client.js`'s `completeWithFallback` tries each configured provider in order,
 falling through on a rate limit, quota exhaustion, or any other request failure. Ollama is the
@@ -40,7 +40,7 @@ called or scaled directly:
 
 ```mermaid
 flowchart TD
-    caller["trade_bot.js / rumor digest bot\n(WORKER-04, WORKER-13)"] --> fallback["completeWithFallback()"]
+    caller["trade_bot.js / rumor digest bot"] --> fallback["completeWithFallback()"]
 
     fallback -->|1st: LLM_PROVIDER_PRIORITY| groq["Groq\n(fetch + AbortSignal.timeout)"]
     groq -->|rate limited / failed| gemini["Gemini\n(fetch + AbortSignal.timeout)"]
@@ -50,16 +50,14 @@ flowchart TD
     interceptor -.->|"scales 0-to-1,\nqueues request"| pod["ollama Deployment"]
 ```
 
-Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for CORE-14's
-Grafana dashboard — see `CLAUDE.md`'s WORKER-12 notes for the metrics schema and rate-limiter
-details.
+Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for
+the Grafana dashboard.
 
-### WORKER-13: rumor digest bot
+### Rumor digest bot
 
 `src/bots/rumor_digest_bot.js` batches new `raw_signals` rows (from `fantasy-core-pipeline`) into
 a single `completeWithFallback` call and persists structured per-player verdicts to
-`rumor_signals` — advisory only, no waiver/lineup execution. See `CLAUDE.md`'s WORKER-13 notes
-for the watermark design and the internal-vs-ESPN player id warning.
+`rumor_signals` — advisory only, no waiver/lineup execution.
 
 ### Trade negotiation test job (`k8s/test-trade-bot-job.yaml`)
 
@@ -76,10 +74,7 @@ until those columns are added on `fantasy-core-pipeline`'s side — expected, no
 - CI records the pushed immutable digest (`@sha256:...`) in the workflow summary.
 - `fantasy-infra` owns Argo CD Image Updater configuration and should track this image via digest strategy, writing back deterministic Kustomize digest updates to `main`.
 
-## Project Tracking
-Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
-
-### Outgoing trade proposals (#93)
+### Outgoing trade proposals
 
 The low-level `trade_proposals` consumer accepts
 `{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. The worker ranks other teams' positional deficits, reads our
@@ -101,7 +96,7 @@ failures return `fill_failed` with the computed offer rather than regenerating
 on a queue retry. Model/read failures use delayed retries; invalid requests are
 permanent failures.
 
-### Outgoing scan cadence (#94)
+### Outgoing scan cadence
 
 Production uses one standalone `trade-scan` CronJob in fantasy-infra, Wednesday
 10:00 America/Chicago, after the daily projection/VORP refresh and waiver window.
