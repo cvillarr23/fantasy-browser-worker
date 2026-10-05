@@ -24,7 +24,9 @@ const { updateContext } = require("../telemetry/context");
  *                    already gone) is a no-op, not a duplicate claim.
  */
 
-const DEBUG_DIR = process.env.DEBUG_OUTPUT_DIR || path.join(__dirname, "..", "..", "recon-output");
+const DEBUG_DIR =
+  process.env.DEBUG_OUTPUT_DIR ||
+  path.join(__dirname, "..", "..", "recon-output");
 
 function resolveDryRun() {
   const raw = (process.env.DRY_RUN || "").trim();
@@ -41,7 +43,9 @@ function resolveDryRun() {
 function requirePlayerId(raw, label) {
   const id = String(raw ?? "").trim();
   if (!/^(?:\d+|-[1-9]\d*)$/.test(id)) {
-    throw new PermanentError(`${label} "${raw}" is not a valid numeric ESPN player id.`);
+    throw new PermanentError(
+      `${label} "${raw}" is not a valid numeric ESPN player id.`,
+    );
   }
   return id;
 }
@@ -54,9 +58,12 @@ function captureFailure(tracking, details) {
     fs.writeFileSync(file, JSON.stringify(details, null, 2));
     logger.error(`Failure context written to: ${file}`);
   } catch (captureError) {
-    logger.error(`Could not capture failure context: ${captureError.message}`, {
-      err: captureError,
-    });
+    logger.error(
+      `Could not capture failure context: ${captureError.message}`,
+      {
+        err: captureError,
+      },
+    );
   }
 }
 
@@ -78,10 +85,14 @@ async function executeInstantWaiverClaim(payload) {
 
   // Permanent: none of these can come good on redelivery without a config/payload change.
   if (!leagueId) {
-    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_LEAGUE_ID is not set.`);
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] ESPN_LEAGUE_ID is not set.`,
+    );
   }
   if (!teamId) {
-    throw new PermanentError(`[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`);
+    throw new PermanentError(
+      `[Sniper Bot][${tracking}] ESPN_TEAM_ID is not set.`,
+    );
   }
   // Bound once here (mirroring connection.js's trackingId binding) so every subsequent log
   // line in this transaction carries league/team context automatically via pino's mixin.
@@ -131,7 +142,8 @@ async function executeInstantWaiverClaim(payload) {
     // table keyed by tracking_id), which doesn't exist yet; left as a follow-up rather than
     // guessed at here.
     const needsAdd = !roster.slotByPlayerId.has(addPlayerId);
-    const needsDrop = Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
+    const needsDrop =
+      Boolean(dropPlayerId) && roster.slotByPlayerId.has(dropPlayerId);
 
     if (!needsAdd && !needsDrop) {
       await activity.event(
@@ -167,6 +179,7 @@ async function executeInstantWaiverClaim(payload) {
     }
 
     log(`Submitting claim:${describeItems()}...`);
+    await activity.beforeExternalWrite();
     await submitWaiverClaim(session.context, {
       ...target,
       memberId: session.swid,

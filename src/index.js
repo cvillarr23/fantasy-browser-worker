@@ -54,7 +54,9 @@ async function dispatch(queueName, payload) {
       return processAsyncLlmRequest(payload);
 
     default:
-      logger.warn(`Intercepted unsupported message format signature: ${queueName}`);
+      logger.warn(
+        `Intercepted unsupported message format signature: ${queueName}`,
+      );
       return undefined;
   }
 }
@@ -63,6 +65,7 @@ async function dispatch(queueName, payload) {
 async function handleIncomingMessage(queueName, payload) {
   logger.info(`Routing task parameters for queue event: "${queueName}"`);
   if (!(await activity.claim(queueName, payload))) return true;
+  try {
   if (
     queueName === "draft_targets" &&
     payload.expires_at != null &&
@@ -76,11 +79,14 @@ async function handleIncomingMessage(queueName, payload) {
     { queueName, trackingId: payload && payload.tracking_id },
     () => dispatch(queueName, payload),
   );
-  return true; // Return true on successful completion code run
+  return true;
+  } finally { await activity.release(payload.tracking_id); }
 }
 
 async function bootDaemon() {
-  logger.info("[Worker Engine] Launching browser worker orchestrator background daemon...");
+  logger.info(
+    "[Worker Engine] Launching browser worker orchestrator background daemon...",
+  );
 
   try {
     // Initialize our managed RabbitMQ connection framework loops
@@ -91,7 +97,9 @@ async function bootDaemon() {
     await amqpConnectionManager.initializeQueueConsumer(handleIncomingMessage, {
       idleExitMs: idleExitSeconds > 0 ? idleExitSeconds * 1000 : undefined,
     });
-    logger.info("[Worker Engine] Background listener threads fully initialized. Standing by...");
+    logger.info(
+      "[Worker Engine] Background listener threads fully initialized. Standing by...",
+    );
   } catch (error) {
     logger.error("[Worker Engine] Critical cluster initialization failure", {
       err: error,

@@ -34,7 +34,14 @@ async function recordExecution({
     await pool.query(
       `INSERT INTO execution_log (transaction_type, bot_name, status, duration_ms, error_message, trace_id)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [transactionType, botName || null, status, durationMs, errorMessage || null, traceId || null],
+      [
+        transactionType,
+        botName || null,
+        status,
+        durationMs,
+        errorMessage || null,
+        traceId || null,
+      ],
     );
   } catch (err) {
     logger.error("[Execution Log] Failed to record execution outcome", {
@@ -61,12 +68,13 @@ async function recordDraftPickClick({
   roundNumber,
   status,
   errorMessage,
+  confirmedBy,
 }) {
   await activity.event(
     "draft_" + status,
-    { playerId, playerName, errorMessage },
+    { playerId, playerName, errorMessage, confirmedBy },
     status === "success" ? "submitted" : status === "skipped_dry_run" ? "skipped" : "failed",
-    status === "success" ? "verified_complete" : "unknown",
+    status === "success" ? (confirmedBy ? "verified_complete" : "awaiting_processing") : "unknown",
   );
   try {
     await pool.query(
@@ -234,11 +242,10 @@ async function finalizeTradeSubmission(id, status, errorMessage) {
     status === "submitted" ? "awaiting_other_manager" : "unknown",
   );
   try {
-    await pool.query("UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1", [
-      id,
-      status,
-      errorMessage || null,
-    ]);
+    await pool.query(
+      "UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1",
+      [id, status, errorMessage || null],
+    );
   } catch (err) {
     logger.error("[Execution Log] Failed to finalize trade submission", { err });
   }

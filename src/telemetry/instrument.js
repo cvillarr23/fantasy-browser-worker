@@ -12,7 +12,7 @@ const tracer = trace.getTracer("fantasy-browser-worker");
 async function withInstrumentation(botName, contextFields, handler) {
   if (!contextFields.queueName) {
     const trackingId = await activity.observe(botName, contextFields.trackingId);
-    contextFields = { ...contextFields, trackingId };
+    contextFields = { ...contextFields, trackingId: trackingId || contextFields.trackingId };
   }
   return runWithContext({ botName, ...contextFields }, () =>
     tracer.startActiveSpan(`bot.${botName}`, async (span) => {

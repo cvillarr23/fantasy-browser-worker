@@ -1,21 +1,33 @@
 // Durable action ownership is required before external writes. Observation writes after a
 // submission are best-effort: an unavailable ledger must never cause a second external write.
 const { Pool } = require("pg");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
+const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { getContext } = require("../telemetry/context");
 const { logger } = require("../telemetry/logger");
 const ACTIVITY_POOL_LIMIT = 2;
 const DATABASE_CONNECT_TIMEOUT_MS = 5000;
 const MIN_REDACTED_SECRET_LENGTH = 8;
-const pool = new Pool({
+const MAX_HISTORY_EVENT_CHARS = 16000;
+const historyWrites = new Map();
+const MAX_ACTION_ATTEMPTS = 5;
+const RETRY_DELAY_MS = 1000;
+const owners = new Map();
+const dbOptions = {
   host: process.env.DB_HOST,
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   max: ACTIVITY_POOL_LIMIT,
   connectionTimeoutMillis: DATABASE_CONNECT_TIMEOUT_MS,
-});
+  statement_timeout: DATABASE_CONNECT_TIMEOUT_MS,
+  query_timeout: DATABASE_CONNECT_TIMEOUT_MS,
+};
+const pool = new Pool(dbOptions);
+const ownershipPool = new Pool(dbOptions);
+ownershipPool.on("error", (err) => logger.error("Activity ownership connection failed", {err}));
 pool.on("error", (err) => logger.error("Activity database error", { err }));
+const secrets = Object.entries(process.env).filter(([key, secret]) => secret.length >= MIN_REDACTED_SECRET_LENGTH && /password|secret|token|api.?key|espn_s2|swid/i.test(key)).map(([, secret]) => secret);
 function redact(value) {
   if (Array.isArray(value)) return value.map(redact);
   if (value && typeof value === "object")
@@ -28,22 +40,30 @@ function redact(value) {
       ]),
     );
   if (typeof value === "string") {
-    for (const [key, secret] of Object.entries(process.env))
-      if (secret.length >= MIN_REDACTED_SECRET_LENGTH && /password|secret|token|api.?key|espn_s2|swid/i.test(key))
-        value = value.split(secret).join("[REDACTED]");
+    for (const secret of secrets) value = value.split(secret).join("[REDACTED]");
     return value.replace(/Bearer\s+[\w.\-/+=]+/gi, "Bearer [REDACTED]");
   }
   return value;
 }
 async function claim(queue, payload) {
+  requirePlainObjectPayload(payload, queue);
   const id = payload.tracking_id || randomUUID();
   payload.tracking_id = id;
   const league = String(payload.league_id || process.env.ESPN_LEAGUE_ID || "");
-  const client = await pool.connect();
+  const client = await ownershipPool.connect();
+  let owned = false;
+  let locked = false;
   try {
+    const lock = await client.query("SELECT pg_try_advisory_lock(hashtext($1)) AS acquired", [id]);
+    locked = lock.rows[0].acquired === true;
+    if (!locked) {
+      const error = new Error("Action is still owned by another worker; retry later.");
+      error.retryDelayMs = RETRY_DELAY_MS;
+      throw error;
+    }
     await client.query("BEGIN");
     await client.query(
-      "INSERT INTO activity_actions(id,league_id,team_id,kind,title,payload) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+      "INSERT INTO activity_actions(id,league_id,team_id,kind,title,payload,season) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
       [
         id,
         league,
@@ -51,15 +71,23 @@ async function claim(queue, payload) {
         queue,
         `${queue.replaceAll("_", " ")} · ${payload.name || payload.team_id || "Background task"}`,
         JSON.stringify(redact(payload)),
+        payload.season || payload.decision_inputs?.season || null,
       ],
     );
     const row = await client.query(
-      "SELECT execution FROM activity_actions WHERE id=$1 FOR UPDATE",
+      "SELECT execution,attempts,evidence FROM activity_actions WHERE id=$1 FOR UPDATE",
       [id],
     );
-    if (row.rows[0].execution !== "queued") {
+    const action = row.rows[0];
+    if (["finished", "submitted", "skipped"].includes(action.execution)) {
       await client.query("COMMIT");
       return false;
+    }
+    if (action.evidence?.external_write_started || (action.attempts || 0) >= MAX_ACTION_ATTEMPTS) {
+      await client.query("UPDATE activity_actions SET execution='failed',updated_at=now() WHERE id=$1", [id]);
+      await client.query("INSERT INTO activity_events(action_id,stage) VALUES($1,'manual_verification_required')", [id]);
+      await client.query("COMMIT");
+      throw new PermanentError("Action needs manual verification before another external write; see Activity.");
     }
     await client.query(
       "UPDATE activity_actions SET execution='running',attempts=attempts+1,updated_at=now() WHERE id=$1",
@@ -67,13 +95,31 @@ async function claim(queue, payload) {
     );
     await client.query("INSERT INTO activity_events(action_id,stage) VALUES($1,'running')", [id]);
     await client.query("COMMIT");
+    owners.set(id, client);
+    owned = true;
     return true;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
-    client.release();
+    if (!owned) {
+      if (locked) await client.query("SELECT pg_advisory_unlock(hashtext($1))", [id]).catch(() => {});
+      client.release(true);
+    }
   }
+}
+async function release(identity) {
+  const client = owners.get(identity);
+  if (!client) return;
+  owners.delete(identity);
+  try { await client.query("SELECT pg_advisory_unlock(hashtext($1))", [identity]); }
+  finally { client.release(true); }
+}
+async function beforeExternalWrite() {
+  const id = getContext().trackingId;
+  if (!id || !owners.has(id)) return;
+  // A pending waiver is not visible on the roster. Record uncertainty before its POST.
+  await owners.get(id).query("UPDATE activity_actions SET evidence=evidence || '{\"external_write_started\":true}'::jsonb WHERE id=$1", [id]);
 }
 async function event(stage, detail = {}, execution = null, outcome = null, identity = null) {
   const id = identity || getContext().trackingId;
@@ -113,16 +159,21 @@ async function startSession(title) {
     return null;
   }
 }
-async function sessionEvent(id, role, content, status = null) {
+function historyContent(content) {
+  const encoded = JSON.stringify(redact(content));
+  if (process.env.LLM_HISTORY_CAPTURE_CONTENT !== "true") return {content_sha256: createHash("sha256").update(encoded).digest("hex"), characters: encoded.length, capture: "metadata only"};
+  return encoded.length > MAX_HISTORY_EVENT_CHARS ? {preview: encoded.slice(0, MAX_HISTORY_EVENT_CHARS), truncated: true, characters: encoded.length} : redact(content);
+}
+function sessionEvent(id, role, content, status = null) {
   if (!id) return;
-  try {
-    await pool.query(
-      "UPDATE activity_sessions SET content=content || $2::jsonb,status=COALESCE($3,status),updated_at=now() WHERE id=$1",
-      [id, JSON.stringify([{ role, content: redact(content) }]), status],
-    );
-  } catch (err) {
-    logger.error("Could not record LLM session event", { err });
-  }
+  const observed = ["prompt", "response"].includes(role) ? historyContent(content) : redact(content);
+  // Keep per-session ordering while provider calls continue independently of observation writes.
+  const next = (historyWrites.get(id) || Promise.resolve()).then(() => pool.query(
+    "UPDATE activity_sessions SET content=content || $2::jsonb,status=COALESCE($3,status),updated_at=now() WHERE id=$1",
+    [id, JSON.stringify([{role, content: observed}]), status],
+  )).catch(err => logger.error("Could not record LLM session event", {err}));
+  historyWrites.set(id, next);
+  next.finally(() => { if (historyWrites.get(id) === next) historyWrites.delete(id); });
 }
 // Standalone scheduled jobs are observable without changing their execution policy.
 async function observe(botName, identity) {
@@ -144,4 +195,4 @@ async function observe(botName, identity) {
     return null;
   }
 }
-module.exports = { claim, event, startSession, sessionEvent, redact, observe };
+module.exports = { claim, event, startSession, sessionEvent, redact, observe, release, beforeExternalWrite, historyContent };

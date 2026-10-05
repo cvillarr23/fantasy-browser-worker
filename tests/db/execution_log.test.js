@@ -66,9 +66,7 @@ describe("claimTradeSubmission", () => {
     expect(client.query.mock.calls[1][1]).toEqual([OFFER_KEY]);
     const [insertSql, insertParams] = client.query.mock.calls[3];
     expect(insertSql).toMatch(/'submitting'/);
-    expect(
-      JSON.parse(insertParams.find((p) => typeof p === "string" && p.startsWith("{"))),
-    ).toMatchObject({
+    expect(JSON.parse(insertParams.find((p) => typeof p === "string" && p.startsWith("{")))).toMatchObject({
       offer_key: OFFER_KEY,
       source: "counter_offer",
       to_team_id: "3",
@@ -123,11 +121,7 @@ describe("finalizeTradeSubmission", () => {
   it("updates the claimed row by id", async () => {
     pool.query.mockResolvedValue({ rowCount: 1 });
     await finalizeTradeSubmission(11, "submitted");
-    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE execution_log/), [
-      11,
-      "submitted",
-      null,
-    ]);
+    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE execution_log/), [11, "submitted", null]);
   });
 
   it("never throws: a stale submitting row fails closed on redelivery anyway", async () => {
@@ -140,17 +134,10 @@ describe("recordTradeOfferFill", () => {
   it("writes a best-effort trade_offer_submit row and never throws", async () => {
     pool.query.mockRejectedValue(new Error("boom"));
     await expect(
-      recordTradeOfferFill({
-        ...ROW,
-        offerKey: OFFER_KEY,
-        status: "awaiting_approval",
-        dryRun: true,
-      }),
+      recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true }),
     ).resolves.toBeUndefined();
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/INSERT INTO execution_log/);
-    expect(params).toEqual(
-      expect.arrayContaining(["trade_offer_submit", "trade_builder", "awaiting_approval", true]),
-    );
+    expect(params).toEqual(expect.arrayContaining(["trade_offer_submit", "trade_builder", "awaiting_approval", true]));
   });
 });

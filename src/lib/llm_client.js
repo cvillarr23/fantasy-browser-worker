@@ -51,7 +51,8 @@ const DEFAULT_OLLAMA_TIMEOUT_MS = 100000;
 // -- the interceptor is what actually triggers Ollama's on-demand scale-up (and, symmetrically,
 // scales it back to 0 after an idle period, see http-scaled-object.yaml's scaledownPeriod). A
 // direct-to-Service URL here would bypass that entirely and race a cold pod.
-const DEFAULT_OLLAMA_URL = "http://keda-add-ons-http-interceptor-proxy.keda.svc.cluster.local:8080";
+const DEFAULT_OLLAMA_URL =
+  "http://keda-add-ons-http-interceptor-proxy.keda.svc.cluster.local:8080";
 // Host header the interceptor uses to look up which HTTPScaledObject (and therefore which
 // Deployment/Service) a request is for -- must match a `hosts` entry in
 // base/ollama/http-scaled-object.yaml exactly. This is deliberately the same hostname
@@ -74,12 +75,17 @@ const DEFAULT_OLLAMA_DIRECT_URL = "http://ollama.default.svc.cluster.local:11434
 const requestLog = new Map();
 
 function isWithinLocalBudget(provider) {
-  const configuredLimit = Number(process.env[`${provider.toUpperCase()}_RPM_LIMIT`]);
-  const limit = configuredLimit > 0 ? configuredLimit : DEFAULT_RPM_LIMITS[provider];
+  const configuredLimit = Number(
+    process.env[`${provider.toUpperCase()}_RPM_LIMIT`],
+  );
+  const limit =
+    configuredLimit > 0 ? configuredLimit : DEFAULT_RPM_LIMITS[provider];
   if (!limit) return true; // no budget configured for this provider (e.g. ollama) -- unlimited
 
   const windowStart = Date.now() - 60000;
-  const timestamps = (requestLog.get(provider) || []).filter((t) => t > windowStart);
+  const timestamps = (requestLog.get(provider) || []).filter(
+    (t) => t > windowStart,
+  );
   requestLog.set(provider, timestamps);
   return timestamps.length < limit;
 }
@@ -100,7 +106,8 @@ const apiKeyCache = new Map();
 // fantasy-infra's README already documents (`bao kv put secret/fantasy/groq groq_api_key=...`).
 function fetchApiKeyFromOpenBao(provider) {
   const secretPath =
-    process.env[`OPENBAO_${provider.toUpperCase()}_SECRET_PATH`] || `secret/fantasy/${provider}`;
+    process.env[`OPENBAO_${provider.toUpperCase()}_SECRET_PATH`] ||
+    `secret/fantasy/${provider}`;
   const fieldName = `${provider}_api_key`;
 
   logger.info(
@@ -113,7 +120,10 @@ function fetchApiKeyFromOpenBao(provider) {
       encoding: "utf8",
     });
   } catch (err) {
-    logger.error(`[LLM Client] OpenBao lookup failed for "${provider}": ${err.message}`, { err });
+    logger.error(
+      `[LLM Client] OpenBao lookup failed for "${provider}": ${err.message}`,
+      { err },
+    );
     return null;
   }
 
@@ -130,7 +140,9 @@ function fetchApiKeyFromOpenBao(provider) {
 
   const key = parsed?.data?.data?.[fieldName];
   if (!key) {
-    logger.error(`[LLM Client] OpenBao secret at "${secretPath}" is missing field "${fieldName}".`);
+    logger.error(
+      `[LLM Client] OpenBao secret at "${secretPath}" is missing field "${fieldName}".`,
+    );
     return null;
   }
 
@@ -150,7 +162,9 @@ function resolveApiKey(provider) {
 
 function requestTimeoutMs(provider) {
   if (provider === "ollama") {
-    return Number(process.env.OLLAMA_REQUEST_TIMEOUT_MS) || DEFAULT_OLLAMA_TIMEOUT_MS;
+    return (
+      Number(process.env.OLLAMA_REQUEST_TIMEOUT_MS) || DEFAULT_OLLAMA_TIMEOUT_MS
+    );
   }
   return Number(process.env.LLM_REQUEST_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS;
 }
@@ -191,7 +205,8 @@ async function callGroq(model, prompt, opts, apiKey) {
 
   const data = await response.json();
   const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new Error("Groq response missing choices[0].message.content");
+  if (!text)
+    throw new Error("Groq response missing choices[0].message.content");
   return text;
 }
 
@@ -206,14 +221,18 @@ async function callGemini(model, prompt, opts, apiKey) {
     headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
-      ...(opts.systemPrompt ? { systemInstruction: { parts: [{ text: opts.systemPrompt }] } } : {}),
+      ...(opts.systemPrompt
+        ? { systemInstruction: { parts: [{ text: opts.systemPrompt }] } }
+        : {}),
       generationConfig: {
         // Unconditional: every caller wants strict JSON and previously had only prompt
         // wording to enforce it. Gemini constrains this server-side, unlike groq's
         // prompt-only json_mode.
         response_mime_type: "application/json",
         ...(opts.maxTokens ? { maxOutputTokens: opts.maxTokens } : {}),
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(opts.temperature !== undefined
+          ? { temperature: opts.temperature }
+          : {}),
       },
     }),
     signal: AbortSignal.timeout(requestTimeoutMs("gemini")),
@@ -227,7 +246,9 @@ async function callGemini(model, prompt, opts, apiKey) {
   const data = await response.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
-    throw new Error("Gemini response missing candidates[0].content.parts[0].text");
+    throw new Error(
+      "Gemini response missing candidates[0].content.parts[0].text",
+    );
   }
   return text;
 }
@@ -238,7 +259,10 @@ async function callGemini(model, prompt, opts, apiKey) {
 // routing through the KEDA HTTP Add-on interceptor, which dispatches purely on the request's
 // Host header (see http-scaled-object.yaml in fantasy-infra). Node's lower-level `http`/`https`
 // modules have no such restriction, so callOllama/startOllama/isOllamaReady all use this instead.
-function requestWithHostHeader(url, { method = "POST", body, hostHeader, timeoutMs }) {
+function requestWithHostHeader(
+  url,
+  { method = "POST", body, hostHeader, timeoutMs },
+) {
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const transport = target.protocol === "https:" ? https : http;
@@ -332,7 +356,9 @@ async function callOllama(model, prompt, opts) {
       prompt: opts.systemPrompt ? `${opts.systemPrompt}\n\n${prompt}` : prompt,
       stream: false,
       options: {
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(opts.temperature !== undefined
+          ? { temperature: opts.temperature }
+          : {}),
         ...(opts.maxTokens ? { num_predict: opts.maxTokens } : {}),
       },
     },
@@ -345,7 +371,8 @@ async function callOllama(model, prompt, opts) {
   }
 
   const data = JSON.parse(response.text);
-  if (!data?.response) throw new Error("Ollama response missing 'response' field");
+  if (!data?.response)
+    throw new Error("Ollama response missing 'response' field");
   return data.response;
 }
 
@@ -459,7 +486,7 @@ async function recordLlmCallMetric({
  */
 async function completeWithFallback(prompt, opts = {}) {
   const sessionId = await activityHistory.startSession(opts.callSite || "LLM run");
-  await activityHistory.sessionEvent(sessionId, "prompt", {
+  activityHistory.sessionEvent(sessionId, "prompt", {
     system: opts.systemPrompt,
     user: prompt,
   });
@@ -487,7 +514,9 @@ async function completeWithFallback(prompt, opts = {}) {
         if (adapter.needsApiKey) {
           apiKey = resolveApiKey(provider);
           if (!apiKey) {
-            logger.warn(`[LLM Client] No API key resolved for "${provider}", skipping.`);
+            logger.warn(
+              `[LLM Client] No API key resolved for "${provider}", skipping.`,
+            );
             continue;
           }
         }
@@ -518,7 +547,7 @@ async function completeWithFallback(prompt, opts = {}) {
         try {
           // eslint-disable-next-line no-loop-func -- provider/model are captured per-iteration
           // and this closure is awaited immediately, so there's no stale-variable risk here.
-          await activityHistory.sessionEvent(sessionId, "provider_attempt", {
+          activityHistory.sessionEvent(sessionId, "provider_attempt", {
             provider,
             model,
             attemptNumber,
@@ -566,7 +595,7 @@ async function completeWithFallback(prompt, opts = {}) {
             traceId,
           });
           span.setStatus({ code: SpanStatusCode.OK });
-          await activityHistory.sessionEvent(
+          activityHistory.sessionEvent(
             sessionId,
             "response",
             { text, provider, model, attempt: attemptNumber, latencyMs },
@@ -596,7 +625,7 @@ async function completeWithFallback(prompt, opts = {}) {
             fallbackTriggered: attemptNumber > 1,
             traceId,
           });
-          await activityHistory.sessionEvent(sessionId, "provider_error", {
+          activityHistory.sessionEvent(sessionId, "provider_error", {
             provider,
             model,
             attemptNumber,
@@ -615,7 +644,7 @@ async function completeWithFallback(prompt, opts = {}) {
         code: SpanStatusCode.ERROR,
         message: finalError.message,
       });
-      await activityHistory.sessionEvent(sessionId, "error", finalError.message, "failed");
+      activityHistory.sessionEvent(sessionId, "error", finalError.message, "failed");
       throw finalError;
     } finally {
       span.end();
