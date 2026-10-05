@@ -9,7 +9,7 @@ The headless execution worker layer of your automated fantasy football platform.
 *   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
 
 ## Documentation
-[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end). A `CLAUDE.md` with a shorter, ticket-oriented summary of the same and other project-specific gotchas exists locally for AI-assisted development but isn't tracked in this repo (gitignored, matching the other `fantasy-*` repos' convention) — not linked here since the path wouldn't resolve on GitHub.
+[`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end).
 
 ## Local Configuration
 Make sure your system layout supports local browser binaries before launching:
@@ -31,7 +31,7 @@ flowchart TD
     selectors --> espn["ESPN fantasy site\n(Playwright/Chromium)"]
 ```
 
-### WORKER-12: LLM client provider fallback chain
+### LLM client provider fallback chain
 
 `src/lib/llm_client.js`'s `completeWithFallback` tries each configured provider in order,
 falling through on a rate limit, quota exhaustion, or any other request failure. Ollama is the
@@ -40,7 +40,7 @@ called or scaled directly:
 
 ```mermaid
 flowchart TD
-    caller["trade_bot.js / rumor digest bot\n(WORKER-04, WORKER-13)"] --> fallback["completeWithFallback()"]
+    caller["trade_bot.js / rumor digest bot"] --> fallback["completeWithFallback()"]
 
     fallback -->|1st: LLM_PROVIDER_PRIORITY| groq["Groq\n(fetch + AbortSignal.timeout)"]
     groq -->|rate limited / failed| gemini["Gemini\n(fetch + AbortSignal.timeout)"]
@@ -50,16 +50,14 @@ flowchart TD
     interceptor -.->|"scales 0-to-1,\nqueues request"| pod["ollama Deployment"]
 ```
 
-Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for CORE-14's
-Grafana dashboard — see `CLAUDE.md`'s WORKER-12 notes for the metrics schema and rate-limiter
-details.
+Every attempt (winner or not) writes a best-effort row to `llm_call_metrics` for
+the Grafana dashboard.
 
-### WORKER-13: rumor digest bot
+### Rumor digest bot
 
 `src/bots/rumor_digest_bot.js` batches new `raw_signals` rows (from `fantasy-core-pipeline`) into
 a single `completeWithFallback` call and persists structured per-player verdicts to
-`rumor_signals` — advisory only, no waiver/lineup execution. See `CLAUDE.md`'s WORKER-13 notes
-for the watermark design and the internal-vs-ESPN player id warning.
+`rumor_signals` — advisory only, no waiver/lineup execution.
 
 ### Trade negotiation test job (`k8s/test-trade-bot-job.yaml`)
 
@@ -76,13 +74,10 @@ until those columns are added on `fantasy-core-pipeline`'s side — expected, no
 - CI records the pushed immutable digest (`@sha256:...`) in the workflow summary.
 - `fantasy-infra` owns Argo CD Image Updater configuration and should track this image via digest strategy, writing back deterministic Kustomize digest updates to `main`.
 
-## Project Tracking
-Engineering tickets for this repo live as [GitHub Issues](https://github.com/cvillarr23/fantasy-browser-worker/issues) and are tracked on the [Fantasy Manager project board](https://github.com/users/cvillarr23/projects/2), alongside `fantasy-core-pipeline` and `fantasy-infra`.
+### Outgoing trade proposals
 
-### Outgoing trade proposals (#93)
-
-Publish `{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}` to
-`trade_proposals`. The worker ranks other teams' positional deficits, reads our
+The low-level `trade_proposals` consumer accepts
+`{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. The worker ranks other teams' positional deficits, reads our
 roster and the highest-ranked target's live ESPN roster, and uses
 `completeWithFallback` to draft one fresh offer and a pitch. It can return
 `no_target` or `no_offer` without staging anything. Ownership, duplicate ids,
@@ -101,6 +96,69 @@ failures return `fill_failed` with the computed offer rather than regenerating
 on a queue retry. Model/read failures use delayed retries; invalid requests are
 permanent failures.
 
-This adds a worker consumer, not a scheduled producer. Production scale-from-zero
-also needs a `trade_proposals` queue trigger in fantasy-infra before publishing to
-an idle ScaledJob deployment.
+### Outgoing scan cadence
+
+Production uses one standalone `trade-scan` CronJob in fantasy-infra, Wednesday
+and Friday at 13:00 America/Chicago. Wednesday reviews post-waiver rosters; Friday
+provides another look after Thursday's game. Both run after the daily projection/
+VORP refresh and 11:00 rumor digest. Trade prompts do not yet consume rumor signals;
+this ordering leaves room for a future integration without implying news grounding.
+Two scheduled candidates per week limit LLM cost and review noise. Like rumor digest, it calls a bot entrypoint directly. There is
+no scheduled queue producer and deliberately no `trade_proposals` KEDA trigger;
+do not publish manual scans to that queue (an idle worker will not wake for it).
+The low-level consumer remains compatible for existing callers but bypasses the
+scheduled scan claim; use the CLI below for operational scans.
+
+The [Sleeper NFL state endpoint](https://docs.sleeper.com/#get-nfl-state) supplies
+`season` and `week`, not `league_season`, `display_week`, or a hardcoded year.
+Only regular-season weeks 1–18 run; preseason/postseason/week zero and February–
+August are successful no-ops before claims/browser/LLM access. Invalid, unavailable,
+or stale season data fails closed. This is an NFL calendar gate, not a check of
+the ESPN league's trade deadline; suspend the CronJob when that league closes
+trading. Existing ESPN staging validation and all approval/submission gates apply.
+
+An atomic Postgres advisory transaction lock plus a durable `execution_log`
+`trade_scan_claim` row allows one attempt per ESPN league/team/Chicago calendar date,
+including overlapping manual Jobs. Claims persist on no-target/no-offer, errors,
+and timeouts. There are no automatic scan retries: different generated pitches
+have different approval keys. Failures require inspection; ordinarily wait for
+the next scheduled day. A manual staging run on an unscheduled day is permitted,
+but all same-day runs share a claim, including across UTC midnight and NFL week
+metadata changes. Date boundaries follow Chicago daylight saving time. This is
+scan deduplication, not a semantic duplicate-offer filter across separate days;
+existing offer-key and approval gates remain in force. Do not delete claim rows in execution-log retention during the current
+season. No new schema is required, but existing `counter_offer` JSONB and `dry_run`
+columns and DB write permissions are required. Unlike best-effort telemetry,
+claim writes fail closed. Claims are not proof an offer was staged: inspect the
+`trade_scan` outcome and `trade_offer_submit` rows too.
+
+Safe manual check (live calendar read only; no claim, DB write, browser or LLM):
+
+```bash
+ESPN_LEAGUE_ID=123 ESPN_TEAM_ID=7 node src/bots/trade_scan.js --check
+```
+
+An explicit `--stage` runs the same daily claim and proposal path as the CronJob,
+and can fill an ESPN trade form for review; it never supplies an approval or sends
+league chat. There is no force/bypass flag. For an in-cluster read-only check after
+rollout, create a Job manifest locally and change its command before creating it:
+
+```bash
+kubectl create job trade-scan-check --from=cronjob/trade-scan --dry-run=client -o json > /tmp/trade-scan-check.json
+python3 -c 'import json; p="/tmp/trade-scan-check.json"; d=json.load(open(p)); d["spec"]["template"]["spec"]["containers"][0]["command"]=["node","src/bots/trade_scan.js","--check"]; json.dump(d,open(p,"w"))'
+kubectl create -f /tmp/trade-scan-check.json
+kubectl logs -f job/trade-scan-check
+```
+
+The CLI has a 15-minute hard deadline; Kubernetes additionally bounds Pending
+and Running time to 16 minutes, allows a 30-minute late start, forbids concurrent
+scheduled Jobs, and uses `backoffLimit: 0`. Structured completion logs include
+status, season/week, scan key, tracking ID and staging status; `--stage` records
+`trade_scan` spans/execution outcomes. Unexpected errors exit nonzero. Existing
+infra CronJob missed-schedule/failed-Job alerts include `trade-scan`.
+
+Deployment order: release the worker image containing this entrypoint, confirm
+fantasy-infra's production image digest includes it, then sync the new CronJob.
+It reuses fantasy-league-config, ESPN cookies, DB credentials, Groq/Gemini keys,
+core-pipeline roster deficits and the existing LLM fallback/telemetry services.
+No queue declaration, KEDA trigger, core-pipeline change or new secret is needed.
