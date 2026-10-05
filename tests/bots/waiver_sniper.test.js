@@ -199,3 +199,37 @@ describe("executeInstantWaiverClaim", () => {
     },
   );
 });
+
+describe("per-request dry_run override", () => {
+  // clearMocks keeps queued mockResolvedValueOnce values, which would leak between these cases.
+  beforeEach(() => readRoster.mockReset());
+
+  it("submits when the request sets dry_run=false even though DRY_RUN is unset", async () => {
+    delete process.env.DRY_RUN;
+    readRoster.mockResolvedValueOnce(roster({ "200": 20 }));
+    readRoster.mockResolvedValueOnce(roster({ "100": 20 }));
+    submitWaiverClaim.mockResolvedValue(undefined);
+
+    await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200", dry_run: false });
+
+    expect(submitWaiverClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays dry when the request sets dry_run=true even though DRY_RUN=false", async () => {
+    readRoster.mockResolvedValue(roster({ "200": 20 }));
+    process.env.DRY_RUN = "false";
+
+    await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200", dry_run: true });
+
+    expect(submitWaiverClaim).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "false", 0])("ignores a non-boolean dry_run (%p) and keeps the env default", async (value) => {
+    delete process.env.DRY_RUN;
+    readRoster.mockResolvedValue(roster({ "200": 20 }));
+
+    await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200", dry_run: value });
+
+    expect(submitWaiverClaim).not.toHaveBeenCalled();
+  });
+});
