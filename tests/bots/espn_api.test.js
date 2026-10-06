@@ -255,6 +255,21 @@ describe("submitLineup", () => {
     ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/HTTP 409/) });
   });
 
+  it("treats a 401/403 as an expired session to retry, not a doomed request", async () => {
+    for (const status of [401, 403]) {
+      const error = await submitLineup(fakeContext({}, status), {
+        leagueId: "1",
+        seasonId: "2026",
+        teamId: "8",
+        memberId: "x",
+        scoringPeriodId: 1,
+        items: [],
+      }).catch((e) => e);
+      expect(error.name).toBe("SessionExpiredError");
+      expect(error.permanent).toBeUndefined();
+    }
+  });
+
   it("keeps a 429 or 5xx retriable", async () => {
     for (const status of [429, 503]) {
       const error = await submitLineup(fakeContext({}, status), {

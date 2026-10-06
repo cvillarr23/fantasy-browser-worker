@@ -85,7 +85,7 @@ function resolveDryRun() {
  */
 function resolveSlotId(slot) {
   if (slot === undefined || slot === null) {
-    throw new Error("Swap is missing its target `slot`.");
+    throw new PermanentError("Swap is missing its target `slot`.");
   }
 
   const normalized = String(slot).trim().toUpperCase().replace(/\s+/g, "");
@@ -94,7 +94,7 @@ function resolveSlotId(slot) {
   const slotId = slotConfig.slot_ids[normalized] ?? slotConfig.slot_ids[base];
 
   if (slotId === undefined) {
-    throw new Error(
+    throw new PermanentError(
       `Unrecognized lineup slot "${slot}". Known slots: ${Object.keys(slotConfig.slot_ids).join(", ")}`,
     );
   }
@@ -177,18 +177,14 @@ function planSwaps(swaps, roster, log) {
 
   for (const [index, swap] of swaps.entries()) {
     const kind = swap.kind ?? SWAP_KIND;
-    const plan =
-      kind === SWAP_KIND
-        ? planBenchAndPromote(swap, index, roster, { claimPlayer, currentSlotOf })
-        : kind === IR_KIND || kind === ACTIVATE_IR_KIND
-          ? planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf })
-          : null;
-    if (plan === null) {
+    const planEntry = PLANNERS_BY_KIND[kind];
+    if (!planEntry) {
       throw new PermanentError(
-        `Swap #${index + 1}: unknown kind "${kind}". Expected "${SWAP_KIND}", "${IR_KIND}" or ` +
-          `"${ACTIVATE_IR_KIND}".`,
+        `Swap #${index + 1}: unknown kind "${kind}". Expected one of: ` +
+          `${Object.keys(PLANNERS_BY_KIND).join(", ")}.`,
       );
     }
+    const plan = planEntry(kind, swap, index, roster, { claimPlayer, currentSlotOf });
 
     // Every half already holds — nothing to do. This is what makes a redelivered message a no-op.
     if (plan.moves.length === 0) {
@@ -217,7 +213,14 @@ function planSwaps(swaps, roster, log) {
 
   assertSlotCapacity(items, current, roster.slotCounts);
 
-  return { items, intended, skipped };
+  // Capacity is checked on the end state, but ESPN may apply items in order. Moving players out of
+  // IR first means an `ir` entry listed before the `activate_ir` that frees its spot never puts two
+  // players in a 1-deep IR partway through. Leaving IR only ever lands in a slot with room (the
+  // check above), so this can't overfill anything else.
+  const leavesIr = (item) => item.fromLineupSlotId === IR_SLOT_ID;
+  const ordered = [...items.filter(leavesIr), ...items.filter((item) => !leavesIr(item))];
+
+  return { items: ordered, intended, skipped };
 }
 
 /** lineup_slots.json is a documented reference; the league's live settings are the truth. */
@@ -233,7 +236,7 @@ function requireFieldedSlot(index, slot, slotId, slotCounts) {
 }
 
 /** A `kind: "swap"` entry: `drop_player_id` to the bench, `add_player_id` into `slot`. */
-function planBenchAndPromote(swap, index, roster, { claimPlayer, currentSlotOf }) {
+function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
   const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
   const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
   const targetSlotId = resolveSlotId(swap.slot);
@@ -297,7 +300,7 @@ function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
 
   if (kind === IR_KIND) {
     // Checked here rather than left to ESPN so the failure says why. ESPN still has the final say.
-    const status = roster.injuryStatusByPlayerId?.get(playerId) ?? null;
+    const status = roster.injuryStatusByPlayerId.get(playerId) ?? null;
     if (!IR_ELIGIBLE_INJURY_STATUSES.has(status)) {
       throw new PermanentError(
         `Swap #${index + 1}: player ${playerId} is not IR-eligible (ESPN injuryStatus ` +
@@ -317,6 +320,12 @@ function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
     satisfied,
   };
 }
+
+const PLANNERS_BY_KIND = {
+  [SWAP_KIND]: planBenchAndPromote,
+  [IR_KIND]: planIrMove,
+  [ACTIVATE_IR_KIND]: planIrMove,
+};
 
 /** Rejects a plan that would overfill any slot it moves into. */
 function assertSlotCapacity(items, finalRoster, slotCounts) {
@@ -551,6 +560,11 @@ async function executeLineupAdjustments(payload) {
       // what the bot believed when it failed.
       roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
       slot_counts: roster ? roster.slotCounts : null,
+      // IR eligibility is decided from these, so an IR rejection can be reconstructed. Guarded,
+      // because building this object must not throw and mask the original error.
+      roster_injury_status: roster?.injuryStatusByPlayerId
+        ? Object.fromEntries(roster.injuryStatusByPlayerId)
+        : null,
       planned_items: planned ? planned.items : null,
       err: error,
     });

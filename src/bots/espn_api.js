@@ -15,12 +15,17 @@
 
 const fs = require("fs");
 const path = require("path");
-const { classifyHttpStatusError } = require("../errors");
+const { classifyHttpStatusError, SessionExpiredError } = require("../errors");
 const { isEnabled: isDebugCaptureEnabled } = require("./debug_capture");
 const { logger } = require("../telemetry/logger");
 
 const READS_HOST = "https://lm-api-reads.fantasy.espn.com";
 const WRITES_HOST = "https://lm-api-writes.fantasy.espn.com";
+
+// ESPN answers an expired or rejected espn_s2/SWID pair with one of these. The request itself is
+// fine, so it is retried once the session is refreshed, never dropped as a PermanentError.
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
 
 const WRITE_CAPTURE_DIR =
   process.env.DEBUG_OUTPUT_DIR ||
@@ -278,7 +283,8 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
  *
  * A 4xx rejection (except 429) is a PermanentError, same heuristic as submitWaiverClaim below: an
  * ineligible IR move or an illegal slot keeps failing identically, and requeuing it would starve
- * every consumer under connection.js's prefetch(1).
+ * every consumer under connection.js's prefetch(1). 401/403 are the exception: they mean the
+ * session, not the request, is bad, so they raise SessionExpiredError and retry after a delay.
  */
 async function submitLineup(
   context,
@@ -321,6 +327,9 @@ async function submitLineup(
   if (!response.ok()) {
     const status = response.status();
     const message = `[ESPN API] Lineup submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
+    if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
+      throw new SessionExpiredError(message);
+    }
     throw classifyHttpStatusError(status, message);
   }
 

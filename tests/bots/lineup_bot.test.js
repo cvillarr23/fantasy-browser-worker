@@ -39,6 +39,11 @@ describe("resolveSlotId", () => {
     expect(() => resolveSlotId("QUARTERBACK")).toThrow(/Unrecognized lineup slot/);
   });
 
+  it("rejects an unrecognized slot permanently, so the message isn't requeued forever", () => {
+    expect(() => resolveSlotId("I.R.")).toThrow(expect.objectContaining({ permanent: true }));
+    expect(() => resolveSlotId(undefined)).toThrow(expect.objectContaining({ permanent: true }));
+  });
+
   it("throws when slot is missing", () => {
     expect(() => resolveSlotId(undefined)).toThrow(/missing its target/);
     expect(() => resolveSlotId(null)).toThrow(/missing its target/);
@@ -366,6 +371,23 @@ describe("planSwaps IR moves", () => {
         ["300", 20],
       ]),
     );
+  });
+
+  it("sends a move out of IR before a move into it, so IR never overfills mid-transaction", () => {
+    const r = roster({ "100": 20, "200": 21 }, DEFAULT_SLOT_COUNTS, { "100": "OUT" });
+    const { items } = planSwaps(
+      [
+        { kind: "ir", player_id: "100", slot: "IR" },
+        { kind: "activate_ir", player_id: "200", slot: "BENCH" },
+      ],
+      r,
+      noopLog,
+    );
+
+    expect(items).toEqual([
+      { playerId: 200, type: "LINEUP", fromLineupSlotId: 21, toLineupSlotId: 20 },
+      { playerId: 100, type: "LINEUP", fromLineupSlotId: 20, toLineupSlotId: 21 },
+    ]);
   });
 
   it("rejects a player who appears in both an IR move and a swap", () => {
