@@ -53,8 +53,9 @@ const VERIFY_DELAY_MS = 1000;
 const BENCH_SLOT_ID = slotConfig.bench_slot_id;
 const IR_SLOT_ID = slotConfig.slot_ids.IR;
 
-// ESPN injuryStatus values that may sit in IR. ESPN's default rule, which core's
-// ir_eligibility.py also assumes; UNCONFIRMED for this league until a live slot-21 capture.
+// ESPN injuryStatus values that may sit in IR. Both have been seen in this league's IR, and an
+// ACTIVE player is rejected (HTTP 409 TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED); see
+// docs/espn-reverse-engineering.md "IR moves". QUESTIONABLE/DOUBTFUL/SUSPENSION are untested.
 const IR_ELIGIBLE_INJURY_STATUSES = new Set(["OUT", "INJURY_RESERVE"]);
 
 // `optimized_swaps[].kind`. An entry without one is a bench + promote swap.
@@ -299,7 +300,7 @@ function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
   if (from === targetSlotId) return { moves: [], endState: [], satisfied };
 
   if (kind === IR_KIND) {
-    // Checked here rather than left to ESPN so the failure says why. ESPN still has the final say.
+    // Checked here so the failure names the status. ESPN would reject it anyway with a 409.
     const status = roster.injuryStatusByPlayerId.get(playerId) ?? null;
     if (!IR_ELIGIBLE_INJURY_STATUSES.has(status)) {
       throw new PermanentError(

@@ -242,7 +242,7 @@ describe("submitLineup", () => {
     ).rejects.toThrow(/HTTP 500/);
   });
   it("throws a PermanentError on a 4xx rejection so the message is not requeued", async () => {
-    const context = fakeContext({ details: [{ type: "TRAN_INVALID" }] }, 409);
+    const context = fakeContext({ details: [{ type: "TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED" }] }, 409);
     await expect(
       submitLineup(context, {
         leagueId: "1",
