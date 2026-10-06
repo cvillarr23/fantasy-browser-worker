@@ -317,7 +317,7 @@ describe("submitWaiverClaim", () => {
   });
 
   it("classifies a 4xx (non-429) failure as permanent", async () => {
-    const context = fakeContext({ message: "already claimed" }, 403);
+    const context = fakeContext({ message: "already claimed" }, 409);
     await expect(
       submitWaiverClaim(context, {
         leagueId: "1",
@@ -328,6 +328,60 @@ describe("submitWaiverClaim", () => {
         addPlayerId: "111",
       }),
     ).rejects.toMatchObject({ permanent: true });
+  });
+
+  it.each([401, 403])("retries HTTP %s after the session is refreshed", async (status) => {
+    const context = fakeContext({ message: "authentication required" }, status);
+    const error = await submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 5,
+      addPlayerId: "11122",
+    }).catch((err) => err);
+
+    expect(error.name).toBe("SessionExpiredError");
+    expect(error.permanent).toBeUndefined();
+    expect(error.retryDelayMs).toBeGreaterThan(0);
+    expect(error.message).toContain(`HTTP ${status}`);
+  });
+
+  it("sends an add-only claim and preserves a roster-limit rejection", async () => {
+    // A frontend-derived fixture checks classification without submitting a real league write.
+    const rejection = {
+      details: [{
+        type: "TRAN_ROSTER_LIMIT_EXCEEDED_ONE",
+        message: "Maximum roster size would be exceeded.",
+      }],
+    };
+    const context = fakeContext(rejection, 409);
+
+    await expect(submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 5,
+      addPlayerId: "11122",
+    })).rejects.toMatchObject({
+      name: "PermanentError",
+      permanent: true,
+      message: expect.stringContaining("TRAN_ROSTER_LIMIT_EXCEEDED_ONE"),
+    });
+    expect(context.request.post).toHaveBeenCalledTimes(1);
+    expect(context.request.post).toHaveBeenCalledWith(BASE_URL, {
+      headers: EXPECTED_HEADERS,
+      data: {
+        isLeagueManager: false,
+        teamId: 8,
+        type: "FREEAGENT",
+        memberId: "x",
+        scoringPeriodId: 5,
+        executionType: "EXECUTE",
+        items: [{ playerId: 11122, type: "ADD" }],
+      },
+    });
   });
 });
 
