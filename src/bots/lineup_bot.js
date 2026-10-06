@@ -22,6 +22,13 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * `add_player_id` is elevated into `slot` — so each swap becomes two LINEUP items in one
  * transaction.
  *
+ * A swap may instead carry a `kind` that moves one player into or out of IR (lineupSlotId 21):
+ *
+ *   { "kind": "ir",          "player_id": "...", "slot": "IR" }
+ *   { "kind": "activate_ir", "player_id": "...", "slot": "BENCH" }
+ *
+ * Each is a single LINEUP item with nobody promoted. An entry with no `kind` is `"swap"`.
+ *
  * Executes via ESPN's authenticated REST API rather than by clicking the roster page. See
  * espn_api.js's header for why: the roster DOM carries no per-player identifier whatsoever, only a
  * positional `data-idx`, which WORKER-03 explicitly forbids depending on.
@@ -42,6 +49,18 @@ const DEBUG_DIR =
 // immediately, so this normally exits on the first read.
 const VERIFY_ATTEMPTS = 4;
 const VERIFY_DELAY_MS = 1000;
+
+const BENCH_SLOT_ID = slotConfig.bench_slot_id;
+const IR_SLOT_ID = slotConfig.slot_ids.IR;
+
+// ESPN injuryStatus values that may sit in IR. ESPN's default rule, which core's
+// ir_eligibility.py also assumes; UNCONFIRMED for this league until a live slot-21 capture.
+const IR_ELIGIBLE_INJURY_STATUSES = new Set(["OUT", "INJURY_RESERVE"]);
+
+// `optimized_swaps[].kind`. An entry without one is a bench + promote swap.
+const SWAP_KIND = "swap";
+const IR_KIND = "ir";
+const ACTIVATE_IR_KIND = "activate_ir";
 
 /**
  * Live writes are the default.
@@ -66,7 +85,7 @@ function resolveDryRun() {
  */
 function resolveSlotId(slot) {
   if (slot === undefined || slot === null) {
-    throw new Error("Swap is missing its target `slot`.");
+    throw new PermanentError("Swap is missing its target `slot`.");
   }
 
   const normalized = String(slot).trim().toUpperCase().replace(/\s+/g, "");
@@ -75,7 +94,7 @@ function resolveSlotId(slot) {
   const slotId = slotConfig.slot_ids[normalized] ?? slotConfig.slot_ids[base];
 
   if (slotId === undefined) {
-    throw new Error(
+    throw new PermanentError(
       `Unrecognized lineup slot "${slot}". Known slots: ${Object.keys(slotConfig.slot_ids).join(", ")}`,
     );
   }
@@ -118,6 +137,9 @@ function requirePlayerId(raw, label, index) {
  *    every swap where drop isn't already in the target slot is a net +1 into it — two swaps into a
  *    1-deep FLEX would otherwise be submitted and rejected (or half-applied) by ESPN.
  *
+ * An entry with `kind: "ir"` or `kind: "activate_ir"` moves ONE player (`player_id`) into or out of
+ * IR, with nobody promoted, and goes in the same ROSTER transaction as any swaps.
+ *
  * Everything rejected here is a PermanentError: none of it can come good on redelivery.
  */
 function planSwaps(swaps, roster, log) {
@@ -127,81 +149,51 @@ function planSwaps(swaps, roster, log) {
     );
   }
 
-  const benchSlotId = slotConfig.bench_slot_id;
   const items = [];
   const intended = new Map(); // playerId -> expected lineupSlotId, used by verification
   const seen = new Map(); // playerId -> swap index, to reject a player appearing in two swaps
   const current = new Map(roster.slotByPlayerId); // working copy, mutated as moves are planned
   let skipped = 0;
 
+  const claimPlayer = (id, label, index) => {
+    if (seen.has(id)) {
+      throw new PermanentError(
+        `Swap #${index + 1}: player ${id} (${label}) already appears in swap #${seen.get(id) + 1}. ` +
+          "Chained swaps over the same player are ambiguous; the producer should collapse them.",
+      );
+    }
+    seen.set(id, index);
+  };
+
+  const currentSlotOf = (id, label, index) => {
+    const slotId = current.get(id);
+    if (slotId === undefined) {
+      throw new PermanentError(
+        `Swap #${index + 1}: player ${id} (${label}) is not on team's roster.`,
+      );
+    }
+    return slotId;
+  };
+
   for (const [index, swap] of swaps.entries()) {
-    const dropId = requirePlayerId(
-      swap.drop_player_id,
-      "drop_player_id",
-      index,
-    );
-    const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
-    const targetSlotId = resolveSlotId(swap.slot);
-
-    if (dropId === addId) {
+    const kind = swap.kind ?? SWAP_KIND;
+    const planEntry = PLANNERS_BY_KIND[kind];
+    if (!planEntry) {
       throw new PermanentError(
-        `Swap #${index + 1}: drop_player_id and add_player_id are both ${addId} — a player cannot ` +
-          "be benched and promoted in the same swap.",
+        `Swap #${index + 1}: unknown kind "${kind}". Expected one of: ` +
+          `${Object.keys(PLANNERS_BY_KIND).join(", ")}.`,
       );
     }
-    for (const [id, label] of [
-      [dropId, "drop"],
-      [addId, "add"],
-    ]) {
-      if (seen.has(id)) {
-        throw new PermanentError(
-          `Swap #${index + 1}: player ${id} (${label}) already appears in swap #${seen.get(id) + 1}. ` +
-            "Chained swaps over the same player are ambiguous; the producer should collapse them.",
-        );
-      }
-      seen.set(id, index);
-    }
+    const plan = planEntry(kind, swap, index, roster, { claimPlayer, currentSlotOf });
 
-    // lineup_slots.json is a documented reference; the league's live settings are the truth.
-    const liveCount = roster.slotCounts[String(targetSlotId)];
-    if (!liveCount) {
-      throw new PermanentError(
-        `Swap #${index + 1}: slot "${swap.slot}" resolves to ${describeSlot(targetSlotId)}, which ` +
-          `this league does not field (lineupSlotCounts has ${liveCount === 0 ? "0" : "no entry"} ` +
-          "for it). Producer and league settings disagree.",
-      );
-    }
-
-    const dropFrom = current.get(dropId);
-    const addFrom = current.get(addId);
-    if (dropFrom === undefined) {
-      throw new PermanentError(
-        `Swap #${index + 1}: player ${dropId} (drop) is not on team's roster.`,
-      );
-    }
-    if (addFrom === undefined) {
-      throw new PermanentError(
-        `Swap #${index + 1}: player ${addId} (add) is not on team's roster.`,
-      );
-    }
-
-    // Demote before promoting, so the target slot is free by the time the promotion lands.
-    const moves = [];
-    if (dropFrom !== benchSlotId)
-      moves.push({ id: dropId, from: dropFrom, to: benchSlotId });
-    if (addFrom !== targetSlotId)
-      moves.push({ id: addId, from: addFrom, to: targetSlotId });
-
-    // Both halves already hold — nothing to do. This is what makes a redelivered message a no-op.
-    if (moves.length === 0) {
-      log(
-        `Swap #${index + 1} already satisfied (${addId} in ${describeSlot(targetSlotId)}), skipping.`,
-      );
+    // Every half already holds — nothing to do. This is what makes a redelivered message a no-op.
+    if (plan.moves.length === 0) {
+      log(`Swap #${index + 1} already satisfied (${plan.satisfied}), skipping.`);
       skipped += 1;
       continue;
     }
 
-    for (const move of moves) {
+    for (const move of plan.moves) {
       log(
         `Swap #${index + 1}: ${move.id} ${describeSlot(move.from)} -> ${describeSlot(move.to)}`,
       );
@@ -214,16 +206,126 @@ function planSwaps(swaps, roster, log) {
       current.set(move.id, move.to);
     }
 
-    // Record the full intended end state for both players, including any half that was already
-    // correct, so verification confirms the whole swap rather than only the part that moved.
-    intended.set(addId, targetSlotId);
-    intended.set(dropId, benchSlotId);
+    // Record the full intended end state, including any half that was already correct, so
+    // verification confirms the whole swap rather than only the part that moved.
+    for (const [id, slotId] of plan.endState) intended.set(id, slotId);
   }
 
   assertSlotCapacity(items, current, roster.slotCounts);
 
-  return { items, intended, skipped };
+  // Capacity is checked on the end state, but ESPN may apply items in order. Moving players out of
+  // IR first means an `ir` entry listed before the `activate_ir` that frees its spot never puts two
+  // players in a 1-deep IR partway through. Leaving IR only ever lands in a slot with room (the
+  // check above), so this can't overfill anything else.
+  const leavesIr = (item) => item.fromLineupSlotId === IR_SLOT_ID;
+  const ordered = [...items.filter(leavesIr), ...items.filter((item) => !leavesIr(item))];
+
+  return { items: ordered, intended, skipped };
 }
+
+/** lineup_slots.json is a documented reference; the league's live settings are the truth. */
+function requireFieldedSlot(index, slot, slotId, slotCounts) {
+  const liveCount = slotCounts[String(slotId)];
+  if (!liveCount) {
+    throw new PermanentError(
+      `Swap #${index + 1}: slot "${slot}" resolves to ${describeSlot(slotId)}, which ` +
+        `this league does not field (lineupSlotCounts has ${liveCount === 0 ? "0" : "no entry"} ` +
+        "for it). Producer and league settings disagree.",
+    );
+  }
+}
+
+/** A `kind: "swap"` entry: `drop_player_id` to the bench, `add_player_id` into `slot`. */
+function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
+  const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
+  const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
+  const targetSlotId = resolveSlotId(swap.slot);
+
+  if (dropId === addId) {
+    throw new PermanentError(
+      `Swap #${index + 1}: drop_player_id and add_player_id are both ${addId} — a player cannot ` +
+        "be benched and promoted in the same swap.",
+    );
+  }
+  claimPlayer(dropId, "drop", index);
+  claimPlayer(addId, "add", index);
+  requireFieldedSlot(index, swap.slot, targetSlotId, roster.slotCounts);
+
+  const dropFrom = currentSlotOf(dropId, "drop", index);
+  const addFrom = currentSlotOf(addId, "add", index);
+
+  // Demote before promoting, so the target slot is free by the time the promotion lands.
+  const moves = [];
+  if (dropFrom !== BENCH_SLOT_ID)
+    moves.push({ id: dropId, from: dropFrom, to: BENCH_SLOT_ID });
+  if (addFrom !== targetSlotId)
+    moves.push({ id: addId, from: addFrom, to: targetSlotId });
+
+  return {
+    moves,
+    endState: [
+      [addId, targetSlotId],
+      [dropId, BENCH_SLOT_ID],
+    ],
+    satisfied: `${addId} in ${describeSlot(targetSlotId)}`,
+  };
+}
+
+/**
+ * A `kind: "ir"` entry moves `player_id` from wherever they are into IR; `kind: "activate_ir"`
+ * moves them from IR into `slot` (normally BENCH). A starter moved to IR leaves their starting
+ * slot empty: filling it is the producer's job, as an ordinary swap in a later message.
+ */
+function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
+  const playerId = requirePlayerId(swap.player_id, "player_id", index);
+  const targetSlotId = resolveSlotId(swap.slot);
+
+  if (kind === IR_KIND && targetSlotId !== IR_SLOT_ID) {
+    throw new PermanentError(
+      `Swap #${index + 1}: kind "${IR_KIND}" must target slot IR, got "${swap.slot}".`,
+    );
+  }
+  if (kind === ACTIVATE_IR_KIND && targetSlotId === IR_SLOT_ID) {
+    throw new PermanentError(
+      `Swap #${index + 1}: kind "${ACTIVATE_IR_KIND}" moves a player out of IR, so its slot ` +
+        "cannot be IR.",
+    );
+  }
+  claimPlayer(playerId, "player", index);
+  requireFieldedSlot(index, swap.slot, targetSlotId, roster.slotCounts);
+
+  const from = currentSlotOf(playerId, "player", index);
+  const satisfied = `${playerId} in ${describeSlot(targetSlotId)}`;
+  if (from === targetSlotId) return { moves: [], endState: [], satisfied };
+
+  if (kind === IR_KIND) {
+    // Checked here rather than left to ESPN so the failure says why. ESPN still has the final say.
+    const status = roster.injuryStatusByPlayerId.get(playerId) ?? null;
+    if (!IR_ELIGIBLE_INJURY_STATUSES.has(status)) {
+      throw new PermanentError(
+        `Swap #${index + 1}: player ${playerId} is not IR-eligible (ESPN injuryStatus ` +
+          `${status ?? "not set"}; eligible: ${[...IR_ELIGIBLE_INJURY_STATUSES].join(", ")}).`,
+      );
+    }
+  } else if (from !== IR_SLOT_ID) {
+    throw new PermanentError(
+      `Swap #${index + 1}: player ${playerId} is not in IR (found in ${describeSlot(from)}), so ` +
+        "there is nothing to activate.",
+    );
+  }
+
+  return {
+    moves: [{ id: playerId, from, to: targetSlotId }],
+    endState: [[playerId, targetSlotId]],
+    satisfied,
+  };
+}
+
+const PLANNERS_BY_KIND = {
+  [SWAP_KIND]: planBenchAndPromote,
+  [IR_KIND]: planIrMove,
+  [ACTIVATE_IR_KIND]: planIrMove,
+};
 
 /** Rejects a plan that would overfill any slot it moves into. */
 function assertSlotCapacity(items, finalRoster, slotCounts) {
@@ -458,6 +560,11 @@ async function executeLineupAdjustments(payload) {
       // what the bot believed when it failed.
       roster_slots: roster ? Object.fromEntries(roster.slotByPlayerId) : null,
       slot_counts: roster ? roster.slotCounts : null,
+      // IR eligibility is decided from these, so an IR rejection can be reconstructed. Guarded,
+      // because building this object must not throw and mask the original error.
+      roster_injury_status: roster?.injuryStatusByPlayerId
+        ? Object.fromEntries(roster.injuryStatusByPlayerId)
+        : null,
       planned_items: planned ? planned.items : null,
       err: error,
     });

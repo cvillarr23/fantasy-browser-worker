@@ -15,12 +15,17 @@
 
 const fs = require("fs");
 const path = require("path");
-const { classifyHttpStatusError } = require("../errors");
+const { classifyHttpStatusError, SessionExpiredError } = require("../errors");
 const { isEnabled: isDebugCaptureEnabled } = require("./debug_capture");
 const { logger } = require("../telemetry/logger");
 
 const READS_HOST = "https://lm-api-reads.fantasy.espn.com";
 const WRITES_HOST = "https://lm-api-writes.fantasy.espn.com";
+
+// ESPN answers an expired or rejected espn_s2/SWID pair with one of these. The request itself is
+// fine, so it is retried once the session is refreshed, never dropped as a PermanentError.
+const HTTP_UNAUTHORIZED = 401;
+const HTTP_FORBIDDEN = 403;
 
 const WRITE_CAPTURE_DIR =
   process.env.DEBUG_OUTPUT_DIR ||
@@ -117,6 +122,9 @@ function parseTeamRoster(body, { leagueId, teamId }) {
   // carries no id at all, so its name is the only way to find it.
   const nameByPlayerId = new Map();
   const positionByPlayerId = new Map();
+  // playerId -> ESPN's injuryStatus ("ACTIVE", "OUT", "INJURY_RESERVE", ...), null when omitted.
+  // lineup_bot.js checks it before an IR move: ESPN, not Sleeper, decides IR eligibility.
+  const injuryStatusByPlayerId = new Map();
   for (const entry of team.roster?.entries || []) {
     slotByPlayerId.set(String(entry.playerId), entry.lineupSlotId);
     positionByPlayerId.set(
@@ -127,12 +135,17 @@ function parseTeamRoster(body, { leagueId, teamId }) {
       String(entry.playerId),
       entry.playerPoolEntry?.player?.fullName ?? null,
     );
+    injuryStatusByPlayerId.set(
+      String(entry.playerId),
+      entry.playerPoolEntry?.player?.injuryStatus ?? null,
+    );
   }
 
   return {
     slotByPlayerId,
     nameByPlayerId,
     positionByPlayerId,
+    injuryStatusByPlayerId,
     scoringPeriodId: body.scoringPeriodId,
     slotCounts: body.settings?.rosterSettings?.lineupSlotCounts || {},
     entryCount: slotByPlayerId.size,
@@ -267,6 +280,11 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
  * was already correct). The real request also carried a `?platformVersion=<hash>` query param — a
  * frontend build id that appears unstable across ESPN deploys, so it's deliberately not replicated
  * here; the capture succeeded without evidence the server requires it from a non-browser client.
+ *
+ * A 4xx rejection (except 429) is a PermanentError, same heuristic as submitWaiverClaim below: an
+ * ineligible IR move or an illegal slot keeps failing identically, and requeuing it would starve
+ * every consumer under connection.js's prefetch(1). 401/403 are the exception: they mean the
+ * session, not the request, is bad, so they raise SessionExpiredError and retry after a delay.
  */
 async function submitLineup(
   context,
@@ -307,9 +325,12 @@ async function submitLineup(
   });
 
   if (!response.ok()) {
-    throw new Error(
-      `[ESPN API] Lineup submit failed with HTTP ${response.status()} — ${text.slice(0, 500)}`,
-    );
+    const status = response.status();
+    const message = `[ESPN API] Lineup submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
+    if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
+      throw new SessionExpiredError(message);
+    }
+    throw classifyHttpStatusError(status, message);
   }
 
   return text ? JSON.parse(text) : {};
