@@ -281,6 +281,9 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
  * frontend build id that appears unstable across ESPN deploys, so it's deliberately not replicated
  * here; the capture succeeded without evidence the server requires it from a non-browser client.
  *
+ * IR moves use the same body with one item into or out of lineupSlotId 21, verified live on
+ * 2026-10-06 (moved and reverted). See docs/espn-reverse-engineering.md "IR moves".
+ *
  * A 4xx rejection (except 429) is a PermanentError, same heuristic as submitWaiverClaim below: an
  * ineligible IR move or an illegal slot keeps failing identically, and requeuing it would starve
  * every consumer under connection.js's prefetch(1). 401/403 are the exception: they mean the

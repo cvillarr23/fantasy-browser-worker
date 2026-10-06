@@ -43,7 +43,7 @@ describe("recordApiTraffic", () => {
     page.emit("request", request);
     page.emit(
       "response",
-      fakeResponse(request, 409, '{"details":[{"type":"TRAN_PLAYER_NOT_IR_ELIGIBLE"}]}'),
+      fakeResponse(request, 409, '{"details":[{"type":"TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED"}]}'),
     );
     await new Promise(setImmediate);
 
@@ -54,7 +54,7 @@ describe("recordApiTraffic", () => {
       method: "POST",
       url: TRANSACTIONS_URL,
       status: 409,
-      body: '{"details":[{"type":"TRAN_PLAYER_NOT_IR_ELIGIBLE"}]}',
+      body: '{"details":[{"type":"TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED"}]}',
     });
   });
 

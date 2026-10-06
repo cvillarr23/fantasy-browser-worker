@@ -10,7 +10,10 @@
     "lineupSlotId 2, which simply has 2 open positions. Strip the suffix before mapping.",
     "",
     "slot_counts is this league's specific roster shape and is re-read from the API at runtime;",
-    "the copy here is a documented reference/fallback, not the source of truth."
+    "the copy here is a documented reference/fallback, not the source of truth.",
+    "",
+    "IR (21) was confirmed as a write target on 2026-10-06: a ROSTER LINEUP move 20 -> 21 and",
+    "back executed live. See docs/espn-reverse-engineering.md 'IR moves'."
   ],
 
   "slot_ids": {
