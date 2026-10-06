@@ -340,11 +340,15 @@ async function fetchRosterDeficits({ season, week }) {
  * internal 12483 is Jack Bech, ESPN 12483 is Matthew Stafford. So forwarding them untranslated
  * would silently target real, different players. See core-pipeline's README "id-space contract".
  *
- * core-pipeline exposes the players.espn_id crosswalk only through /v1/players/search (by name),
- * so this looks the name up via /summary, searches it, and takes the result whose player_id is
- * exactly ours. Fails closed with a PermanentError when the id is unknown, missing from the
- * (limited) search results, or has a null espn_id. The crosswalk covers about 82% of players and
- * no K or D/ST at all, so a counter involving one can't be staged until core-pipeline fills that in.
+ * /v1/players/{id}/summary carries players.espn_id. A null there means core-pipeline has no
+ * resolved ESPN id for that player (a few unrostered kickers, and some fringe skill players), so
+ * this fails closed with a PermanentError, as it does for an unknown id. A D/ST's ESPN id is
+ * negative (-(16000 + proTeamId), e.g. Eagles -16021), which requirePlayerId accepts.
+ *
+ * A /summary with no espn_id field at all comes from a core-pipeline deploy that predates it
+ * (core-pipeline#214). Only then does this fall back to searching the name and taking the result
+ * whose player_id is exactly ours, which also fails closed when the player falls outside the
+ * (limited) search results. Remove the fallback once that deploy is everywhere.
  */
 async function resolveEspnPlayerIds(internalIds) {
   const espnIds = [];
@@ -359,7 +363,12 @@ async function resolveEspnPlayerIds(internalIds) {
           `(GET /v1/players/${internalId}/summary -> HTTP ${summaryResponse.status}).`,
       );
     }
-    const { name } = await summaryResponse.json();
+    const summary = await summaryResponse.json();
+    const { name } = summary;
+    if (Object.hasOwn(summary, "espn_id")) {
+      espnIds.push(requireEspnId(internalId, name, summary.espn_id));
+      continue;
+    }
 
     const searchUrl = `${CORE_PIPELINE_URL}/v1/players/search?q=${encodeURIComponent(name)}`;
     const searchResponse = await fetch(searchUrl, {
@@ -373,15 +382,19 @@ async function resolveEspnPlayerIds(internalIds) {
     const match = (await searchResponse.json()).find(
       (result) => String(result.player_id) === String(internalId),
     );
-    if (!match || match.espn_id === null || match.espn_id === undefined || match.espn_id === "") {
-      throw new PermanentError(
-        `[Trade Negotiator] Internal player ${internalId} ("${name}") has no ESPN id in ` +
-          "core-pipeline's crosswalk, so the counter can't be staged.",
-      );
-    }
-    espnIds.push(String(match.espn_id));
+    espnIds.push(requireEspnId(internalId, name, match?.espn_id));
   }
   return espnIds;
+}
+
+function requireEspnId(internalId, name, espnId) {
+  if (espnId === null || espnId === undefined || espnId === "") {
+    throw new PermanentError(
+      `[Trade Negotiator] Internal player ${internalId} ("${name}") has no ESPN id in ` +
+        "core-pipeline's crosswalk, so the counter can't be staged.",
+    );
+  }
+  return String(espnId);
 }
 
 /** Builds the system prompt for negotiateTradeProposal's completeWithFallback call.
