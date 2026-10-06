@@ -31,6 +31,11 @@ const { logger } = require("../telemetry/logger");
  * then move a player and hit Save in the opened browser. The captured body goes to
  * recon-output/lineup-xhr.jsonl — diff it against what espn_api.js's submitLineup() sends.
  *
+ * IR (lineupSlotId 21) moves: the snapshot lists each player's slot and ESPN injuryStatus. Pick a
+ * BENCH player whose status is OUT or INJURY_RESERVE, so moving them back to the bench is an exact
+ * revert. Run --watch-save and move them to IR, then back to the bench. lineup-xhr.jsonl records
+ * both requests and ESPN's responses, including the rejection body for an ineligible player.
+ *
  * Usage:
  *   node src/bots/lineup_recon.js               # DOM + selector probe + API snapshot
  *   node src/bots/lineup_recon.js --watch-save  # also record XHR while you save a lineup by hand
@@ -101,23 +106,68 @@ async function probeSelectors(page) {
   return results;
 }
 
-/** Records every espn.com XHR/fetch, which is how the save request gets captured. */
+function isCapturedWrite(request) {
+  if (!/espn\.com/i.test(request.url())) return false;
+  if (!["xhr", "fetch"].includes(request.resourceType())) return false;
+  return request.method() !== "GET"; // Only writes are interesting here.
+}
+
+/**
+ * Records every espn.com XHR/fetch write and its response, which is how the save request gets
+ * captured. The response matters as much as the request: ESPN's rejection body (`details[].type`,
+ * e.g. for an IR-ineligible player) is only visible there.
+ */
 function recordApiTraffic(page) {
   page.on("request", (request) => {
-    const url = request.url();
-    if (!/espn\.com/i.test(url)) return;
-    if (!["xhr", "fetch"].includes(request.resourceType())) return;
-    if (request.method() === "GET") return; // Only writes are interesting here.
+    if (!isCapturedWrite(request)) return;
 
     appendJsonLine("lineup-xhr.jsonl", {
       event: "request",
       method: request.method(),
-      url,
+      url: request.url(),
       headers: request.headers(),
       body: request.postData(),
     });
-    logger.info(`[Lineup Recon] Captured ${request.method()} ${url}`);
+    logger.info(`[Lineup Recon] Captured ${request.method()} ${request.url()}`);
   });
+
+  page.on("response", async (response) => {
+    const request = response.request();
+    if (!isCapturedWrite(request)) return;
+
+    let body;
+    try {
+      body = await response.text();
+    } catch (err) {
+      body = `<unreadable: ${err.message}>`;
+    }
+    appendJsonLine("lineup-xhr.jsonl", {
+      event: "response",
+      method: request.method(),
+      url: response.url(),
+      status: response.status(),
+      body,
+    });
+    logger.info(`[Lineup Recon] Captured HTTP ${response.status()} for ${request.method()} ${response.url()}`);
+  });
+}
+
+/** The roster snapshot written to lineup-roster-snapshot.json, with what's needed to pick an IR test player. */
+function summarizeRoster(roster) {
+  return {
+    entryCount: roster.entryCount,
+    scoringPeriodId: roster.scoringPeriodId,
+    slotCounts: roster.slotCounts,
+    lineupLocked: roster.lineupLocked,
+    rosterLocked: roster.rosterLocked,
+    slotByPlayerId: Object.fromEntries(roster.slotByPlayerId),
+    players: [...roster.slotByPlayerId].map(([playerId, lineupSlotId]) => ({
+      playerId,
+      name: roster.nameByPlayerId.get(playerId) ?? null,
+      lineupSlotId,
+      injuryStatus: roster.injuryStatusByPlayerId.get(playerId) ?? null,
+    })),
+  };
 }
 
 async function runLineupRecon() {
@@ -169,14 +219,7 @@ async function runLineupRecon() {
       seasonId: SEASON_ID,
       teamId: TEAM_ID,
     });
-    writeJson("lineup-roster-snapshot.json", {
-      entryCount: roster.entryCount,
-      scoringPeriodId: roster.scoringPeriodId,
-      slotCounts: roster.slotCounts,
-      lineupLocked: roster.lineupLocked,
-      rosterLocked: roster.rosterLocked,
-      slotByPlayerId: Object.fromEntries(roster.slotByPlayerId),
-    });
+    writeJson("lineup-roster-snapshot.json", summarizeRoster(roster));
     logger.info(
       `[Lineup Recon] Roster: ${roster.entryCount} players, scoringPeriodId ${roster.scoringPeriodId}, ` +
         `locked=${roster.lineupLocked || roster.rosterLocked}`,
@@ -192,7 +235,7 @@ async function runLineupRecon() {
     if (watchSave) {
       logger.info(
         "\n[Lineup Recon] --watch-save active. In the browser window, move a player and click Save.\n" +
-          "Every non-GET espn.com XHR is being written to recon-output/lineup-xhr.jsonl.",
+          "Every non-GET espn.com XHR and its response is being written to recon-output/lineup-xhr.jsonl.",
       );
       await waitForEnter(
         "[Lineup Recon] Press Enter once you've saved a lineup change... ",
@@ -215,4 +258,10 @@ if (require.main === module) {
   runLineupRecon();
 }
 
-module.exports = { runLineupRecon, probeSelectors, CANDIDATE_SELECTORS };
+module.exports = {
+  runLineupRecon,
+  probeSelectors,
+  recordApiTraffic,
+  summarizeRoster,
+  CANDIDATE_SELECTORS,
+};
