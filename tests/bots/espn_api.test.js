@@ -118,6 +118,43 @@ describe("D/ST negative player ids", () => {
     expect(roster.nameByPlayerId.get("4239996")).toBeNull();
   });
 
+  it("readRoster exposes each rostered player's ESPN injuryStatus, null when ESPN omits it", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          json: async () => ({
+            scoringPeriodId: 4,
+            teams: [
+              {
+                id: 8,
+                roster: {
+                  entries: [
+                    {
+                      playerId: 4239996,
+                      lineupSlotId: 20,
+                      playerPoolEntry: { player: { injuryStatus: "OUT" } },
+                    },
+                    { playerId: 3916148, lineupSlotId: 23 },
+                  ],
+                },
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const roster = await readRoster(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+    });
+
+    expect(roster.injuryStatusByPlayerId.get("4239996")).toBe("OUT");
+    expect(roster.injuryStatusByPlayerId.get("3916148")).toBeNull();
+  });
+
   it("readRosters returns several teams from a single league read", async () => {
     const get = jest.fn().mockResolvedValue({
       ok: () => true,
@@ -203,6 +240,33 @@ describe("submitLineup", () => {
         items: [],
       }),
     ).rejects.toThrow(/HTTP 500/);
+  });
+  it("throws a PermanentError on a 4xx rejection so the message is not requeued", async () => {
+    const context = fakeContext({ details: [{ type: "TRAN_INVALID" }] }, 409);
+    await expect(
+      submitLineup(context, {
+        leagueId: "1",
+        seasonId: "2026",
+        teamId: "8",
+        memberId: "x",
+        scoringPeriodId: 1,
+        items: [],
+      }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/HTTP 409/) });
+  });
+
+  it("keeps a 429 or 5xx retriable", async () => {
+    for (const status of [429, 503]) {
+      const error = await submitLineup(fakeContext({}, status), {
+        leagueId: "1",
+        seasonId: "2026",
+        teamId: "8",
+        memberId: "x",
+        scoringPeriodId: 1,
+        items: [],
+      }).catch((e) => e);
+      expect(error.permanent).toBeUndefined();
+    }
   });
 });
 
