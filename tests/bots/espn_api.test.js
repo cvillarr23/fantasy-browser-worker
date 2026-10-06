@@ -16,7 +16,12 @@ const {
   buildTradeProposalBody,
   readPendingTrades,
   readLeagueChat,
+  readTradeHistory,
+  buildTradeResponseBody,
+  submitTradeResponse,
+  VERIFIED_TRADE_RESPONSE_ACTIONS,
 } = require("../../src/bots/espn_api");
+const { SessionExpiredError } = require("../../src/errors");
 
 afterAll(() => {
   fs.rmSync(MODULE_TMP_DIR, { recursive: true, force: true });
@@ -620,6 +625,54 @@ describe("readPendingTrades", () => {
     );
   });
 
+  it("passes through expiry, related-transaction and pending fields only when ESPN sends them", async () => {
+    const context = fakeGetContext({
+      teams: LEAGUE_TEAMS,
+      pendingTransactions: [
+        pendingTrade({ expirationDate: 1791206400000, relatedTransactionId: "trade-0", isPending: true }),
+      ],
+    });
+
+    const [trade] = (await readPendingTrades(context, ids)).trades;
+
+    expect(trade).toMatchObject({
+      expirationDate: 1791206400000,
+      relatedTransactionId: "trade-0",
+      isPending: true,
+    });
+    const [bare] = (await readPendingTrades(fakeGetContext({ teams: LEAGUE_TEAMS, transactions: [pendingTrade()] }), ids)).trades;
+    expect("expirationDate" in bare).toBe(false);
+    expect("relatedTransactionId" in bare).toBe(false);
+  });
+
+  it("keeps draft-pick and FAAB items without inventing a player id", async () => {
+    const context = fakeGetContext({
+      teams: LEAGUE_TEAMS,
+      transactions: [
+        pendingTrade({
+          items: [
+            { playerId: 4429795, type: "TRADE", fromTeamId: 8, toTeamId: 3 },
+            { type: "ACQUISITION_BUDGET_TRADE", acquisitionBudget: 15, fromTeamId: 3, toTeamId: 8 },
+            { type: "DRAFT_TRADE", overallPickNumber: 27, fromTeamId: 3, toTeamId: 8 },
+          ],
+        }),
+      ],
+    });
+
+    const [trade] = (await readPendingTrades(context, ids)).trades;
+
+    expect(trade.items.slice(1)).toEqual([
+      { playerId: null, playerName: null, type: "ACQUISITION_BUDGET_TRADE", fromTeamId: "3", toTeamId: "8", acquisitionBudget: 15 },
+      { playerId: null, playerName: null, type: "DRAFT_TRADE", fromTeamId: "3", toTeamId: "8", overallPickNumber: 27 },
+    ]);
+  });
+
+  it.each([401, 403])("raises SessionExpiredError on HTTP %i so the read retries after a refresh", async (status) => {
+    await expect(readPendingTrades(fakeGetContext({}, status), ids)).rejects.toBeInstanceOf(
+      SessionExpiredError,
+    );
+  });
+
   it("keeps the raw transactions when any are present, since the populated shape is unverified", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "espn-pending-"));
     const originalDir = process.env.DEBUG_OUTPUT_DIR;
@@ -712,5 +765,130 @@ describe("readLeagueChat", () => {
     await expect(readLeagueChat(fakeGetContext({}, 500), ids)).rejects.toThrow(
       /League chat read failed with HTTP 500/,
     );
+  });
+});
+
+describe("readTradeHistory", () => {
+  const ids = { leagueId: "1248158344", seasonId: "2026" };
+
+  it("reads mTransactions2 filtered to trade transaction types", async () => {
+    const context = fakeGetContext({ transactions: [] });
+
+    await readTradeHistory(context, { ...ids, scoringPeriodId: 5 });
+
+    const [url, options] = context.request.get.mock.calls[0];
+    expect(url).toBe(`${LEAGUE_READ_URL}?view=mTransactions2&scoringPeriodId=5`);
+    const filter = JSON.parse(options.headers["x-fantasy-filter"]);
+    expect(filter.transactions.filterType.value).toEqual(
+      expect.arrayContaining(["TRADE_PROPOSAL", "TRADE_ACCEPT", "TRADE_DECLINE"]),
+    );
+  });
+
+  it("omits the scoring period when none is given and returns the trade rows", async () => {
+    const row = {
+      id: "t-9",
+      type: "TRADE_DECLINE",
+      status: "EXECUTED",
+      relatedTransactionId: "trade-1",
+      teamId: 8,
+      items: [],
+    };
+    const context = fakeGetContext({ transactions: [row, { id: "w", type: "WAIVER" }] });
+
+    const rows = await readTradeHistory(context, ids);
+
+    expect(context.request.get.mock.calls[0][0]).toBe(`${LEAGUE_READ_URL}?view=mTransactions2`);
+    expect(rows).toEqual([row]);
+  });
+
+  it("returns [] when ESPN omits the transactions key", async () => {
+    expect(await readTradeHistory(fakeGetContext({}), ids)).toEqual([]);
+  });
+
+  it("throws SessionExpiredError on 401 and a plain error on 5xx", async () => {
+    await expect(readTradeHistory(fakeGetContext({}, 401), ids)).rejects.toBeInstanceOf(SessionExpiredError);
+    await expect(readTradeHistory(fakeGetContext({}, 502), ids)).rejects.toThrow(/Trade history read failed with HTTP 502/);
+  });
+});
+
+describe("trade responses", () => {
+  const base = {
+    teamId: "8",
+    memberId: "{SWID}",
+    scoringPeriodId: 5,
+    transactionId: "trade-1",
+  };
+
+  it("ships with no verified response actions, so nothing can be sent yet", () => {
+    expect(VERIFIED_TRADE_RESPONSE_ACTIONS).toEqual([]);
+    expect(Object.isFrozen(VERIFIED_TRADE_RESPONSE_ACTIONS)).toBe(true);
+  });
+
+  it("builds an accept on the shared envelope, related to the offer", () => {
+    expect(buildTradeResponseBody({ ...base, action: "accept" })).toEqual({
+      isLeagueManager: false,
+      teamId: 8,
+      type: "TRADE_ACCEPT",
+      memberId: "{SWID}",
+      scoringPeriodId: 5,
+      executionType: "EXECUTE",
+      relatedTransactionId: "trade-1",
+      items: [],
+    });
+  });
+
+  it("builds a decline that carries the note, empty when there is none", () => {
+    expect(buildTradeResponseBody({ ...base, action: "decline" })).toMatchObject({
+      type: "TRADE_DECLINE",
+      comment: "",
+    });
+    expect(buildTradeResponseBody({ ...base, action: "decline", comment: "No thanks" }).comment).toBe(
+      "No thanks",
+    );
+  });
+
+  it("refuses any other action, including a veto", () => {
+    expect(() => buildTradeResponseBody({ ...base, action: "veto" })).toThrow(/Unsupported trade response/);
+  });
+
+  it("posts the body, captures it, and returns ESPN's parsed response", async () => {
+    const context = fakeContext({ id: "resp-1" });
+
+    const result = await submitTradeResponse(context, {
+      ...base,
+      leagueId: "1248158344",
+      seasonId: "2026",
+      action: "decline",
+      trackingId: "t-1",
+    });
+
+    expect(result).toEqual({ id: "resp-1" });
+    const [url, options] = context.request.post.mock.calls[0];
+    expect(url).toBe(BASE_URL);
+    expect(options.data.type).toBe("TRADE_DECLINE");
+    expect(options.headers["x-fantasy-platform"]).toBe("espn-fantasy-web");
+  });
+
+  it("raises SessionExpiredError on 401/403 and a PermanentError carrying ESPN's details on other 4xx", async () => {
+    const args = { ...base, leagueId: "1248158344", seasonId: "2026", action: "accept" };
+    await expect(submitTradeResponse(fakeContext({}, 403), args)).rejects.toBeInstanceOf(SessionExpiredError);
+
+    const rejected = submitTradeResponse(
+      fakeContext({ details: [{ type: "TRAN_ROSTER_LIMIT_EXCEEDED_ONE", message: "drop needed" }] }, 409),
+      args,
+    );
+    await expect(rejected).rejects.toMatchObject({
+      permanent: true,
+      status: 409,
+      details: [{ type: "TRAN_ROSTER_LIMIT_EXCEEDED_ONE", message: "drop needed" }],
+    });
+  });
+
+  it("marks a 5xx as an unknown outcome rather than a rejection", async () => {
+    const args = { ...base, leagueId: "1248158344", seasonId: "2026", action: "accept" };
+    await expect(submitTradeResponse(fakeContext({}, 503), args)).rejects.toMatchObject({
+      status: 503,
+      outcomeUnknown: true,
+    });
   });
 });

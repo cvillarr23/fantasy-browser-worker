@@ -177,6 +177,7 @@ async function initializeQueueConsumer(
     "llm_requests",
     "trade_submissions",
     "trade_proposals",
+    "trade_responses",
   ];
   for (const queue of targetQueues) {
     await ensureQueue(channel, queue);

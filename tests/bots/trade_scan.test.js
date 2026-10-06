@@ -2,7 +2,7 @@ jest.mock("../../src/bots/trade_proposal", () => ({
   generateTradeProposal: jest.fn(),
 }));
 jest.mock("../../src/telemetry/logger", () => ({
-  logger: { info: jest.fn(), error: jest.fn() },
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 const {
   resolvePeriod,
@@ -21,6 +21,7 @@ beforeEach(() => {
     readState: jest.fn().mockResolvedValue(state),
     claim: jest.fn().mockResolvedValue(true),
     generate: jest.fn().mockResolvedValue({ status: "no_target" }),
+    refreshInbox: jest.fn().mockResolvedValue({ status: "refreshed", openOfferTeamIds: [] }),
     pool: {},
   };
 });
@@ -206,4 +207,26 @@ test("NFL week metadata changes do not bypass the daily claim key", async () => 
   deps.readState.mockResolvedValue({ ...state, week: 5 });
   const second = await runTradeScan({}, deps);
   expect(second.scanKey).toBe(first.scanKey);
+});
+test("refreshes the inbox before generating and skips teams with an offer to us", async () => {
+  deps.refreshInbox.mockResolvedValue({ status: "refreshed", openOfferTeamIds: ["3", "5"] });
+  await runTradeScan({ stage: true, trackingId: "scan" }, deps);
+  expect(deps.refreshInbox).toHaveBeenCalledWith({ persist: true });
+  expect(deps.generate).toHaveBeenCalledWith({
+    season: 2026,
+    week: 4,
+    tracking_id: "scan",
+    exclude_team_ids: ["3", "5"],
+  });
+});
+test("an inbox refresh failure does not stop the scan", async () => {
+  deps.refreshInbox.mockRejectedValue(new Error("ESPN down"));
+  await runTradeScan({ stage: true, trackingId: "scan" }, deps);
+  expect(deps.generate).toHaveBeenCalledWith({ season: 2026, week: 4, tracking_id: "scan" });
+});
+test("a duplicate or check-only scan does not refresh the inbox", async () => {
+  await runTradeScan({}, deps);
+  deps.claim.mockResolvedValue(false);
+  await runTradeScan({ stage: true }, deps);
+  expect(deps.refreshInbox).not.toHaveBeenCalled();
 });

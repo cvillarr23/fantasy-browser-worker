@@ -119,6 +119,17 @@ test("no deficit avoids browser and LLM work", async () => {
   expect(createSessionFromStoredState).not.toHaveBeenCalled();
   expect(completeWithFallback).not.toHaveBeenCalled();
 });
+test("skips teams the scan excludes, such as one with an unanswered offer to us", async () => {
+  expect(await generateTradeProposal({ ...payload, exclude_team_ids: ["2"] })).toEqual({
+    status: "no_target",
+  });
+  expect(createSessionFromStoredState).not.toHaveBeenCalled();
+});
+test("rejects a malformed exclusion list", async () => {
+  await expect(generateTradeProposal({ ...payload, exclude_team_ids: "2" })).rejects.toMatchObject({
+    permanent: true,
+  });
+});
 test("model can decline an offer", async () => {
   offer = null;
   await expect(generateTradeProposal(payload)).resolves.toMatchObject({

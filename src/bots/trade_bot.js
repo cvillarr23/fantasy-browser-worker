@@ -14,12 +14,7 @@ const { recordTradeNegotiation } = require("../db/execution_log");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
-// Same cluster-DNS-default convention as OLLAMA_URL in src/lib/llm_client.js — verified against
-// fantasy-infra's base/core-pipeline/fastapi-service.yaml (ClusterIP service
-// "fantasy-core-pipeline", port 8000, default namespace).
-const CORE_PIPELINE_URL =
-  process.env.CORE_PIPELINE_URL ||
-  "http://fantasy-core-pipeline.default.svc.cluster.local:8000";
+const { CORE_PIPELINE_URL } = require("../lib/core_pipeline");
 
 const DEFAULT_EVALUATE_TIMEOUT_MS = 10000;
 

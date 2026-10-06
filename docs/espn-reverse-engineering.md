@@ -692,3 +692,47 @@ The names below are the minified bundle's, so they will change between builds.
   ROSTER/FREEAGENT/WAIVER rows, apparently scoped to the current scoring period.
 - Neither has been seen holding one of *our* `TRADE_PROPOSAL`s yet, so the exact `status` string
   for an open offer (likely `PENDING`) is unconfirmed.
+
+## Responding to incoming trades: still unverified
+
+Nothing has accepted or declined a trade yet, so this section records what the
+code assumes and how to confirm it. `trade_response.js` will not send either
+action until the action is listed in `espn_api.js`'s
+`VERIFIED_TRADE_RESPONSE_ACTIONS` and `PENDING_TRADE_SHAPE_VERIFIED` is set.
+
+- **Request (hypothesis).** `buildTradeResponseBody` POSTs to the same
+  `transactions/` endpoint with the `submitLineup` envelope. It sends
+  `type: "TRADE_ACCEPT"` or `"TRADE_DECLINE"`, `relatedTransactionId` set to the
+  offer's id, `items: []`, and `comment` on a decline only. The types appear in
+  the frontend bundle, and `comment` is sent with `TRADE_DECLINE` (see "Trade
+  proposals" above). The field that points at the offer, and whether the
+  offer's items must be repeated, are guesses.
+- **Pending shape.** `readPendingTrades` passes `expirationDate`,
+  `relatedTransactionId` and `isPending` through when present. It keeps
+  draft-pick (`DRAFT_TRADE`, `overallPickNumber`) and FAAB
+  (`ACQUISITION_BUDGET_TRADE`, `acquisitionBudget`) items with `playerId: null`.
+  The inbox records anything unexpected in `parse_issues` instead of guessing:
+  - a status other than the presumed `PENDING`;
+  - a missing `expirationDate`;
+  - more than two teams;
+  - an unknown item type.
+- **History.** `readTradeHistory` reads `view=mTransactions2` with a TRADE_*
+  `x-fantasy-filter`. The inbox uses it to learn why an offer left the pending
+  list: a `TRADE_ACCEPT`, `TRADE_DECLINE`, `TRADE_VETO` or counter
+  `TRADE_PROPOSAL` whose `relatedTransactionId` names the offer, or a
+  `CANCELED` status on the offer itself. None of these rows has been seen yet.
+
+How to confirm, read-only first:
+
+1. Static analysis of the current trade bundle, with the write guard on, as in
+   "Trade proposals". Find the accept and decline builders and the pending-trade
+   status strings.
+2. Read `mTransactions2` for prior seasons with the TRADE_* filter, per
+   `scoringPeriodId`, to see real trade rows and how they link.
+3. Leave `trade_inbox.js --refresh` running. The first real incoming offer is
+   appended to `espn-pending-transactions.jsonl`. Turn it into a fixture (SWIDs
+   redacted) and set `PENDING_TRADE_SHAPE_VERIFIED` in the same change.
+4. The wire shape of a response can only come from a real one. The user clicks
+   Accept or Decline themselves in a headed session while the request is
+   recorded, the same pattern as `lineup_recon.js --watch-save`. The bot never
+   clicks, and doing this needs explicit approval each time.
