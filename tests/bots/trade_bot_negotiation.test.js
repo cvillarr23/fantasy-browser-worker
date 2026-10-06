@@ -42,26 +42,12 @@ const CROSSWALK = {
   PHI: { name: "Philadelphia Eagles", espn_id: "-16021" },
 };
 
-// false simulates a core-pipeline deploy whose /summary predates its espn_id field.
-let summaryHasEspnId;
-
 function routeFetch(url) {
   const summary = url.match(/\/v1\/players\/([^/]+)\/summary$/);
   if (summary) {
     const entry = CROSSWALK[decodeURIComponent(summary[1])];
     if (!entry) return jsonResponse({ detail: "not found" }, 404);
-    const body = { player_id: summary[1], name: entry.name };
-    if (summaryHasEspnId) body.espn_id = entry.espn_id;
-    return jsonResponse(body);
-  }
-  const search = url.match(/\/v1\/players\/search\?q=(.*)$/);
-  if (search) {
-    const q = decodeURIComponent(search[1]);
-    return jsonResponse(
-      Object.entries(CROSSWALK)
-        .filter(([, e]) => e.name.includes(q))
-        .map(([player_id, e]) => ({ player_id, espn_id: e.espn_id, name: e.name })),
-    );
+    return jsonResponse({ player_id: summary[1], name: entry.name, espn_id: entry.espn_id });
   }
   return jsonResponse({ delta_vorp: 1.5 });
 }
@@ -70,7 +56,6 @@ beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   process.env.ESPN_LEAGUE_ID = "1248158344";
   process.env.ESPN_TEAM_ID = "8";
-  summaryHasEspnId = true;
 
   session = {
     page: { goto: jest.fn(async () => {}) },
@@ -154,7 +139,7 @@ describe("negotiateTradeProposal -> trade builder", () => {
     expect(session.browser.close).toHaveBeenCalled();
   });
 
-  it("takes the ESPN id from /summary alone, without a name search", async () => {
+  it("takes the ESPN id from /summary alone, never a name search", async () => {
     submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
 
     await negotiateTradeProposal(payload);
@@ -175,20 +160,6 @@ describe("negotiateTradeProposal -> trade builder", () => {
     await negotiateTradeProposal(payload);
 
     expect(submitTradeOffer.mock.calls[0][0].incomingPlayerIds).toEqual(["-16021"]);
-  });
-
-  it("falls back to the name search when /summary has no espn_id field (older core-pipeline)", async () => {
-    summaryHasEspnId = false;
-    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
-
-    await negotiateTradeProposal(payload);
-
-    const urls = global.fetch.mock.calls.map(([url]) => url);
-    expect(urls.some((url) => url.includes("/v1/players/search"))).toBe(true);
-    expect(submitTradeOffer.mock.calls[0][0]).toMatchObject({
-      incomingPlayerIds: ["4685720"],
-      outgoingPlayerIds: ["3139477"],
-    });
   });
 
   it("stages nothing when any player has no ESPN id, recording why", async () => {

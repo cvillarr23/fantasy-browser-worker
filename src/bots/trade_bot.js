@@ -344,11 +344,6 @@ async function fetchRosterDeficits({ season, week }) {
  * resolved ESPN id for that player (a few unrostered kickers, and some fringe skill players), so
  * this fails closed with a PermanentError, as it does for an unknown id. A D/ST's ESPN id is
  * negative (-(16000 + proTeamId), e.g. Eagles -16021), which requirePlayerId accepts.
- *
- * A /summary with no espn_id field at all comes from a core-pipeline deploy that predates it
- * (core-pipeline#214). Only then does this fall back to searching the name and taking the result
- * whose player_id is exactly ours, which also fails closed when the player falls outside the
- * (limited) search results. Remove the fallback once that deploy is everywhere.
  */
 async function resolveEspnPlayerIds(internalIds) {
   const espnIds = [];
@@ -363,26 +358,8 @@ async function resolveEspnPlayerIds(internalIds) {
           `(GET /v1/players/${internalId}/summary -> HTTP ${summaryResponse.status}).`,
       );
     }
-    const summary = await summaryResponse.json();
-    const { name } = summary;
-    if (Object.hasOwn(summary, "espn_id")) {
-      espnIds.push(requireEspnId(internalId, name, summary.espn_id));
-      continue;
-    }
-
-    const searchUrl = `${CORE_PIPELINE_URL}/v1/players/search?q=${encodeURIComponent(name)}`;
-    const searchResponse = await fetch(searchUrl, {
-      signal: AbortSignal.timeout(evaluateTimeoutMs()),
-    });
-    if (!searchResponse.ok) {
-      throw new Error(
-        `[Trade Negotiator] Player search for "${name}" failed with HTTP ${searchResponse.status}.`,
-      );
-    }
-    const match = (await searchResponse.json()).find(
-      (result) => String(result.player_id) === String(internalId),
-    );
-    espnIds.push(requireEspnId(internalId, name, match?.espn_id));
+    const { name, espn_id: espnId } = await summaryResponse.json();
+    espnIds.push(requireEspnId(internalId, name, espnId));
   }
   return espnIds;
 }
