@@ -19,7 +19,8 @@ const { updateContext } = require("../telemetry/context");
  *
  * Safety rails, mirroring lineup_bot.js for the same reason (an unverified write shape must not
  * default to live):
- *   - DRY_RUN      — defaults to TRUE; only an explicit DRY_RUN=false submits anything.
+ *   - DRY_RUN      — defaults to TRUE; only an explicit DRY_RUN=false submits anything,
+ *                    unless the message itself carries a boolean dry_run (see resolveDryRun).
  *   - idempotency  — a redelivered message that already landed (add already rostered, drop
  *                    already gone) is a no-op, not a duplicate claim.
  */
@@ -28,7 +29,15 @@ const DEBUG_DIR =
   process.env.DEBUG_OUTPUT_DIR ||
   path.join(__dirname, "..", "..", "recon-output");
 
-function resolveDryRun() {
+/**
+ * A boolean `dry_run` on the message wins over DRY_RUN: the web UI sends one explicitly so a
+ * manager's own submission can go live while automated triggers (which omit it) keep the
+ * env's opt-in default. Anything that isn't a real boolean is ignored rather than coerced.
+ */
+function resolveDryRun(payload) {
+  if (typeof payload.dry_run === "boolean") {
+    return { dryRun: payload.dry_run, defaulted: false };
+  }
   const raw = (process.env.DRY_RUN || "").trim();
   if (raw === "") return { dryRun: true, defaulted: true };
   return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
@@ -109,7 +118,7 @@ async function executeInstantWaiverClaim(payload) {
   }
 
   const target = { leagueId, seasonId, teamId };
-  const { dryRun, defaulted } = resolveDryRun();
+  const { dryRun, defaulted } = resolveDryRun(payload);
   log(
     `Evaluating claim for ${nameTarget || addPlayerId} (${nflTeam || "?"}) on team ${teamId}` +
       `${dryRun ? " [DRY_RUN]" : ""}.`,
