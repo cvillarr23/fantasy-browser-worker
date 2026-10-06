@@ -440,6 +440,152 @@ types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments
   joins a room once, headless only resumes/observes it) remains the working path; don't spend more
   time trying to defeat the reCAPTCHA gate itself.
 
+## IR moves
+
+### Confirmed request and eligibility
+
+The live capture on 2026-10-06 used league **1248158344**, team **8**, and
+`submitLineup`'s normal transaction endpoint and headers:
+
+```text
+POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/
+Content-Type: application/json
+x-fantasy-source: kona
+x-fantasy-platform: espn-fantasy-web
+```
+
+```json
+{
+  "isLeagueManager": false,
+  "teamId": 8,
+  "type": "ROSTER",
+  "memberId": "<brace-wrapped SWID>",
+  "scoringPeriodId": 5,
+  "executionType": "EXECUTE",
+  "items": [{
+    "playerId": 4239996,
+    "type": "LINEUP",
+    "fromLineupSlotId": 20,
+    "toLineupSlotId": 21
+  }]
+}
+```
+
+| Move | Result |
+|---|---|
+| Tony Pollard (`3916148`, ACTIVE), bench 20 → IR 21 | HTTP 409, `details[].type: TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED`; no change |
+| Travis Etienne Jr. (`4239996`, INJURY_RESERVE), bench 20 → IR 21 | HTTP 200, `status: EXECUTED` |
+| Etienne, IR 21 → bench 20 | HTTP 200, `status: EXECUTED`; reverted and the fresh roster matched the original player/slot snapshot |
+
+The worker represents these as `{kind: "ir", player_id, slot: "IR"}` and
+`{kind: "activate_ir", player_id, slot: "BENCH"}` in `optimized_swaps`. Each produces
+one LINEUP item, and moves out of IR are ordered first. `planIrMove` accepts only
+OUT / INJURY_RESERVE for a new IR move; ESPN remains the final authority.
+
+Read-only follow-up on 2026-10-06 found **264** `mTransactions2` rows across scoring
+periods 1–5, including seven executed moves into slot 21 and Etienne's revert.
+Six earlier entries belonged to other teams; their current IR occupants comprise
+two OUT players and four INJURY_RESERVE players. The history confirms those moves
+executed, but does not retain their injury statuses at insertion time.
+
+### Read-only eligibility evidence
+
+Frontend build `9f97de9ffb23-1.506` provides additional evidence without writes:
+
+- [team.js](https://cdn1.espn.net/kona/9f97de9ffb23-1.506/_next/88237a8a-c7d8-42de-bb1d-dd2019e38155/page/football/team.js)'s
+  "Manage IR" list filters roster players by `player.injured` and excludes players
+  already in the injury slot.
+- [main-47cd1ababb50e7ff28c7.js](https://cdn1.espn.net/kona/9f97de9ffb23-1.506/_next/static/commons/main-47cd1ababb50e7ff28c7.js)'s
+  player model reads `injured` directly from the API. Its injury-status metadata
+  marks QUESTIONABLE, DOUBTFUL and SUSPENSION as `injured: false`, and OUT and
+  INJURY_RESERVE as `injured: true`.
+- `eligibleSlots` is insufficient: the live roster read includes 21 for healthy
+  players too. The team's general slot-eligibility helper merely checks membership
+  in that array, while the Manage IR list uses `injured`.
+
+This supports the worker's conservative status set. Server rejection of
+QUESTIONABLE / DOUBTFUL / SUSPENSION remains **unconfirmed**; no eligibility test
+writes were sent during this investigation.
+
+### An ineligible occupant blocking a later transaction: unconfirmed
+
+Team 8's IR slot was **empty** in the follow-up read. Etienne remained on the bench
+with INJURY_RESERVE status. Every current IR occupant elsewhere was OUT or
+INJURY_RESERVE, so there was no naturally occurring healthy-IR state to inspect.
+
+The history's three failed waiver claims were `FAILED_INVALIDPLAYERSOURCE` (two)
+and `FAILED_PLAYERALREADYDROPPED` (one), unrelated to IR blocking. None of the rows
+provided either requested rejection's HTTP status or `details[].type`.
+
+The shared frontend disables trade proposals when `ineligibleIrPlayer` is true,
+with a message asking the manager to fix the injury slot. Neither inspected bundle
+contained a specific IR-blocking `TRAN_*` code. This does **not** confirm the claim
+that every other transaction is rejected, nor the error body for a lineup move.
+Capture it only when the state occurs naturally and a live write is approved.
+
+`submitLineup` includes ESPN's response text in its failure message and the lineup
+bot surfaces that error and records roster injury statuses in its failure artifact.
+A captured HTTP 409 will be a `PermanentError`; an explicit activation instruction
+based on an ESPN error code must wait until that code is observed.
+
+### Full-roster add-only capture: pending
+
+Team 8 had **16 players**, 16 configured non-IR slots (including seven bench slots),
+and an empty IR slot. The settings also reported `isBenchUnlimited: true`; configured
+slot totals alone are not empirical proof of how the add endpoint enforces capacity.
+No add-only request was sent during this investigation.
+
+The shared transaction service recognizes `TRAN_ROSTER_LIMIT_EXCEEDED_ONE`,
+`TRAN_ROSTER_LIMIT_EXCEEDED_PLURAL`, their `_LM` variants, and trade-reserved variants.
+It reads rejection bodies as `details[]` entries containing `type`, `message`,
+optional `resolution`, and `metaData.teamid`. **The actual full-roster add's status
+and body remain unconfirmed.** A roster-limit HTTP 409 fixture in the unit tests is
+frontend-derived, not a live capture.
+
+The proposed capture uses Matt Prater (`11122`, kicker) with no drop, using the same
+endpoint and headers as above:
+
+```json
+{
+  "isLeagueManager": false,
+  "teamId": 8,
+  "type": "FREEAGENT",
+  "memberId": "<brace-wrapped SWID>",
+  "scoringPeriodId": 5,
+  "executionType": "EXECUTE",
+  "items": [{"playerId": 11122, "type": "ADD"}]
+}
+```
+
+Prater's read returned `onTeamId: 0`, `status: WAIVERS`, with a processing timestamp
+of **2026-10-07T07:00:00Z**. That timestamp is not a guarantee he becomes a free
+agent. Do not send the proposed FREEAGENT write unless a fresh read shows FREEAGENT.
+Team 8 has one kicker against a position limit of three, so the chosen position
+does not already exceed its limit.
+
+For an approved capture:
+
+1. Re-read Prater's availability, Team 8's roster/settings and pending transactions.
+   Require FREEAGENT, verify the roster is still full, and save the player/slot
+   snapshot. Use the fresh scoring period rather than hardcoding the example's 5.
+2. Send one add-only request and retain its complete response status and body.
+   Never retry a write with an ambiguous result before reconciling its state.
+3. Re-read roster and pending transactions even after a rejection, comparing them
+   to the snapshot. If a pickup lands, revert only that pickup with a DROP-only
+   FREEAGENT transaction and re-read until the player/slot snapshot matches.
+   Investigate any unexpectedly queued claim before concluding nothing changed.
+4. Check the captured response through the submission helper's classification with
+   a mocked response; this requires no second live write.
+
+All writes need explicit approval, including an expected rejection. Keep cookies
+in memory and out of capture files. HTTP 4xx other than 429 are permanent request
+failures, except 401/403: both `submitLineup` and `submitWaiverClaim` raise
+`SessionExpiredError` so authentication failures can retry after credentials are
+refreshed. Rate limits, server errors and network failures remain retryable.
+
+For an IR move followed by a pickup, wait for the IR action's `verified_complete`
+before submitting the add-only action. Give each action its own idempotency key.
+
 ## Trade proposals: the submit request (issue #124)
 
 Worked out on 2026-10-03 by **static analysis of ESPN's own frontend JS. Nothing was sent.** No

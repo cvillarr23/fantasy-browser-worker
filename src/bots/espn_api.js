@@ -363,9 +363,10 @@ async function submitLineup(
  * treated as a PermanentError — a rejected claim (player already taken, claim window closed,
  * malformed request) will keep failing identically on retry, and requeuing it forever under
  * connection.js's channel-wide prefetch(1) would starve every other queue. 429/5xx/network
- * failures stay ordinary Errors so connection.js retries them. This is a coarse HTTP-status-only
- * heuristic, not a parse of ESPN's actual rejection reason (its exact error body shape is still
- * unconfirmed) — re-verify against a real rejection once one's been captured.
+ * failures stay ordinary Errors so connection.js retries them. 401/403 instead raise
+ * SessionExpiredError so the claim can retry after credentials are refreshed. This is a coarse
+ * HTTP-status-only heuristic, not a parse of ESPN's actual rejection reason (its exact error
+ * body shape is still unconfirmed) — re-verify against a real rejection once one's been captured.
  *
  * Re-verify by running `node src/bots/waiver_recon.js --watch-save` against a real free-agent add
  * (or an actual waiver claim, to observe whether the shape differs) and diffing the captured body
@@ -425,6 +426,9 @@ async function submitWaiverClaim(
   if (!response.ok()) {
     const status = response.status();
     const message = `[ESPN API] Waiver claim submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
+    if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
+      throw new SessionExpiredError(message);
+    }
     throw classifyHttpStatusError(status, message);
   }
 
