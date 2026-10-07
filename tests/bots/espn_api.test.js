@@ -196,8 +196,8 @@ describe("D/ST negative player ids", () => {
     });
 
     expect(context.request.post.mock.calls[0][1].data.items).toEqual([
-      { playerId: -16021, type: "ADD" },
-      { playerId: -16030, type: "DROP" },
+      { playerId: -16021, type: "ADD", toTeamId: 8 },
+      { playerId: -16030, type: "DROP", fromTeamId: 8 },
     ]);
   });
 });
@@ -314,11 +314,32 @@ describe("submitWaiverClaim", () => {
         scoringPeriodId: 1,
         executionType: "EXECUTE",
         items: [
-          { playerId: 111, type: "ADD" },
-          { playerId: 222, type: "DROP" },
+          { playerId: 111, type: "ADD", toTeamId: 8 },
+          { playerId: 222, type: "DROP", fromTeamId: 8 },
         ],
       },
     });
+  });
+
+  // ESPN rejected an ADD without toTeamId with HTTP 409 TRAN_ITEM_TO_TEAM_ID_MISSING (live web-UI
+  // claim, 2026-10-07). Its frontend sends roster-fix drops as {playerId, type: "DROP", fromTeamId}.
+  it("names the claiming team on each item: toTeamId for an ADD, fromTeamId for a DROP", async () => {
+    const context = fakeContext({ id: "abc" });
+
+    await submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 5,
+      addPlayerId: "4832800",
+      dropPlayerId: "4432773",
+    });
+
+    expect(context.request.post.mock.calls[0][1].data.items).toEqual([
+      { playerId: 4832800, type: "ADD", toTeamId: 8 },
+      { playerId: 4432773, type: "DROP", fromTeamId: 8 },
+    ]);
   });
 
   it("classifies a 4xx (non-429) failure as permanent", async () => {
@@ -384,7 +405,7 @@ describe("submitWaiverClaim", () => {
         memberId: "x",
         scoringPeriodId: 5,
         executionType: "EXECUTE",
-        items: [{ playerId: 11122, type: "ADD" }],
+        items: [{ playerId: 11122, type: "ADD", toTeamId: 8 }],
       },
     });
   });

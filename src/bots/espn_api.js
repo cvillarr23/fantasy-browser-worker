@@ -372,9 +372,11 @@ async function submitLineup(
  * PARTIALLY VERIFIED: the shared envelope (host, URL, isLeagueManager/teamId/memberId/
  * scoringPeriodId/executionType, and both headers — `x-fantasy-platform` is now
  * `"espn-fantasy-web"`, confirmed via submitLineup()'s real 2026-09-12 capture) is confirmed by
- * inheritance from that same `transactions/` endpoint. STILL UNVERIFIED: the ADD/DROP item shape and
- * top-level `type: "FREEAGENT"` below, documented only by prior community reverse-engineering of
- * this endpoint family — no real free-agent/waiver capture has been taken yet. `waiver_recon.js
+ * inheritance from that same `transactions/` endpoint. A live web-UI claim on 2026-10-07 was
+ * rejected with HTTP 409 TRAN_ITEM_TO_TEAM_ID_MISSING ("Required field toTeamId missing from ADD
+ * TransactionItem"), so ADD items name the receiving team and DROP items the releasing team.
+ * STILL UNVERIFIED: that this corrected item shape and the top-level `type: "FREEAGENT"` are
+ * accepted — no successful free-agent/waiver capture has been taken yet. `waiver_recon.js
  * --watch-save` exists for that; treat it as a fast-follow.
  *
  * One thing this does NOT attempt to distinguish, open until a real capture exists: an immediate
@@ -416,13 +418,16 @@ async function submitWaiverClaim(
   },
 ) {
   const url = buildTransactionsUrl(leagueId, seasonId);
+  const ourTeamId = Number(teamId);
   const items = [];
-  if (addPlayerId) items.push({ playerId: Number(addPlayerId), type: "ADD" });
-  if (dropPlayerId) items.push({ playerId: Number(dropPlayerId), type: "DROP" });
+  // ESPN rejects an ADD without the receiving team (HTTP 409 TRAN_ITEM_TO_TEAM_ID_MISSING), and
+  // its own frontend names the releasing team on a DROP, so each item carries our team id.
+  if (addPlayerId) items.push({ playerId: Number(addPlayerId), type: "ADD", toTeamId: ourTeamId });
+  if (dropPlayerId) items.push({ playerId: Number(dropPlayerId), type: "DROP", fromTeamId: ourTeamId });
 
   const payload = {
     isLeagueManager: false,
-    teamId: Number(teamId),
+    teamId: ourTeamId,
     type: "FREEAGENT",
     memberId,
     scoringPeriodId,
