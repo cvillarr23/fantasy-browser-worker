@@ -79,8 +79,10 @@ until those columns are added on `fantasy-core-pipeline`'s side — expected, no
 The low-level `trade_proposals` consumer accepts
 `{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. A run works like this:
 
-1. The worker ranks other teams' positional deficits and keeps the worst
-   weakness on each of up to three teams.
+1. The worker ranks other teams' positional weaknesses and keeps the worst one
+   on each of up to three teams. A position is weak when the team is short of
+   starters there or its `net_vorp` is below the league average for that
+   position. Mid-season rosters are full, so the second case is the usual one.
 2. It reads core's `GET /v1/trade/context` once, with a four-week horizon, for
    ESPN-keyed rosters.
 3. One `completeWithFallback` call proposes up to six candidate packages. These
