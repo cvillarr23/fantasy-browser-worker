@@ -107,6 +107,13 @@ test.each(["no_target", "no_offer"])("reports %s", async (status) => {
   deps.generate.mockResolvedValue({ status });
   expect(await runTradeScan({ stage: true }, deps)).toMatchObject({ status });
 });
+test("a no_offer reason is reported with the scan result", async () => {
+  deps.generate.mockResolvedValue({ status: "no_offer", reason: "no_useful_offer", rejections: [] });
+  expect(await runTradeScan({ stage: true }, deps)).toMatchObject({
+    status: "no_offer",
+    reason: "no_useful_offer",
+  });
+});
 test("staging failure fails the job without retrying generation", async () => {
   deps.generate.mockResolvedValue({
     submission: { status: "fill_failed", error: "DOM" },

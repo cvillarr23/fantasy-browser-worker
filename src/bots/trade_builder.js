@@ -552,7 +552,13 @@ function unknownOutcome(label, offerKey, detail) {
  */
 async function submitTradeOffer(
   rawOffer,
-  { approval, source = "manual", trackingId = "no-tracking-id", session: providedSession } = {},
+  {
+    approval,
+    source = "manual",
+    trackingId = "no-tracking-id",
+    session: providedSession,
+    evaluation,
+  } = {},
 ) {
   const offer = normalizeTradeOffer(rawOffer);
   const offerKey = computeOfferKey(offer);
@@ -582,6 +588,9 @@ async function submitTradeOffer(
     outgoingPlayerIds: offer.outgoingPlayerIds,
     approvedBy: approval ? approval.approved_by : null,
     message: offer.message,
+    // Score evidence for the reviewer. Only generated proposals are scored, and it is never part
+    // of the offer_key: approval binds what the other manager receives, not our reasoning.
+    ...(source === "proposal" && evaluation ? { evaluation } : {}),
   };
 
   logger.info(

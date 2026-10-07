@@ -161,6 +161,7 @@ async function runTradeScan(
       throw new Error(`Trade scan staging failed: ${result.submission.error}`);
     return {
       status: result.status || "proposal",
+      ...(result.reason ? { reason: result.reason } : {}),
       ...period,
       scanKey: key,
       submissionStatus: result.submission?.status,
