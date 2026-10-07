@@ -560,6 +560,34 @@ describe("submitTradeOffer: dry run", () => {
     );
   });
 
+  it("persists a proposal's evaluation on the staged row without changing its offer_key", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const evaluation = { version: "proposal-evaluation-v1", score: { score: { final_score: null } } };
+
+    const result = await submitTradeOffer(offerFixture(), { source: "proposal", evaluation });
+
+    expect(result).toMatchObject({
+      status: "awaiting_approval",
+      dryRun: true,
+      offerKey: computeOfferKey(offerFixture()),
+    });
+    expect(state.clicks).not.toContain("submit");
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "awaiting_approval", source: "proposal", evaluation }),
+    );
+  });
+
+  it("ignores an evaluation on anything but a generated proposal", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+
+    await submitTradeOffer(offerFixture(), { source: "counter_offer", evaluation: { version: "x" } });
+
+    expect(recordTradeOfferFill.mock.calls[0][0]).not.toHaveProperty("evaluation");
+  });
+
   it("rejects ids that aren't on the expected rosters before opening the builder", async () => {
     const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
     useSession(page);

@@ -172,6 +172,8 @@ function tradeOfferJson(offerKey, row) {
     message: row.message || null,
     screenshot_path: row.screenshotPath || null,
     reasons: row.reasons || undefined,
+    // A generated proposal's score evidence, read by core's offer list for the reviewer UI.
+    evaluation: row.evaluation || undefined,
   });
 }
 

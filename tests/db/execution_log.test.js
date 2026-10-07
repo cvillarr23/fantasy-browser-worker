@@ -144,6 +144,28 @@ describe("recordTradeOfferFill", () => {
     expect(sql).toMatch(/INSERT INTO execution_log/);
     expect(params).toEqual(expect.arrayContaining(["trade_offer_submit", "trade_builder", "awaiting_approval", true]));
   });
+
+  it("stores a proposal's evaluation alongside the offer fields core reads", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    const evaluation = { version: "proposal-evaluation-v1", score: { scoring_version: "trade-score-v1" } };
+    await recordTradeOfferFill({
+      ...ROW,
+      source: "proposal",
+      message: "pitch",
+      evaluation,
+      offerKey: OFFER_KEY,
+      status: "awaiting_approval",
+      dryRun: true,
+    });
+    const counterOffer = JSON.parse(pool.query.mock.calls[0][1][7]);
+    expect(counterOffer).toMatchObject({ offer_key: OFFER_KEY, source: "proposal", message: "pitch", evaluation });
+  });
+
+  it("omits evaluation for offers that have none", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    await recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true });
+    expect(JSON.parse(pool.query.mock.calls[0][1][7])).not.toHaveProperty("evaluation");
+  });
 });
 
 describe("trade responses", () => {

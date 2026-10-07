@@ -77,14 +77,61 @@ until those columns are added on `fantasy-core-pipeline`'s side — expected, no
 ### Outgoing trade proposals
 
 The low-level `trade_proposals` consumer accepts
-`{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. The worker ranks other teams' positional deficits, reads our
-roster and the highest-ranked target's live ESPN roster, and uses
-`completeWithFallback` to draft one fresh offer and a pitch. It can return
-`no_target` or `no_offer` without staging anything. Ownership, duplicate ids,
-nonempty sides, and a player at the targeted position are checked before staging.
+`{"season":2026,"week":4,"tracking_id":"proposal-2026-4"}`. A run works like this:
+
+1. The worker ranks other teams' positional deficits and keeps the worst
+   weakness on each of up to three teams.
+2. It reads core's `GET /v1/trade/context` once, with a four-week horizon, for
+   ESPN-keyed rosters.
+3. One `completeWithFallback` call proposes up to six candidate packages. These
+   are ids only, with no pitch and no numbers. Ownership, duplicate ids, nonempty
+   sides, and a player at the targeted position are checked for each package, and
+   invalid packages are dropped.
+4. Each remaining package is scored with core's `POST /v1/trade/score`, one after
+   another (`TRADE_SCORE_TIMEOUT_MS`, default 30s; `TRADE_CONTEXT_TIMEOUT_MS` for
+   the context read).
+
+A package is useful only when:
+- our lineup gain is positive;
+- the counterparty's lineup doesn't get worse;
+- neither roster goes over its limit;
+- every traded player is mapped;
+- at least one horizon week was scored.
+
+Useful packages are ranked as follows:
+1. Packages with a schedule-weighted `final_score` rank ahead of those without
+   one. Those without one rank by their unweighted lineup gain, and the two
+   scales are never compared.
+2. Within that, by value per scored week. Unscored weeks (missing metrics, unknown
+   opponent strength) are unknown, never zero.
+3. Ties go to more scored weeks, then a complete horizon, then the larger
+   counterparty lineup change.
+
+The winner's pitch comes from a second LLM call that sees only counterparty-facing
+evidence drawn from the score. It never sees our own gain or `final_score`. It must
+cite evidence ids and may not state a number that isn't in that evidence.
+
+Results:
+- `no_target`: there is no target.
+- `no_offer`, with a `reason` (`no_packages`, `no_valid_packages`,
+  `no_useful_offer`, `pitch_rejected`, `evaluation_too_large`) and the
+  per-package rejections. Nothing is staged.
+- An error: core couldn't score any package. Nothing is ever staged unscored.
+
 Player ids come exclusively from ESPN; no Sleeper/internal player ids are sent
-to the trade builder. The deficit service must describe the configured ESPN
+to core's scorer or the trade builder. The deficit service must describe the configured ESPN
 league and use its team ids (the service currently tracks one league).
+
+The staged row's `counter_offer.evaluation` holds the score evidence for
+reviewers. It has these fields:
+- `version` (`proposal-evaluation-v1`) and `evaluated_at`;
+- `request`: the exact score request, including `week` and `horizon`;
+- `score`: the verbatim `TradeScore` response;
+- `target` and `ranking`;
+- `pitch`: the message, the evidence items with JSON Pointers into `score`, and
+  the cited evidence ids.
+
+The evaluation is not part of the `offer_key`.
 
 Offers are staged with `source: "proposal"`, never with an approval from the
 request. `trade_builder` records the offer and pitch in `execution_log`; this
