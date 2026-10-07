@@ -102,6 +102,19 @@ async function claimScan(pool, key, trackingId) {
   }
 }
 
+// The scan refreshes the inbox first so a new pitch never crosses an offer from that same manager
+// that we haven't answered yet. Best-effort: the inbox has its own schedule, so an ESPN or core
+// hiccup here shouldn't cost the twice-weekly pitch.
+async function openOfferTeams(refreshInbox) {
+  try {
+    const inbox = await refreshInbox({ persist: true });
+    return inbox.openOfferTeamIds || [];
+  } catch (error) {
+    logger.warn("[Trade Scan] Inbox refresh failed; scanning without offer exclusions", { err: error });
+    return [];
+  }
+}
+
 async function runTradeScan(
   { stage = false, trackingId = randomUUID() } = {},
   {
@@ -109,6 +122,8 @@ async function runTradeScan(
     now = new Date(),
     claim = claimScan,
     generate = generateTradeProposal,
+    // Required lazily: trade_inbox.js reads this module's period helpers.
+    refreshInbox = (options) => require("./trade_inbox").refreshTradeInbox(options),
     pool,
   } = {},
 ) {
@@ -136,7 +151,12 @@ async function runTradeScan(
       return { status: "duplicate", ...period, scanKey: key };
     // Retain the claim even on errors/timeouts: a generated pitch changes offer_key,
     // so blind retries could stage a different offer. The next scheduled day's scan can proceed.
-    const result = await generate({ ...period, tracking_id: trackingId });
+    const excluded = await openOfferTeams(refreshInbox);
+    const result = await generate({
+      ...period,
+      tracking_id: trackingId,
+      ...(excluded.length ? { exclude_team_ids: excluded } : {}),
+    });
     if (result.submission?.status === "fill_failed")
       throw new Error(`Trade scan staging failed: ${result.submission.error}`);
     return {
@@ -192,4 +212,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { resolvePeriod, claimScan, runTradeScan, main };
+module.exports = { readSeason, resolvePeriod, claimScan, runTradeScan, main };

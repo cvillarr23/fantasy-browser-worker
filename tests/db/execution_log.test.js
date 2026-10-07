@@ -13,7 +13,11 @@ const {
   claimTradeSubmission,
   finalizeTradeSubmission,
   recordTradeOfferFill,
+  claimTradeResponse,
+  finalizeTradeResponse,
+  recordTradeResponseBlocked,
 } = require("../../src/db/execution_log");
+const activity = require("../../src/db/activity");
 
 // Captured at file-evaluation time: Pool is constructed once at module load, and clearMocks would
 // wipe Pool.mock.results before any beforeEach could read it (same as llm_async_queue.test.js).
@@ -139,5 +143,67 @@ describe("recordTradeOfferFill", () => {
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/INSERT INTO execution_log/);
     expect(params).toEqual(expect.arrayContaining(["trade_offer_submit", "trade_builder", "awaiting_approval", true]));
+  });
+});
+
+describe("trade responses", () => {
+  const DECISION_KEY = "d".repeat(64);
+  const RESPONSE = {
+    leagueId: "1248158344",
+    season: 2026,
+    transactionId: "tx-1",
+    proposingTeamId: "3",
+    action: "decline",
+    comment: null,
+    approvedBy: "conor",
+  };
+
+  it("claims a decision key under an advisory lock with a responding row", async () => {
+    const client = fakeClient([[/INSERT INTO execution_log/, { rows: [{ id: 21 }] }]]);
+
+    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).resolves.toEqual({ claimed: true, id: 21 });
+
+    const sqls = statements(client);
+    expect(sqls[1]).toMatch(/pg_advisory_xact_lock\(hashtext\(\$1\)\)/);
+    expect(client.query.mock.calls[1][1]).toEqual([DECISION_KEY]);
+    expect(sqls[2]).toMatch(/transaction_type = 'trade_response'/);
+    const [insertSql, params] = client.query.mock.calls[3];
+    expect(insertSql).toMatch(/'responding'/);
+    expect(JSON.parse(params.find((p) => typeof p === "string" && p.startsWith("{")))).toEqual({
+      decision_key: DECISION_KEY,
+      espn_transaction_id: "tx-1",
+      action: "decline",
+      comment: null,
+      approved_by: "conor",
+    });
+  });
+
+  it.each(["responding", "responded"])("does not claim a key already %s", async (status) => {
+    const client = fakeClient([[/SELECT id, status/, { rows: [{ id: 4, status }] }]]);
+    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).resolves.toEqual({ claimed: false, existing: status, id: 4 });
+    expect(statements(client).some((sql) => /INSERT/.test(sql))).toBe(false);
+  });
+
+  it("throws on a DB error, since it is the only guard against a second live response", async () => {
+    fakeClient([[/INSERT INTO execution_log/, new Error("disk full")]]);
+    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).rejects.toThrow(/disk full/);
+  });
+
+  it("finalizes best-effort and records the outcome on the activity", async () => {
+    pool.query.mockRejectedValue(new Error("down"));
+    await expect(finalizeTradeResponse(21, "responded", null)).resolves.toBeUndefined();
+    expect(activity.event).toHaveBeenCalledWith("trade_response_responded", { ledgerId: 21, errorMessage: null }, "submitted", "responded");
+  });
+
+  it("records a blocked dry run with the locks that stayed closed", async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    await recordTradeResponseBlocked({ decisionKey: DECISION_KEY, ...RESPONSE, closedLocks: ["dry_run", "not_armed"], body: { type: "TRADE_DECLINE" } });
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/INSERT INTO execution_log/);
+    expect(params).toContain("response_blocked");
+    expect(JSON.parse(params.find((p) => typeof p === "string" && p.startsWith("{")))).toMatchObject({
+      closed_locks: ["dry_run", "not_armed"],
+      would_send: { type: "TRADE_DECLINE" },
+    });
   });
 });

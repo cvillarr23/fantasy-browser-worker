@@ -23,6 +23,15 @@ function requireProposalPayload(payload) {
       "[Trade Proposal] season and week (1-18) must be valid integers.",
     );
   }
+  const excluded = payload.exclude_team_ids;
+  if (
+    excluded !== undefined &&
+    (!Array.isArray(excluded) || !excluded.every((id) => /^[1-9]\d*$/.test(id)))
+  ) {
+    throw new PermanentError(
+      "[Trade Proposal] exclude_team_ids must be an array of ESPN team ids.",
+    );
+  }
   for (const key of ["ESPN_LEAGUE_ID", "ESPN_TEAM_ID"]) {
     if (!/^[1-9]\d*$/.test(process.env[key] || "")) {
       throw new PermanentError(
@@ -127,7 +136,10 @@ async function generateTradeProposal(payload) {
   let session;
   try {
     const deficits = await fetchRosterDeficits({ season, week });
-    const target = findTradeTargets(deficits, fromTeamId)[0];
+    const excluded = new Set(payload.exclude_team_ids || []);
+    const target = findTradeTargets(deficits, fromTeamId).find(
+      (candidate) => !excluded.has(candidate.team_id),
+    );
     if (!target) return { status: "no_target" };
     session =
       (await createSessionFromStoredState()) ??

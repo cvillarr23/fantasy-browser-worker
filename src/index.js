@@ -10,6 +10,7 @@ const {
 } = require("./bots/trade_bot");
 const { generateTradeProposal } = require("./bots/trade_proposal");
 const { executeTradeSubmission } = require("./bots/trade_builder");
+const { executeTradeResponse } = require("./bots/trade_response");
 const { processAsyncLlmRequest } = require("./lib/llm_async_queue");
 const { withInstrumentation } = require("./telemetry/instrument");
 const { logger } = require("./telemetry/logger");
@@ -48,6 +49,12 @@ async function dispatch(queueName, payload) {
     case "trade_submissions":
       logger.info("Invoking Trade Submission Engine...");
       return executeTradeSubmission(payload);
+
+    // Human-approved accept/decline of an incoming offer. With any of trade_response.js's
+    // locks closed, this only records what it would have sent.
+    case "trade_responses":
+      logger.info("Invoking Trade Response Engine...");
+      return executeTradeResponse(payload);
 
     case "llm_requests":
       logger.info("Invoking async LLM request handler...");

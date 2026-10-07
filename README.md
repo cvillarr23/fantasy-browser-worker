@@ -162,3 +162,84 @@ fantasy-infra's production image digest includes it, then sync the new CronJob.
 It reuses fantasy-league-config, ESPN cookies, DB credentials, Groq/Gemini keys,
 core-pipeline roster deficits and the existing LLM fallback/telemetry services.
 No queue declaration, KEDA trigger, core-pipeline change or new secret is needed.
+
+
+### Incoming trade inbox
+
+`src/bots/trade_inbox.js` lists every pending offer other managers have sent us
+and ranks them. It reads ESPN's pending transactions (one REST GET, no page
+navigation) and scores each offer with core-pipeline's deterministic
+`POST /v1/trade/score`. It keeps one `execution_log` row per ESPN transaction id
+(`transaction_type = 'trade_inbox'`). It never writes to ESPN.
+
+```bash
+node src/bots/trade_inbox.js --check            # read + score, print ranked, write nothing
+node src/bots/trade_inbox.js --refresh          # the same, persisted (scheduled job)
+node src/bots/trade_inbox.js --list [--all]     # ranked inbox from the database
+node src/bots/trade_inbox.js --triage <id> <new|seen|snoozed|dismissed> <you> [snooze-until ISO]
+node src/bots/trade_inbox.js --counter-payload <id>   # trade_negotiations payload for a counter
+```
+
+**Ranking.** Offers with a numeric `final_score` come first, highest first. Every
+other offer follows, soonest expiry first:
+- core couldn't score it (`unavailable`), for example when it has no matchup weeks;
+- it is `unscorable`, meaning one-sided or involving more than two teams;
+- it is `stale_ownership`, meaning a player has moved since the offer was made.
+
+Ties go to the offer that expires first. Incomplete horizons, unmapped players,
+draft-pick/FAAB items and roster-limit overages are flagged but not re-ranked.
+When core is down, the last score for the same offer is kept, marked stale, and
+retried on the next refresh. No LLM produces or adjusts any number.
+
+**Lifecycle.** Each refresh keeps triage and decisions, and rescores only new or
+changed offers, a new week, or a failed score. Each refresh makes at most ten
+score calls. When an offer leaves ESPN's pending list, the trade history decides
+why: `accepted`, `accepted_pending_processing`, `declined`, `countered`, `vetoed`
+or `withdrawn`. Otherwise it is `expired` once its expiration passes, and
+`closed_unknown` after two unexplained misses. A failed ESPN read changes nothing.
+
+**Shadow policy.** `TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE` and
+`TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE` (unset by default) record what a
+score-threshold policy *would* do with each offer. Nothing acts on it. It abstains
+when the score is stale, the trade includes unmapped players or non-player items,
+or the trade exceeds the roster limit.
+
+**Cadence.** Run `--refresh` every two hours from 08:00 to 22:00
+America/Chicago. ESPN offers stay open for one to seven days, two by default. The
+trade scan refreshes the inbox before it generates a pitch. It never pitches a
+manager whose offer to us is still unanswered.
+
+### Responding to incoming offers
+
+`src/bots/trade_response.js` handles the `trade_responses` queue: accept or
+decline one inbox offer. **It answers real offers from other managers.** It sends
+only when all of these hold:
+- `DRY_RUN=false`.
+- `TRADE_RESPONSE_ENABLED=true`. This is separate from `TRADE_SUBMIT_ENABLED`.
+- A human approval `{decision_key, approved_by}` whose key matches the offer as a
+  fresh ESPN read shows it, including the action and note.
+- The action is listed in `VERIFIED_TRADE_RESPONSE_ACTIONS`.
+- `PENDING_TRADE_SHAPE_VERIFIED` is set. Both of these last two start empty or
+  false until real captures confirm ESPN's request and pending-trade shapes.
+
+With any lock closed, it records a `response_blocked` row with the body it would
+have sent.
+
+It always refuses to send for any of these:
+- the offer is gone, or expires within five minutes;
+- the offer is already being responded to;
+- for an accept, the roster is locked, the offer has no current score, or the trade
+  would put us over the roster limit.
+
+Each decision key is claimed before the POST. ESPN is read back afterwards,
+including after an unknown outcome. Anything the reads can't confirm stops for
+manual verification in ESPN and is never resent. Veto and league-manager actions
+are not offered.
+
+```bash
+node src/bots/trade_response.js '{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"}}'
+```
+
+`computeDecisionKey` in `src/lib/trade_inbox.js` defines the key, which is a
+SHA-256 over league, season, team, transaction id, action, offer fingerprint and
+note.

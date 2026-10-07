@@ -15,7 +15,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { classifyHttpStatusError, SessionExpiredError } = require("../errors");
+const { classifyHttpStatusError, PermanentError, SessionExpiredError } = require("../errors");
 const { isEnabled: isDebugCaptureEnabled } = require("./debug_capture");
 const { logger } = require("../telemetry/logger");
 
@@ -158,6 +158,32 @@ function parseTeamRoster(body, { leagueId, teamId }) {
 }
 
 /**
+ * Whether readPendingTrades' populated shape has been confirmed against a captured pending trade.
+ * Until it has, trade_response.js treats every offer it reads as unconfirmed and will not respond
+ * to one. Set this only in a change that adds the capture as a fixture.
+ */
+const PENDING_TRADE_SHAPE_VERIFIED = false;
+
+// Copied only when ESPN sends them, so a caller can tell "absent" from "null". trade_builder.js
+// relies on that for `comment`; the trade inbox does for expiry and counter links.
+const OPTIONAL_TRADE_FIELDS = ["comment", "expirationDate", "relatedTransactionId", "isPending"];
+const OPTIONAL_TRADE_ITEM_FIELDS = ["acquisitionBudget", "overallPickNumber"];
+
+function pickPresent(source, keys) {
+  return Object.fromEntries(keys.filter((key) => key in source).map((key) => [key, source[key]]));
+}
+
+// A rejected session is retried once credentials are refreshed; any other failed read is an
+// ordinary transient Error.
+function readFailure(label, status, text) {
+  const message = `[ESPN API] ${label} read failed with HTTP ${status} — ${text.slice(0, 300)}`;
+  if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
+    return new SessionExpiredError(message);
+  }
+  return new Error(message);
+}
+
+/**
  * Pending trades involving one team, plus a member-id -> team-id map for attributing chat posts.
  *
  * Reads the same views the team clubhouse page loads on entry (recon 2026-10-03, issue #101):
@@ -174,15 +200,14 @@ function parseTeamRoster(body, { leagueId, teamId }) {
  * pending trade can confirm or correct that.
  *
  * Each trade carries `proposedDate`, and `comment` only when ESPN sends one: trade_builder.js uses
- * both to tell our offer from an older one for the same players.
+ * both to tell our offer from an older one for the same players. `expirationDate`,
+ * `relatedTransactionId` and `isPending` are likewise copied only when present.
  */
 async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
   const url = buildLeagueReadUrl(leagueId, seasonId, ["mPendingTransactions", "mRoster", "mTeam"]);
   const response = await context.request.get(url);
   if (!response.ok()) {
-    throw new Error(
-      `[ESPN API] Pending-trade read failed with HTTP ${response.status()} — ${(await response.text()).slice(0, 300)}`,
-    );
+    throw readFailure("Pending-trade", response.status(), await response.text());
   }
   const body = await response.json();
 
@@ -216,13 +241,15 @@ async function readPendingTrades(context, { leagueId, seasonId, teamId }) {
       status: t.status,
       proposingTeamId: String(t.teamId),
       proposedDate: t.proposedDate,
-      ...("comment" in t ? { comment: t.comment } : {}),
+      ...pickPresent(t, OPTIONAL_TRADE_FIELDS),
       items: (t.items || []).map((i) => ({
-        playerId: String(i.playerId),
+        // Draft-pick and FAAB items carry no player, and String(undefined) would read as an id.
+        playerId: i.playerId === undefined || i.playerId === null ? null : String(i.playerId),
         playerName: nameByPlayerId.get(String(i.playerId)) ?? null,
         type: i.type,
         fromTeamId: String(i.fromTeamId),
         toTeamId: String(i.toTeamId),
+        ...pickPresent(i, OPTIONAL_TRADE_ITEM_FIELDS),
       })),
     }));
 
@@ -601,8 +628,142 @@ function buildTradeProposalBody({
   };
 }
 
+const TRADE_TRANSACTION_TYPES = ["TRADE_PROPOSAL", "TRADE_ACCEPT", "TRADE_DECLINE", "TRADE_VETO", "TRADE_UPHOLD"];
+
+/**
+ * Trade rows from the league's transaction history (mTransactions2), oldest-first as ESPN sends
+ * them. The trade inbox uses this to learn why an offer left the pending list: a TRADE_ACCEPT or
+ * TRADE_DECLINE whose `relatedTransactionId` names it.
+ *
+ * Verified live (2026-10-03): the view returns `transactions[]` and honors an `x-fantasy-filter` on
+ * `filterType`, but that read held only the current scoring period and no trades, so the row
+ * shape for a trade response and its status strings are UNVERIFIED. `scoringPeriodId` narrows the
+ * read to one period when given. Rows are returned raw.
+ */
+async function readTradeHistory(context, { leagueId, seasonId, scoringPeriodId }) {
+  const period = scoringPeriodId === undefined ? "" : `&scoringPeriodId=${encodeURIComponent(scoringPeriodId)}`;
+  const url = `${buildLeagueReadUrl(leagueId, seasonId, ["mTransactions2"])}${period}`;
+  const filter = { transactions: { filterType: { value: TRADE_TRANSACTION_TYPES } } };
+  const response = await context.request.get(url, {
+    headers: { "x-fantasy-filter": JSON.stringify(filter) },
+  });
+  if (!response.ok()) {
+    throw readFailure("Trade history", response.status(), await response.text());
+  }
+  const body = await response.json();
+  return (body.transactions || []).filter((t) => TRADE_TRANSACTION_TYPES.includes(t.type));
+}
+
+const TRADE_RESPONSE_TYPES = { accept: "TRADE_ACCEPT", decline: "TRADE_DECLINE" };
+
+/**
+ * Response actions whose request body has been confirmed against a real capture. trade_response.js
+ * will not send any action missing from this list, whatever its other switches say. Add an action
+ * only in a change that cites the capture and updates buildTradeResponseBody to match it.
+ */
+const VERIFIED_TRADE_RESPONSE_ACTIONS = Object.freeze([]);
+
+/**
+ * The body for accepting or declining an incoming offer. Pure: nothing is sent from here.
+ *
+ * UNVERIFIED HYPOTHESIS. Nothing has seen this request. The envelope is the one submitLineup
+ * verified. The `TRADE_ACCEPT`/`TRADE_DECLINE` types appear in ESPN's frontend bundle, and the
+ * proposal builder sends `comment` with a decline. Pointing at the offer through
+ * `relatedTransactionId`, the field a counter uses, is a guess. So is sending no items. Only
+ * accept and decline are built: veto and league-manager actions are never offered.
+ */
+function buildTradeResponseBody({ action, teamId, memberId, scoringPeriodId, transactionId, comment }) {
+  const type = TRADE_RESPONSE_TYPES[action];
+  if (!type) {
+    throw new PermanentError(`[ESPN API] Unsupported trade response action ${JSON.stringify(action)}.`);
+  }
+  return {
+    isLeagueManager: false,
+    teamId: Number(teamId),
+    type,
+    memberId,
+    scoringPeriodId,
+    executionType: "EXECUTE",
+    relatedTransactionId: transactionId,
+    items: [],
+    ...(action === "decline" ? { comment: comment ?? "" } : {}),
+  };
+}
+
+// ESPN's rejection body: `details[]` of `{type, message, resolution?, metaData}` (frontend bundle).
+function parseRejectionDetails(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed?.details) ? parsed.details : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Sends a trade response built by buildTradeResponseBody. Callers own every safety check:
+ * trade_response.js gates this on approval, arming flags and VERIFIED_TRADE_RESPONSE_ACTIONS.
+ *
+ * Errors say whether ESPN definitely refused:
+ * - 401/403 raise SessionExpiredError;
+ * - any other 4xx except 429 is a PermanentError with `status` and ESPN's `details`;
+ * - a 429 or 5xx carries `outcomeUnknown`, because the offer may have changed state anyway.
+ *
+ * A thrown request (network, timeout) propagates as-is and is just as unknown.
+ */
+async function submitTradeResponse(
+  context,
+  { leagueId, seasonId, teamId, memberId, scoringPeriodId, transactionId, action, comment, trackingId },
+) {
+  const url = buildTransactionsUrl(leagueId, seasonId);
+  const payload = buildTradeResponseBody({ action, teamId, memberId, scoringPeriodId, transactionId, comment });
+  const headers = {
+    "Content-Type": "application/json",
+    "x-fantasy-source": "kona",
+    "x-fantasy-platform": "espn-fantasy-web",
+  };
+
+  const startedAt = Date.now();
+  const response = await context.request.post(url, { headers, data: payload });
+  const text = await response.text();
+
+  captureWriteArtifact({
+    kind: "trade_response",
+    trackingId,
+    leagueId,
+    teamId,
+    url,
+    requestHeaders: headers,
+    requestBody: payload,
+    responseStatus: response.status(),
+    responseOk: response.ok(),
+    responseBodySnippet: text.slice(0, 500),
+    durationMs: Date.now() - startedAt,
+  });
+
+  if (!response.ok()) {
+    const status = response.status();
+    const message = `[ESPN API] Trade ${action} failed with HTTP ${status} — ${text.slice(0, 500)}`;
+    if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
+      throw new SessionExpiredError(message);
+    }
+    const error = classifyHttpStatusError(status, message);
+    error.status = status;
+    error.details = parseRejectionDetails(text);
+    if (!error.permanent) error.outcomeUnknown = true;
+    throw error;
+  }
+
+  return text ? JSON.parse(text) : {};
+}
+
 module.exports = {
   captureWriteArtifact,
+  readTradeHistory,
+  buildTradeResponseBody,
+  submitTradeResponse,
+  VERIFIED_TRADE_RESPONSE_ACTIONS,
+  PENDING_TRADE_SHAPE_VERIFIED,
   readRoster,
   readRosters,
   readPendingTrades,
