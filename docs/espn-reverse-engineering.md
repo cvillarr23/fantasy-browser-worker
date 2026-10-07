@@ -553,9 +553,14 @@ endpoint and headers as above:
   "memberId": "<brace-wrapped SWID>",
   "scoringPeriodId": 5,
   "executionType": "EXECUTE",
-  "items": [{"playerId": 11122, "type": "ADD"}]
+  "items": [{"playerId": 11122, "type": "ADD", "toTeamId": 8}]
 }
 ```
+
+ESPN requires `toTeamId` on every ADD item: a live web-UI claim on 2026-10-07 without it was
+rejected with HTTP 409 `TRAN_ITEM_TO_TEAM_ID_MISSING` ("Required field toTeamId missing from ADD
+TransactionItem"). `submitWaiverClaim` now sends `toTeamId` on an ADD and `fromTeamId` on a DROP,
+the shape ESPN's frontend uses for roster-fix drops.
 
 Prater's read returned `onTeamId: 0`, `status: WAIVERS`, with a processing timestamp
 of **2026-10-07T07:00:00Z**. That timestamp is not a guarantee he becomes a free
