@@ -15,6 +15,8 @@ jest.mock("../../src/bots/auth", () => ({
 
 const { executeTradeResponse, requireResponsePayload } = require("../../src/bots/trade_response");
 const { STATUS, toInboxEntry, mergeEntry, computeDecisionKey, scoreFromResponse } = require("../../src/lib/trade_inbox");
+const { buildIncomingEvaluation, buildScoreRequest } = require("../../src/lib/trade_inbox");
+const { makeScore } = require("../fixtures/trade_score");
 const { PermanentError, SessionExpiredError } = require("../../src/errors");
 
 const NOW = new Date("2026-10-06T18:00:00Z");
@@ -256,6 +258,74 @@ describe("executeTradeResponse pre-flight", () => {
 });
 
 describe("executeTradeResponse live path", () => {
+  it.each(["missing", "valid", "invalid"])(
+    "keeps fake submission arguments identical with %s advisory evidence",
+    async (kind) => {
+      const entry = deps.inbox();
+      if (kind === "valid") {
+        const { request } = buildScoreRequest(entry, {
+          leagueId: "1248158344",
+          season: 2026,
+          week: 5,
+        });
+        const body = {
+          ...makeScore({ counterpartyTeamId: "3", score: { final_score: 2 } }),
+          league_id: request.league_id,
+          our_team: { team_id: "8", name: "Us" },
+          send: [
+            {
+              espn_id: "4429795",
+              player_id: "9509",
+              name: "Bijan Robinson",
+              position: "RB",
+              nfl_team: "ATL",
+            },
+          ],
+          receive: [
+            {
+              espn_id: "-16021",
+              player_id: "PHI",
+              name: "Eagles D/ST",
+              position: "D/ST",
+              nfl_team: "PHI",
+            },
+          ],
+        };
+        entry.evaluation = buildIncomingEvaluation({
+          request,
+          body,
+          fingerprint: entry.fingerprint,
+          evaluatedAt: NOW.toISOString(),
+        });
+        expect(entry.evaluation).not.toBeNull();
+      } else if (kind === "invalid") {
+        entry.evaluation = { version: "future", score: { final_score: 99999 } };
+      } else {
+        delete entry.evaluation;
+      }
+      const evidence = entry.evaluation;
+      await executeTradeResponse(payload(), deps);
+      expect(deps.submit.mock.calls).toEqual([
+        [
+          {},
+          {
+            leagueId: "1248158344",
+            seasonId: "2026",
+            teamId: "8",
+            memberId: "{SWID}",
+            scoringPeriodId: 5,
+            transactionId: "tx-1",
+            action: "decline",
+            comment: null,
+            trackingId: "track-1",
+          },
+        ],
+      ]);
+      expect(deps.inbox().evaluation).toEqual(evidence);
+      expect(deps.inbox().decision.decision_key).toBe(keyFor("decline"));
+    },
+  );
+
   it("claims, marks the external write, posts, then verifies a decline", async () => {
     const result = await executeTradeResponse(payload(), deps);
 

@@ -56,6 +56,17 @@ const SHADOW_POLICY_VERSION = "shadow-v1";
 const DECISION_KEY_VERSION = "trade-response-v1";
 const FINGERPRINT_VERSION = "trade-inbox-v1";
 
+const INCOMING_EVALUATION_VERSION = "incoming-trade-evaluation-v1";
+// Bound the added JSONB content without truncating core's breakdown or blocking inbox refreshes.
+const MAX_INCOMING_EVALUATION_BYTES = 65_536;
+const MIN_SCORE_SEASON = 2000;
+const MAX_SCORE_SEASON = 2100;
+const MIN_SCORE_WEEK = 1;
+const MAX_SCORE_WEEK = 18;
+const MIN_SCORE_HORIZON_WEEKS = 1;
+const MAX_SCORE_HORIZON_WEEKS = 18;
+const SHA256_HEX_LENGTH = 64;
+
 const MULTI_TEAM_ISSUE = "more than two teams";
 
 function timestampMs(value) {
@@ -186,6 +197,7 @@ function mergeEntry(stored, fresh, now) {
       triage: { state: "new" },
       decision: null,
       score: null,
+      evaluation: null,
       shadow_policy: null,
       first_seen_at: seenAt,
       last_seen_at: seenAt,
@@ -200,7 +212,128 @@ function mergeEntry(stored, fresh, now) {
     triage: changed && stored.triage?.state === "dismissed" ? { state: "new" } : stored.triage,
     last_seen_at: seenAt,
     missed_reads: 0,
+    evaluation: changed ? null : incomingEvaluationFor(stored),
   };
+}
+
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const sameIds = (a, b) =>
+  Array.isArray(a) && Array.isArray(b) && JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+const within = (value, min, max) => Number.isInteger(value) && value >= min && value <= max;
+const teamId = (value) => typeof value === "string" && /^[1-9]\d*$/.test(value);
+const playerIds = (value) =>
+  Array.isArray(value) && !!value.length && value.every((id) => typeof id === "string" && /^-?[1-9]\d*$/.test(id));
+
+/**
+ * Lightweight writer guards; core validates the complete TradeScore schema when exposing it.
+ * Identity checks keep a successful response for a different request out of this advisory field.
+ */
+function validIncomingEvaluation(evaluation) {
+  try {
+    if (!isObject(evaluation) || evaluation.version !== INCOMING_EVALUATION_VERSION) return false;
+    const { request, score, evaluated_at: evaluatedAt, scored_fingerprint: fingerprint } = evaluation;
+    if (
+      typeof fingerprint !== "string" ||
+      fingerprint.length !== SHA256_HEX_LENGTH ||
+      !/^[a-f0-9]+$/.test(fingerprint) ||
+      typeof evaluatedAt !== "string" ||
+      !/(Z|[+-]\d{2}:\d{2})$/.test(evaluatedAt) ||
+      !Number.isFinite(timestampMs(evaluatedAt)) ||
+      !isObject(request) ||
+      !isObject(score)
+    )
+      return false;
+    if (
+      !teamId(request.league_id) ||
+      !teamId(request.our_team_id) ||
+      !teamId(request.counterparty_team_id) ||
+      !within(request.season, MIN_SCORE_SEASON, MAX_SCORE_SEASON) ||
+      !within(request.week, MIN_SCORE_WEEK, MAX_SCORE_WEEK) ||
+      (request.horizon !== undefined && !within(request.horizon, MIN_SCORE_HORIZON_WEEKS, MAX_SCORE_HORIZON_WEEKS)) ||
+      !playerIds(request.send_espn_ids) ||
+      !playerIds(request.receive_espn_ids)
+    )
+      return false;
+    const sections = [
+      "our_team",
+      "counterparty_team",
+      "raw_vorp",
+      "horizon",
+      "weights",
+      "roster_impact",
+      "schedule",
+      "score",
+      "coverage",
+      "roster_snapshot",
+      "strength_metric",
+    ];
+    if (
+      score.scoring_version !== "trade-score-v1" ||
+      !sections.every((key) => isObject(score[key])) ||
+      score.league_id !== request.league_id ||
+      score.season !== request.season ||
+      score.as_of_week !== request.week ||
+      score.our_team.team_id !== request.our_team_id ||
+      score.counterparty_team.team_id !== request.counterparty_team_id ||
+      !Array.isArray(score.send) ||
+      !Array.isArray(score.receive) ||
+      !sameIds(
+        score.send.map((p) => p.espn_id),
+        request.send_espn_ids,
+      ) ||
+      !sameIds(
+        score.receive.map((p) => p.espn_id),
+        request.receive_espn_ids,
+      ) ||
+      !(
+        score.score.final_score === null ||
+        (typeof score.score.final_score === "number" && Number.isFinite(score.score.final_score))
+      )
+    )
+      return false;
+    // Reject non-JSON numbers rather than silently replacing them with null in stored evidence.
+    const json = JSON.stringify(evaluation, (_key, value) => {
+      if (typeof value === "number" && !Number.isFinite(value)) throw new TypeError("Non-finite evidence number");
+      return value;
+    });
+    return Buffer.byteLength(json, "utf8") <= MAX_INCOMING_EVALUATION_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function buildIncomingEvaluation({ request, body, fingerprint, evaluatedAt }) {
+  const evaluation = {
+    version: INCOMING_EVALUATION_VERSION,
+    evaluated_at: evaluatedAt,
+    scored_fingerprint: fingerprint,
+    request,
+    score: body,
+  };
+  return validIncomingEvaluation(evaluation) ? evaluation : null;
+}
+
+/** Never pair a breakdown with a different offer or a newer summary after an invalid refresh. */
+function incomingEvaluationFor(entry) {
+  const evaluation = entry.evaluation;
+  if (!validIncomingEvaluation(evaluation)) return null;
+  const summary = entry.score;
+  const request = evaluation.request;
+  if (
+    !summary ||
+    evaluation.scored_fingerprint !== entry.fingerprint ||
+    evaluation.scored_fingerprint !== summary.scored_fingerprint ||
+    evaluation.evaluated_at !== summary.scored_at ||
+    evaluation.score.scoring_version !== summary.scoring_version ||
+    evaluation.score.as_of_week !== summary.as_of_week ||
+    evaluation.score.score.final_score !== summary.final_score ||
+    request.our_team_id !== entry.our_team_id ||
+    request.counterparty_team_id !== entry.proposing_team_id ||
+    !sameIds(request.send_espn_ids, entry.send_espn_ids) ||
+    !sameIds(request.receive_espn_ids, entry.receive_espn_ids)
+  )
+    return null;
+  return evaluation;
 }
 
 function normalizeComment(comment) {
@@ -531,6 +664,10 @@ function verifyResponse({ action, transactionId, trades, history }) {
 }
 
 module.exports = {
+  INCOMING_EVALUATION_VERSION,
+  MAX_INCOMING_EVALUATION_BYTES,
+  buildIncomingEvaluation,
+  incomingEvaluationFor,
   verifyResponse,
   STATUS,
   LIVE_STATUSES,

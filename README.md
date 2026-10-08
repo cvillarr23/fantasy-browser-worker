@@ -240,6 +240,25 @@ draft-pick/FAAB items and roster-limit overages are flagged but not re-ranked.
 When core is down, the last score for the same offer is kept, marked stale, and
 retried on the next refresh. No LLM produces or adjusts any number.
 
+**Score evidence.** The entry's `counter_offer.evaluation` is nullable advisory
+evidence with version `incoming-trade-evaluation-v1`, `evaluated_at`,
+`scored_fingerprint`, the exact score `request`, and the complete `score` response
+(`trade-score-v1`). It retains lineup gains, schedule adjustments, horizon coverage
+and unscored-week reasons. The evaluation timestamp equals the flattened score's
+`scored_at`; its fingerprint must match both the summary and the current offer.
+The request preserves the scorer's default horizon by omitting `horizon`.
+
+Evidence adds at most 65,536 bytes of serialized UTF-8 JSON per entry. Oversized,
+unknown-version or invalid evidence is nullable; a successful new summary replaces
+old evidence even when the new breakdown cannot be stored. A changed fingerprint
+clears evidence immediately, including when scoring is deferred by the refresh
+cap. Transient failures keep evidence only with a retained numeric score for the
+same offer, marked stale with its original evaluation time. Ownership conflicts,
+rejected requests and locally unscorable offers clear it. Existing rows without
+evidence wait for their next normally required score attempt. Triage and response
+settlement preserve evidence, and retired entries keep it for history. Ranking,
+player mappings, approval keys and response payloads use the existing fields.
+
 **Lifecycle.** Each refresh keeps triage and decisions, and rescores only new or
 changed offers, a new week, or a failed score. Each refresh makes at most ten
 score calls. When an offer leaves ESPN's pending list, the trade history decides
