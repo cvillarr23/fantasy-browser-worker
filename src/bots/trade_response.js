@@ -18,17 +18,30 @@
  *
  * Before any of that, these always refuse with a PermanentError, whatever the switches say:
  * - an offer that is gone or about to expire;
- * - an offer not in the inbox, or already being responded to;
+ * - an offer not in the inbox, not open, or changed since it was read;
+ * - an offer another response already claimed, including one ESPN rejected;
  * - an approval that doesn't match;
  * - for an accept, a locked roster, no current score, or a trade that takes us over the roster
  *   limit (core doesn't simulate the drop that would need).
  *
- * Idempotency follows trade_builder.js. The decision key is claimed in execution_log under an
- * advisory lock before the POST, and the activity is marked as an external write. After the POST,
- * or when its outcome is unknown, ESPN is read back and only a confirming read settles it. A
- * redelivery of a responded key does nothing. A key left `responding` is reconciled by reading.
- * Nothing here ever posts a second time. Anything the reads can't confirm stops for manual
- * verification in ESPN.
+ * Order of work, so nothing is ever sent twice:
+ *   1. Reconcile first. If the approval's key already has a claim, settle it from ESPN reads and
+ *      stop: a responded key is a duplicate, and a responding or unknown one is read back, never
+ *      resent. This runs before any fresh-offer check, because a processed response usually
+ *      means the offer has left the pending list.
+ *   2. Check the fresh read: the offer, the approval key, expiry and the roster.
+ *   3. Claim the offer atomically (db/trade_inbox.js claimOfferResponse). Under the offer's lock
+ *      the stored entry is re-read and checked again. Any other key's claim on the offer refuses,
+ *      so an accept and a decline can't both go out. The claim row and the entry's `responding`
+ *      status are written together.
+ *   4. Mark the activity as an external write, POST once, then read ESPN back. Only a confirming
+ *      read settles it as responded; anything else stops for manual verification in ESPN.
+ *
+ * A human can retry a claim that ESPN rejected, or one whose outcome is unknown, by sending the
+ * approval again with `retry: {of_claim_id, approved_by, verified_not_answered}` and a new
+ * tracking id. An unknown outcome is retried only with verified_not_answered (someone checked ESPN)
+ * and when a fresh read still shows the offer pending with no related history row. The retried
+ * claim is marked superseded in the same transaction as the new claim.
  */
 
 const { createAuthenticatedSession, createSessionFromStoredState } = require("./auth");
@@ -42,8 +55,8 @@ const {
   PENDING_TRADE_SHAPE_VERIFIED,
 } = require("./espn_api");
 const { readSeason, resolvePeriod } = require("./trade_scan");
-const { loadInbox, updateEntry } = require("../db/trade_inbox");
-const { claimTradeResponse, finalizeTradeResponse, recordTradeResponseBlocked } = require("../db/execution_log");
+const { loadInbox, updateEntry, claimOfferResponse, settleOfferResponse } = require("../db/trade_inbox");
+const { findTradeResponse, recordTradeResponseOutcome, recordTradeResponseBlocked } = require("../db/execution_log");
 const activity = require("../db/activity");
 const { PermanentError, SessionExpiredError, requirePlainObjectPayload } = require("../errors");
 const { STATUS, toInboxEntry, computeDecisionKey, verifyResponse } = require("../lib/trade_inbox");
@@ -72,9 +85,26 @@ function isResponseArmed() {
   return /^(1|true|yes)$/i.test((process.env.TRADE_RESPONSE_ENABLED || "").trim());
 }
 
+const isNonBlank = (value) => typeof value === "string" && value.trim() !== "";
+
+function requireRetry(retry) {
+  const valid =
+    typeof retry === "object" &&
+    (typeof retry.of_claim_id === "number" || typeof retry.of_claim_id === "string") &&
+    /^[1-9]\d*$/.test(String(retry.of_claim_id)) &&
+    isNonBlank(retry.approved_by) &&
+    (retry.verified_not_answered === undefined || typeof retry.verified_not_answered === "boolean");
+  if (!valid) {
+    throw new PermanentError(
+      `${LABEL} retry needs a positive of_claim_id, approved_by, and a boolean verified_not_answered when given.`,
+    );
+  }
+  return retry;
+}
+
 function requireResponsePayload(payload) {
   requirePlainObjectPayload(payload, LABEL);
-  const { espn_transaction_id: transactionId, action, comment, approval } = payload;
+  const { espn_transaction_id: transactionId, action, comment, approval, retry } = payload;
   if (typeof transactionId !== "string" || transactionId.trim() === "") {
     throw new PermanentError(`${LABEL} espn_transaction_id must be a non-empty string.`);
   }
@@ -89,11 +119,16 @@ function requireResponsePayload(payload) {
       typeof approval === "object" &&
       typeof approval.decision_key === "string" &&
       /^[0-9a-f]{64}$/.test(approval.decision_key) &&
-      typeof approval.approved_by === "string" &&
-      approval.approved_by.trim() !== "";
+      isNonBlank(approval.approved_by);
     if (!valid) throw new PermanentError(`${LABEL} approval needs a 64-hex decision_key and approved_by.`);
   }
-  return { transactionId, action, comment: comment ?? null, approval: approval ?? null };
+  return {
+    transactionId,
+    action,
+    comment: comment ?? null,
+    approval: approval ?? null,
+    retry: retry === undefined || retry === null ? null : requireRetry(retry),
+  };
 }
 
 const defaultDeps = () => ({
@@ -105,8 +140,10 @@ const defaultDeps = () => ({
   loadEntry: async (id, { leagueId }) =>
     (await loadInbox({ leagueId })).find((e) => e.espn_transaction_id === id) ?? null,
   updateEntry,
-  claim: claimTradeResponse,
-  finalize: finalizeTradeResponse,
+  findResponse: findTradeResponse,
+  claimOffer: claimOfferResponse,
+  settleOffer: settleOfferResponse,
+  recordOutcome: recordTradeResponseOutcome,
   recordBlocked: recordTradeResponseBlocked,
   beforeExternalWrite: activity.beforeExternalWrite,
   submit: submitTradeResponse,
@@ -125,12 +162,10 @@ function closedLocks({ approval, action }, deps) {
   return locks;
 }
 
-function preflightAccept(stored, fresh, roster, transactionId) {
-  if (roster.rosterLocked) {
-    throw new PermanentError(`${LABEL} Our roster is locked, so offer ${transactionId} can't be accepted now.`);
-  }
-  const score = stored.score;
-  if (!score || score.scored_fingerprint !== fresh.fingerprint) {
+/** The accept checks on an entry's stored score. Run on the snapshot, then again under the lock. */
+function requireCurrentScore(entry, fingerprint, transactionId) {
+  const score = entry.score;
+  if (!score || score.scored_fingerprint !== fingerprint) {
     throw new PermanentError(
       `${LABEL} Offer ${transactionId} has no current score; refresh the inbox before accepting.`,
     );
@@ -142,27 +177,61 @@ function preflightAccept(stored, fresh, roster, transactionId) {
   }
 }
 
-/**
- * Reads ESPN back and settles the claim. Only a confirming read finalizes it as responded.
- * Anything else stops for a human: the response may or may not have landed, and resending could
- * answer the offer twice.
- */
-async function settle({ context, claimId, transactionId, action, scope, deps, reason }) {
-  let verdict;
+// The entry a claim marked responding. Settling never rewrites an entry some other decision owns.
+const ownsEntry = (current, decisionKey) =>
+  Boolean(current) && (current.status === STATUS.RESPONDING || current.decision?.decision_key === decisionKey);
+
+async function readVerdict({ context, transactionId, action, scope, deps }) {
   try {
     const [{ trades }, history] = await Promise.all([
       deps.readPending(context, { leagueId: scope.leagueId, seasonId: String(scope.season), teamId: scope.teamId }),
       deps.readHistory(context, { leagueId: scope.leagueId, seasonId: String(scope.season) }),
     ]);
-    verdict = verifyResponse({ action, transactionId, trades, history });
+    return { verdict: verifyResponse({ action, transactionId, trades, history }), trades, history };
   } catch (error) {
-    verdict = { status: "unknown", observed: `verification read failed: ${error.message}` };
+    return { verdict: { status: "unknown", observed: `verification read failed: ${error.message}` }, trades: null, history: null };
   }
+}
+
+/**
+ * Settles a claim and its inbox entry in one transaction. If that write fails after ESPN gave an
+ * answer, the claim stays as it was, which the next run reconciles by reading. The run stops as
+ * permanent rather than being requeued.
+ */
+async function recordSettlement({ claimId, transactionId, action, scope, deps }, ledgerStatus, errorMessage, mutate, observed) {
+  let result;
+  try {
+    result = await deps.settleOffer(transactionId, scope, { claimId, ledgerStatus, errorMessage, mutate });
+  } catch (error) {
+    const message =
+      `${LABEL} The ${action} of offer ${transactionId} settled as ${observed ?? ledgerStatus}, but that couldn't be ` +
+      `recorded (${error.message}). A later run reconciles it by reading ESPN; nothing will be resent.`;
+    logger.error(message, { err: error });
+    await deps.activityEvent("manual_verification_required", { transactionId, action, ledgerStatus, error: error.message });
+    throw new PermanentError(message);
+  }
+  if (result?.settled !== false) await deps.recordOutcome(claimId, ledgerStatus, errorMessage);
+}
+
+/**
+ * Reads ESPN back, unless `read` already did, and settles the claim. Only a confirming read
+ * finalizes it as responded. Anything else stops for a human: the response may or may not have
+ * landed, and resending could answer the offer twice.
+ */
+async function settle(ctx) {
+  const { transactionId, action, decisionKey, deps, reason } = ctx;
+  const { verdict } = ctx.read ?? (await readVerdict(ctx));
 
   if (CONFIRMED_OUTCOMES.has(verdict.status)) {
-    await deps.finalize(claimId, "responded", null);
-    await deps.updateEntry(transactionId, scope, (current) =>
-      current && { ...current, status: verdict.status, decision: { ...current.decision, outcome: verdict.status } },
+    await recordSettlement(
+      ctx,
+      "responded",
+      null,
+      (current) =>
+        ownsEntry(current, decisionKey)
+          ? { ...current, status: verdict.status, decision: { ...current.decision, outcome: verdict.status } }
+          : null,
+      verdict.status,
     );
     return verdict.status;
   }
@@ -171,17 +240,67 @@ async function settle({ context, claimId, transactionId, action, scope, deps, re
     `${LABEL} Could not confirm the ${action} of offer ${transactionId} (${verdict.status}` +
     `${verdict.observed ? `: ${verdict.observed}` : ""}${reason ? `; ${reason}` : ""}). ` +
     "It needs manual verification in ESPN before anything else is sent.";
-  await deps.finalize(claimId, "response_unknown", message);
-  await deps.updateEntry(transactionId, scope, (current) =>
-    current && { ...current, decision: { ...current.decision, outcome: "unknown", verification: verdict } },
+  await recordSettlement(ctx, "response_unknown", message, (current) =>
+    ownsEntry(current, decisionKey)
+      ? { ...current, decision: { ...current.decision, outcome: "unknown", verification: verdict } }
+      : null,
   );
   await deps.activityEvent("manual_verification_required", { transactionId, action, verdict });
   throw new PermanentError(message);
 }
 
+/** Refuses a retry of an unknown outcome unless a human and a fresh read both say it wasn't answered. */
+function requireUnknownRetryable({ verdict, history }, retry, transactionId) {
+  if (retry.verified_not_answered !== true) {
+    throw new PermanentError(
+      `${LABEL} Retrying offer ${transactionId} after an unknown outcome needs confirmation that someone checked ESPN and it wasn't answered.`,
+    );
+  }
+  if (history === null) {
+    throw new PermanentError(`${LABEL} Couldn't read ESPN to check offer ${transactionId} before a retry: ${verdict.observed}.`);
+  }
+  if (verdict.status !== "still_pending") {
+    throw new PermanentError(
+      `${LABEL} ESPN no longer shows offer ${transactionId} plainly pending (${verdict.status}); check it before retrying.`,
+    );
+  }
+  if (history.some((row) => String(row.relatedTransactionId) === transactionId)) {
+    throw new PermanentError(
+      `${LABEL} ESPN's trade history has a row related to offer ${transactionId}; check it before retrying.`,
+    );
+  }
+}
+
+/**
+ * Handles a key that already has a claim, without ever posting. Returns {result} when the run is
+ * done, or {retryable: true} when a human retry may supersede the claim.
+ */
+async function reconcileClaim(ctx, existing, retry) {
+  const { transactionId, action, decisionKey } = ctx;
+  if (existing.status === "responded") {
+    logger.info(`${LABEL} Decision ${decisionKey} was already sent; nothing to do.`);
+    return { result: { status: "duplicate", decisionKey } };
+  }
+  if (existing.status === "rejected") {
+    if (retry) return { retryable: true };
+    throw new PermanentError(
+      `${LABEL} ESPN rejected the earlier ${action} of offer ${transactionId}. It stays blocked until someone retries it from the inbox.`,
+    );
+  }
+
+  const read = await readVerdict(ctx);
+  if (existing.status === "response_unknown" && retry && !CONFIRMED_OUTCOMES.has(read.verdict.status)) {
+    requireUnknownRetryable(read, retry, transactionId);
+    return { retryable: true };
+  }
+  const reason = existing.status === "responding" ? "found a claim left responding" : "rechecked an unknown outcome";
+  const outcome = await settle({ ...ctx, claimId: existing.id, read, reason });
+  return { result: { status: "responded", outcome, decisionKey, reconciled: true } };
+}
+
 async function executeTradeResponse(payload, overrides = {}) {
   const request = requireResponsePayload(payload);
-  const { transactionId, action, comment, approval } = request;
+  const { transactionId, action, comment, approval, retry } = request;
   const deps = { ...defaultDeps(), ...overrides };
   const now = deps.now ?? new Date();
   const leagueId = process.env.ESPN_LEAGUE_ID;
@@ -194,18 +313,51 @@ async function executeTradeResponse(payload, overrides = {}) {
     if (!period) throw new PermanentError(`${LABEL} No regular-season week to respond in.`);
     const { season } = period;
     const scope = { leagueId, season, teamId };
+    const espnScope = { leagueId, seasonId: String(season), teamId };
+
+    // Reconcile first: a claimed key is settled from reads, before anything that could refuse it
+    // as a fresh offer.
+    const existing = approval ? await deps.findResponse(approval.decision_key) : null;
+    if (existing && (existing.espn_transaction_id !== transactionId || existing.action !== action)) {
+      throw new PermanentError(
+        `${LABEL} The approval's decision key belongs to a ${existing.action} of offer ${existing.espn_transaction_id}, ` +
+          `which doesn't match this ${action} of offer ${transactionId}.`,
+      );
+    }
+    if (existing?.status === "responded") {
+      logger.info(`${LABEL} Decision ${approval.decision_key} was already sent; nothing to do.`);
+      return { status: "duplicate", decisionKey: approval.decision_key };
+    }
+    if (existing && retry && String(retry.of_claim_id) !== String(existing.id)) {
+      throw new PermanentError(
+        `${LABEL} The retry names claim ${retry.of_claim_id}, but this decision's current claim is ${existing.id}; check it again.`,
+      );
+    }
 
     session = await deps.openSession();
-    const { trades } = await deps.readPending(session.context, { leagueId, seasonId: String(season), teamId });
+    const ctx = { context: session.context, transactionId, action, scope, deps };
+    let supersedes = null;
+    if (existing) {
+      const reconciled = await reconcileClaim({ ...ctx, decisionKey: approval.decision_key }, existing, retry);
+      if (reconciled.result) return reconciled.result;
+      supersedes = {
+        id: existing.id,
+        status: existing.status,
+        trackingId,
+        retriedBy: retry.approved_by.trim(),
+        verifiedNotAnswered: retry.verified_not_answered === true,
+      };
+    }
+
+    const { trades } = await deps.readPending(session.context, espnScope);
     const offer = trades.find((t) => String(t.id) === transactionId && t.type === "TRADE_PROPOSAL");
     if (!offer || offer.proposingTeamId === String(teamId)) {
       throw new PermanentError(`${LABEL} Offer ${transactionId} is no longer pending to us.`);
     }
+    // An unlocked snapshot: it lets the dry-run path record what it would do. Every check on it
+    // is repeated under the offer lock when claiming.
     const stored = await deps.loadEntry(transactionId, { leagueId });
     if (!stored) throw new PermanentError(`${LABEL} Offer ${transactionId} is not in the inbox.`);
-    if (stored.status === STATUS.RESPONDING) {
-      throw new PermanentError(`${LABEL} Offer ${transactionId} is already being responded to; reconcile it first.`);
-    }
 
     const fresh = toInboxEntry(offer, teamId);
     const decisionKey = computeDecisionKey({
@@ -227,8 +379,13 @@ async function executeTradeResponse(payload, overrides = {}) {
       throw new PermanentError(`${LABEL} Offer ${transactionId} expires too soon to respond safely.`);
     }
 
-    const roster = await deps.readRoster(session.context, { leagueId, seasonId: String(season), teamId });
-    if (action === "accept") preflightAccept(stored, fresh, roster, transactionId);
+    const roster = await deps.readRoster(session.context, espnScope);
+    if (action === "accept") {
+      if (roster.rosterLocked) {
+        throw new PermanentError(`${LABEL} Our roster is locked, so offer ${transactionId} can't be accepted now.`);
+      }
+      requireCurrentScore(stored, fresh.fingerprint, transactionId);
+    }
 
     const submission = {
       leagueId,
@@ -247,6 +404,7 @@ async function executeTradeResponse(payload, overrides = {}) {
       comment,
       approved_by: approval?.approved_by ?? null,
       tracking_id: trackingId,
+      ...(supersedes ? { retry_of: supersedes.id, retried_by: supersedes.retriedBy } : {}),
     };
 
     const locks = closedLocks(request, deps);
@@ -265,39 +423,48 @@ async function executeTradeResponse(payload, overrides = {}) {
         comment,
         approvedBy: approval?.approved_by,
       });
+      // A dry run never overwrites the decision of a claim in progress.
       await deps.updateEntry(transactionId, scope, (current) =>
-        current && { ...current, decision: { ...decision, outcome: "blocked", closed_locks: locks, at: now.toISOString() } },
+        current && current.status !== STATUS.RESPONDING && current.fingerprint === fresh.fingerprint
+          ? { ...current, decision: { ...decision, outcome: "blocked", closed_locks: locks, at: now.toISOString() } }
+          : null,
       );
       return { status: "response_blocked", closedLocks: locks, decisionKey, wouldSend };
     }
 
-    const claim = await deps.claim(decisionKey, {
-      leagueId,
-      season,
-      transactionId,
-      proposingTeamId: fresh.proposing_team_id,
-      action,
-      comment,
-      approvedBy: approval.approved_by,
+    const claim = await deps.claimOffer(transactionId, scope, {
+      decisionKey,
+      expectedFingerprint: fresh.fingerprint,
+      row: {
+        leagueId,
+        season,
+        transactionId,
+        proposingTeamId: fresh.proposing_team_id,
+        action,
+        comment,
+        approvedBy: approval.approved_by,
+      },
+      decision: { ...decision, outcome: "pending", claimed_at: now.toISOString() },
+      validate: action === "accept" ? (entry) => requireCurrentScore(entry, fresh.fingerprint, transactionId) : undefined,
+      supersedes,
+      now,
     });
-    if (!claim.claimed && claim.existing === "responded") {
-      logger.info(`${LABEL} Decision ${decisionKey} was already sent; nothing to do.`);
-      return { status: "duplicate", decisionKey };
-    }
+    const claimCtx = { ...ctx, decisionKey };
     if (!claim.claimed) {
-      const outcome = await settle({ context: session.context, claimId: claim.id, transactionId, action, scope, deps, reason: "found a claim left responding" });
-      return { status: "responded", outcome, decisionKey, reconciled: true };
+      // Another delivery of this key claimed it after the lookup above. Settle it; never post.
+      const { result } = await reconcileClaim(claimCtx, { id: claim.id, status: claim.existing }, null);
+      return result;
     }
-
-    const previousStatus = stored.status;
-    await deps.updateEntry(transactionId, scope, (current) =>
-      current && { ...current, status: STATUS.RESPONDING, decision: { ...decision, outcome: "pending", claimed_at: now.toISOString() } },
-    );
+    const settleCtx = { ...claimCtx, claimId: claim.id };
     await deps.beforeExternalWrite();
 
-    const reopen = (outcome, extra) =>
-      deps.updateEntry(transactionId, scope, (current) =>
-        current && { ...current, status: previousStatus, decision: { ...current.decision, outcome, ...extra } },
+    // ESPN definitely refused, so the offer is open again. This key stays blocked until a human
+    // retries it, matching core's gate on rejected responses.
+    const reopen = (errorMessage, extra) =>
+      recordSettlement(settleCtx, "rejected", errorMessage, (current) =>
+        current?.status === STATUS.RESPONDING && current.decision?.decision_key === decisionKey
+          ? { ...current, status: STATUS.OPEN, decision: { ...current.decision, outcome: "rejected", ...extra } }
+          : null,
       );
 
     let unknownReason = null;
@@ -305,22 +472,20 @@ async function executeTradeResponse(payload, overrides = {}) {
       await deps.submit(session.context, submission);
     } catch (error) {
       if (error instanceof SessionExpiredError) {
-        // ESPN refused the session, so the response wasn't processed. A fresh approval is needed,
-        // because this claim's activity is already marked as an external write.
-        await deps.finalize(claim.id, "rejected", error.message);
-        await reopen("rejected", { error: "session expired" });
-        throw new PermanentError(`${LABEL} ESPN rejected the session; refresh it and approve the response again.`);
+        // ESPN refused the session, so the response wasn't processed. The activity is already
+        // marked as an external write, so this delivery can't run again: retry it from the inbox.
+        await reopen(error.message, { error: "session expired" });
+        throw new PermanentError(`${LABEL} ESPN rejected the session; refresh it and retry the response from the inbox.`);
       }
       if (error.permanent) {
-        await deps.finalize(claim.id, "rejected", error.message);
-        await reopen("rejected", { error: error.message, details: error.details ?? [] });
+        await reopen(error.message, { error: error.message, details: error.details ?? [] });
         throw error;
       }
       unknownReason = `send outcome unknown: ${error.message}`;
       logger.warn(`${LABEL} ${unknownReason}; reading ESPN back instead of retrying.`);
     }
 
-    const outcome = await settle({ context: session.context, claimId: claim.id, transactionId, action, scope, deps, reason: unknownReason });
+    const outcome = await settle({ ...settleCtx, reason: unknownReason });
     logger.info(`${LABEL} Offer ${transactionId}: ${action} confirmed as ${outcome}.`);
     return { status: "responded", outcome, decisionKey };
   } catch (error) {

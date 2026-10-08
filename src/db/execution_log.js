@@ -1,4 +1,5 @@
 const activity = require("./activity");
+const { TRADE_RESPONSE_TYPE, BLOCKING_RESPONSE_STATUSES, tradeResponseJson } = require("./trade_response_rows");
 const { Pool } = require("pg");
 const { logger } = require("../telemetry/logger");
 
@@ -288,81 +289,39 @@ async function recordTradeOfferFill({ offerKey, status, dryRun, errorMessage, ..
 // counter_offer, the sha256 trade_inbox.js computeDecisionKey derives from one action on one
 // version of one offer. Statuses:
 //   response_blocked — a dry run with at least one lock closed (recordTradeResponseBlocked)
-//   responding       — a claim taken just before the irreversible POST (claimTradeResponse)
-//   responded / rejected / response_unknown — that claim, finalized (finalizeTradeResponse)
-// As with offer submissions, the claim THROWS on a DB error: it is the only guard against a
-// redelivered approval sending a second response to a real manager.
+//   responding       — a claim taken just before the irreversible POST
+//   responded / rejected / response_unknown — that claim, settled
+//   superseded       — a rejected or unknown claim a human chose to retry
+// The claim and the settle live in db/trade_inbox.js, because each one has to change the response
+// row and the inbox entry in one transaction under the offer's lock.
 
-const TRADE_RESPONSE_TYPE = "trade_response";
-
-function tradeResponseJson(decisionKey, row, extra = {}) {
-  return JSON.stringify({
-    decision_key: decisionKey,
-    espn_transaction_id: row.transactionId,
-    action: row.action,
-    comment: row.comment ?? null,
-    approved_by: row.approvedBy ?? null,
-    ...extra,
-  });
+/**
+ * The claim on decisionKey in a state that blocks another send, most settled first, or null.
+ * Throws on a DB error: when it can't answer, the caller mustn't treat the key as unclaimed.
+ */
+async function findTradeResponse(decisionKey) {
+  const { rows } = await pool.query(
+    `SELECT id, status, counter_offer->>'espn_transaction_id' AS espn_transaction_id,
+            counter_offer->>'action' AS action
+       FROM execution_log
+      WHERE transaction_type = '${TRADE_RESPONSE_TYPE}'
+        AND counter_offer->>'decision_key' = $1
+        AND status = ANY($2)
+      ORDER BY array_position($2::text[], status), executed_at DESC
+      LIMIT 1`,
+    [decisionKey, [...BLOCKING_RESPONSE_STATUSES]],
+  );
+  return rows[0] || null;
 }
 
-const FIND_RESPONSE_CLAIM_SQL = `SELECT id, status FROM execution_log
-       WHERE transaction_type = '${TRADE_RESPONSE_TYPE}'
-         AND counter_offer->>'decision_key' = $1
-         AND status IN ('responding', 'responded')
-       ORDER BY (status = 'responded') DESC, executed_at DESC
-       LIMIT 1`;
-
-/** {claimed: true, id}, or {claimed: false, existing, id} when the key is already claimed. */
-async function claimTradeResponse(decisionKey, row) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [decisionKey]);
-    const existing = await client.query(FIND_RESPONSE_CLAIM_SQL, [decisionKey]);
-    if (existing.rows.length > 0) {
-      await client.query("COMMIT");
-      return { claimed: false, existing: existing.rows[0].status, id: existing.rows[0].id };
-    }
-    const inserted = await client.query(
-      `INSERT INTO execution_log (transaction_type, bot_name, status, league_id, season, offering_team_id, counter_offer, dry_run)
-       VALUES ($1, $2, 'responding', $3, $4, $5, $6, false)
-       RETURNING id`,
-      [
-        TRADE_RESPONSE_TYPE,
-        "trade_response",
-        row.leagueId || null,
-        row.season || null,
-        row.proposingTeamId || null,
-        tradeResponseJson(decisionKey, row),
-      ],
-    );
-    await client.query("COMMIT");
-    return { claimed: true, id: inserted.rows[0].id };
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-/** Best-effort: if this fails the row stays `responding`, which reconciles on any redelivery. */
-async function finalizeTradeResponse(id, status, errorMessage) {
+/** The Activity record of a settled response. Best-effort, like every activity.event. */
+async function recordTradeResponseOutcome(id, status, errorMessage) {
   await activity.event(
     "trade_response_" + status,
     { ledgerId: id, errorMessage },
     status === "responded" ? "submitted" : "failed",
     status === "responded" ? "responded" : "unknown",
   );
-  try {
-    await pool.query(
-      "UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1",
-      [id, status, errorMessage || null],
-    );
-  } catch (err) {
-    logger.error("[Execution Log] Failed to finalize trade response", { err });
-  }
 }
 
 /** Best-effort record of a response that a closed lock kept from being sent. */
@@ -388,8 +347,8 @@ async function recordTradeResponseBlocked({ decisionKey, closedLocks, body, ...r
 }
 
 module.exports = {
-  claimTradeResponse,
-  finalizeTradeResponse,
+  findTradeResponse,
+  recordTradeResponseOutcome,
   recordTradeResponseBlocked,
   recordExecution,
   recordDraftPickClick,
