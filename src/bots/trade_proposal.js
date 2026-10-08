@@ -66,7 +66,7 @@ function selectTargets(deficits, fromTeamId, excluded, context) {
   for (const target of findTradeTargets(deficits, fromTeamId)) {
     if (excluded.has(target.team_id) || seen.has(target.team_id)) continue;
     if (context && !context.teams?.[target.team_id]) {
-      logger.warn({ target }, "[Trade Proposal] Target team missing from trade context; skipped");
+      logger.warn("[Trade Proposal] Target team missing from trade context; skipped", { target });
       continue;
     }
     seen.add(target.team_id);
@@ -227,10 +227,11 @@ async function generateTradeProposal(payload) {
 
     const { ranked, rejections } = rankScoredPackages(scored);
     const allRejections = [...invalid, ...unscored, ...rejections];
-    logger.info(
-      { trackingId, ranked: ranked.map((entry) => ({ package: entry.package, basis: entry.basis, value: entry.value_per_scored_week })), rejections: allRejections },
-      "[Trade Proposal] Ranked candidate packages",
-    );
+    logger.info("[Trade Proposal] Ranked candidate packages", {
+      trackingId,
+      ranked: ranked.map((entry) => ({ package: entry.package, basis: entry.basis, value: entry.value_per_scored_week })),
+      rejections: allRejections,
+    });
     if (!ranked.length) return noOffer("no_useful_offer", topTarget, allRejections);
     const [winner] = ranked;
 
@@ -244,7 +245,7 @@ async function generateTradeProposal(payload) {
       pitch = validatePitch(parseJsonResponse(response.text), evidence);
     } catch (error) {
       // Regenerating can't make an ungrounded note grounded, so this stages nothing.
-      logger.warn({ err: error, trackingId }, "[Trade Proposal] Pitch rejected");
+      logger.warn("[Trade Proposal] Pitch rejected", { err: error, trackingId });
       return noOffer("pitch_rejected", winner.target, allRejections);
     }
 
@@ -276,14 +277,14 @@ async function generateTradeProposal(payload) {
       message: pitch.message,
     };
     const target = winner.target;
-    logger.info({ target, offer, trackingId }, "[Trade Proposal] Computed offer for approval");
+    logger.info("[Trade Proposal] Computed offer for approval", { target, offer, trackingId });
     session = (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     // As with counters, don't regenerate a computed offer just because staging failed.
     let submission;
     try {
       submission = await submitTradeOffer(offer, { source: "proposal", trackingId, session, evaluation });
     } catch (error) {
-      logger.warn({ err: error, target, offer }, "[Trade Proposal] Could not stage computed offer");
+      logger.warn("[Trade Proposal] Could not stage computed offer", { err: error, target, offer });
       submission = { status: "fill_failed", error: error.message };
     }
     return { target, offer, evaluation, submission };
