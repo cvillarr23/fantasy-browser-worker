@@ -28,6 +28,8 @@ const {
   toInboxEntry,
   mergeEntry,
   buildScoreRequest,
+  buildIncomingEvaluation,
+  incomingEvaluationFor,
   scoreFromResponse,
   scoreAfterFailure,
   unscorableScore,
@@ -127,15 +129,41 @@ function requireLeagueAndTeam() {
 }
 
 async function scoreEntry(entry, { leagueId, season, week, now }, score) {
-  const meta = { fingerprint: entry.fingerprint, scoredAt: now.toISOString(), week };
+  const meta = {
+    fingerprint: entry.fingerprint,
+    scoredAt: now.toISOString(),
+    week,
+  };
   const built = buildScoreRequest(entry, { leagueId, season, week });
-  if (built.unscorable) return { score: unscorableScore(built.unscorable, meta), called: false };
+  if (built.unscorable)
+    return {
+      score: unscorableScore(built.unscorable, meta),
+      evaluation: null,
+      called: false,
+    };
   const result = await score(built.request);
   if (result.ok) {
-    return { score: scoreFromResponse(result.body, { ...meta, partialReasons: built.partialReasons }), called: true };
+    return {
+      score: scoreFromResponse(result.body, {
+        ...meta,
+        partialReasons: built.partialReasons,
+      }),
+      evaluation: buildIncomingEvaluation({
+        request: built.request,
+        body: result.body,
+        fingerprint: entry.fingerprint,
+        evaluatedAt: meta.scoredAt,
+      }),
+      called: true,
+    };
   }
   logger.warn(`[Trade Inbox] Could not score offer ${entry.espn_transaction_id}: ${result.message}`);
-  return { score: scoreAfterFailure(entry.score, result, meta), called: true };
+  const nextScore = scoreAfterFailure(entry.score, result, meta);
+  return {
+    score: nextScore,
+    evaluation: nextScore.stale ? incomingEvaluationFor({ ...entry, score: nextScore }) : null,
+    called: true,
+  };
 }
 
 const byExpiry = (a, b) =>
@@ -184,9 +212,9 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
     const merged = fresh.map((e) => mergeEntry(storedById.get(e.espn_transaction_id) ?? null, e, now));
     for (const entry of [...merged].sort(byExpiry)) {
       if (!needsScore(entry, week) || scoreCalls >= MAX_SCORE_CALLS_PER_REFRESH) continue;
-      const { score, called } = await scoreEntry(entry, { leagueId, season, week, now }, deps.score);
+      const { score, evaluation, called } = await scoreEntry(entry, { leagueId, season, week, now }, deps.score);
       if (called) scoreCalls += 1;
-      scores.set(entry.espn_transaction_id, score);
+      scores.set(entry.espn_transaction_id, { score, evaluation });
     }
 
     const applyRead = (freshEntry) => (current) => {
@@ -194,7 +222,11 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       if (acceptedIds.has(next.espn_transaction_id) && next.status !== STATUS.RESPONDING) {
         next.status = STATUS.ACCEPTED_PENDING_PROCESSING;
       }
-      if (scores.has(next.espn_transaction_id)) next.score = scores.get(next.espn_transaction_id);
+      if (scores.has(next.espn_transaction_id)) {
+        const evaluated = scores.get(next.espn_transaction_id);
+        next.score = evaluated.score;
+        next.evaluation = incomingEvaluationFor({ ...next, evaluation: evaluated.evaluation });
+      }
       next.shadow_policy = shadowPolicy(next.score, thresholds);
       return next;
     };

@@ -60,6 +60,26 @@ describe("loadInbox", () => {
 });
 
 describe("updateEntry", () => {
+  it("round-trips full evaluation JSON and preserves it through triage", async () => {
+    const evaluation = {
+      version: "incoming-trade-evaluation-v1",
+      request: { week: 5 },
+      score: {
+        horizon: {
+          unscored_weeks: [{ week: 6, reasons: ["no_week_metrics"] }],
+        },
+      },
+    };
+    const client = fakeClient([[/FOR UPDATE/, storedRow({ evaluation })]]);
+    await setTriage("tx-1", SCOPE, { state: "seen", by: "conor", now: NOW });
+    const saved = JSON.parse(
+      client.query.mock.calls.find(([sql]) => /^UPDATE/.test(sql))[1][2],
+    );
+    expect(saved.evaluation).toEqual(evaluation);
+    pool.query.mockResolvedValue(storedRow(saved));
+    const [loaded] = await loadInbox(SCOPE);
+    expect(loaded.evaluation).toEqual(evaluation);
+  });
   it("locks the offer, inserts a never-seen entry and keeps status in its column", async () => {
     const client = fakeClient([]);
     const mutate = jest.fn(() => ({ espn_transaction_id: "tx-1", status: "open", proposing_team_id: "3" }));
@@ -169,8 +189,9 @@ describe("claimOfferResponse", () => {
   const wrote = (client) => statements(client).some((sql) => /^INSERT|^UPDATE/.test(sql));
 
   it("takes the offer lock, then the key lock, then inserts the claim and marks the entry in one transaction", async () => {
+    const evaluation = { version: "incoming-trade-evaluation-v1", score: { score: { final_score: 99 } } };
     const client = fakeClient([
-      [/'trade_inbox'.*FOR UPDATE/s, open()],
+      [/'trade_inbox'.*FOR UPDATE/s, open({ evaluation })],
       [/VALUES \(\$1, \$2, 'responding'/, { rows: [{ id: 21 }] }],
     ]);
 
@@ -198,6 +219,7 @@ describe("claimOfferResponse", () => {
     expect(params[1]).toBe("responding");
     expect(JSON.parse(params[2])).toMatchObject({ decision: { decision_key: KEY, outcome: "pending" } });
     expect(JSON.parse(params[2])).not.toHaveProperty("outcome_details");
+    expect(JSON.parse(params[2]).evaluation).toEqual(evaluation);
     expect(sqls[7]).toBe("COMMIT");
   });
 
@@ -307,9 +329,10 @@ describe("claimOfferResponse", () => {
 
 describe("settleOfferResponse", () => {
   it("moves the claim and the entry together under the offer lock", async () => {
+    const evaluation = { version: "incoming-trade-evaluation-v1", score: { score: { final_score: 99 } } };
     const client = fakeClient([
       [/status = ANY\(\$4\)/, { rows: [{ id: 21 }] }],
-      [/'trade_inbox'.*FOR UPDATE/s, storedRow({ decision: { outcome: "pending" } }, "responding")],
+      [/'trade_inbox'.*FOR UPDATE/s, storedRow({ decision: { outcome: "pending" }, evaluation }, "responding")],
     ]);
 
     await expect(
@@ -328,6 +351,7 @@ describe("settleOfferResponse", () => {
     const update = calls.find(([sql]) => /counter_offer = \$3::jsonb/.test(sql));
     expect(update[1][1]).toBe("declined");
     expect(update[0]).not.toMatch(/outcome_details/);
+    expect(JSON.parse(update[1][2]).evaluation).toEqual(evaluation);
     expect(statements(client).at(-1)).toBe("COMMIT");
   });
 

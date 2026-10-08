@@ -14,6 +14,7 @@ jest.mock("../../src/bots/auth", () => ({
 const { refreshTradeInbox, postTradeScore, parseArgs, main } = require("../../src/bots/trade_inbox");
 const { STATUS, toInboxEntry, mergeEntry } = require("../../src/lib/trade_inbox");
 const inboxDb = require("../../src/db/trade_inbox");
+const { makeScore } = require("../fixtures/trade_score");
 
 const NOW = new Date("2026-10-06T18:00:00Z");
 const EXPIRES = Date.parse("2026-10-07T18:00:00Z");
@@ -83,6 +84,202 @@ beforeEach(() => {
 });
 
 describe("refreshTradeInbox", () => {
+  function fullScore(final = 3) {
+    return makeScore({
+      counterpartyTeamId: "3",
+      send: [
+        {
+          espn_id: "4429795",
+          player_id: "9509",
+          name: "Bijan Robinson",
+          position: "RB",
+          nfl_team: "ATL",
+        },
+      ],
+      receive: [
+        {
+          espn_id: "-16021",
+          player_id: "PHI",
+          name: "Eagles D/ST",
+          position: "D/ST",
+          nfl_team: "PHI",
+        },
+      ],
+      score: { final_score: final },
+    });
+  }
+
+  async function refreshWithEvidence(final = 3) {
+    const body = {
+      ...fullScore(final),
+      league_id: "1248158344",
+      our_team: { team_id: "8", name: "Us" },
+    };
+    deps.score.mockResolvedValue({ ok: true, body });
+    await refreshTradeInbox({ persist: true }, deps);
+    return body;
+  }
+
+  it("stores full advisory evidence on a scored refresh and preserves it on a current refresh", async () => {
+    const body = await refreshWithEvidence();
+    const saved = deps.store.rows.get("tx-1");
+    expect(saved.evaluation).toEqual({
+      version: "incoming-trade-evaluation-v1",
+      evaluated_at: NOW.toISOString(),
+      scored_fingerprint: saved.fingerprint,
+      request: deps.score.mock.calls[0][0],
+      score: body,
+    });
+    deps.score.mockClear();
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.score).not.toHaveBeenCalled();
+    expect(deps.store.rows.get("tx-1").evaluation).toEqual(saved.evaluation);
+  });
+
+  it("keeps evidence and its original timestamp with a same-offer stale numeric score", async () => {
+    await refreshWithEvidence();
+    const original = deps.store.rows.get("tx-1").evaluation;
+    deps.now = new Date("2026-10-06T20:00:00Z");
+    deps.store.rows.get("tx-1").score.retry = true;
+    deps.score.mockResolvedValue({ ok: false, status: 503, message: "down" });
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1")).toMatchObject({
+      evaluation: original,
+      score: { stale: true, retry: true, scored_at: NOW.toISOString() },
+    });
+  });
+
+  it.each([409, 422, 503])(
+    "clears old evidence on failure %s after the fingerprint changes",
+    async (status) => {
+      await refreshWithEvidence();
+      deps.readPending.mockResolvedValue({
+        trades: [trade({ proposedDate: NOW.getTime() })],
+      });
+      deps.score.mockResolvedValue({ ok: false, status, message: "down" });
+      await refreshTradeInbox({ persist: true }, deps);
+      expect(deps.store.rows.get("tx-1").evaluation).toBeNull();
+      expect(deps.store.rows.get("tx-1").score.final_score).toBeNull();
+    },
+  );
+
+  it.each([409, 422])(
+    "clears same-offer evidence on permanent failure %s",
+    async (status) => {
+      await refreshWithEvidence();
+      deps.store.rows.get("tx-1").score.retry = true;
+      deps.score.mockResolvedValue({ ok: false, status, message: "rejected" });
+      await refreshTradeInbox({ persist: true }, deps);
+      expect(deps.store.rows.get("tx-1").evaluation).toBeNull();
+    },
+  );
+
+  it("retains unavailable evidence on success but clears it on a transient failure with no numeric score", async () => {
+    await refreshWithEvidence(null);
+    expect(
+      deps.store.rows.get("tx-1").evaluation.score.score.final_score,
+    ).toBeNull();
+    deps.store.rows.get("tx-1").score.retry = true;
+    deps.score.mockResolvedValue({ ok: false, message: "timeout" });
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1").evaluation).toBeNull();
+  });
+
+  it("clears changed-offer evidence even when scoring is deferred by the refresh cap", async () => {
+    await refreshWithEvidence();
+    const earlier = Array.from({ length: 10 }, (_, i) =>
+      trade({ id: `earlier-${i}`, expirationDate: EXPIRES - 1000 }),
+    );
+    deps.readPending.mockResolvedValue({
+      trades: [...earlier, trade({ proposedDate: NOW.getTime() })],
+    });
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1").evaluation).toBeNull();
+    expect(deps.store.rows.get("tx-1").score.final_score).toBe(3);
+  });
+
+  it("keeps summaries when new evidence is invalid or oversized, without mixing in old evidence", async () => {
+    await refreshWithEvidence();
+    for (const body of [
+      scoreBody(7),
+      { ...fullScore(7), league_id: "1248158344", our_team: { team_id: "8", name: "Us" }, padding: "x".repeat(65536) },
+    ]) {
+      deps.store.rows.get("tx-1").score.retry = true;
+      deps.score.mockResolvedValue({ ok: true, body });
+      await refreshTradeInbox({ persist: true }, deps);
+      expect(deps.store.rows.get("tx-1")).toMatchObject({
+        score: { final_score: 7 },
+        evaluation: null,
+      });
+    }
+  });
+
+  it("clears evidence for a locally unscorable changed offer", async () => {
+    await refreshWithEvidence();
+    deps.readPending.mockResolvedValue({
+      trades: [trade({ items: [trade().items[0]] })],
+    });
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1")).toMatchObject({
+      evaluation: null,
+      score: { state: "unscorable" },
+    });
+  });
+
+  it("leaves old rows nullable without an extra scoring call", async () => {
+    await refreshTradeInbox({ persist: true }, deps);
+    delete deps.store.rows.get("tx-1").evaluation;
+    deps.score.mockClear();
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1").evaluation).toBeNull();
+    expect(deps.score).not.toHaveBeenCalled();
+  });
+
+  it("replaces evidence when the week changes and on a successful changed-offer refresh", async () => {
+    await refreshWithEvidence();
+    deps.readState.mockResolvedValue({ ...STATE, week: 6 });
+    deps.now = new Date("2026-10-13T18:00:00Z");
+    const body = {
+      ...fullScore(4),
+      as_of_week: 6,
+      league_id: "1248158344",
+      our_team: { team_id: "8", name: "Us" },
+    };
+    deps.score.mockResolvedValue({ ok: true, body });
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1").evaluation).toMatchObject({
+      request: { week: 6 },
+      evaluated_at: deps.now.toISOString(),
+      score: body,
+    });
+    deps.readPending.mockResolvedValue({
+      trades: [trade({ proposedDate: NOW.getTime() })],
+    });
+    const previous = deps.store.rows.get("tx-1").fingerprint;
+    await refreshTradeInbox({ persist: true }, deps);
+    const saved = deps.store.rows.get("tx-1");
+    expect(saved.fingerprint).not.toBe(previous);
+    expect(saved.evaluation.scored_fingerprint).toBe(saved.fingerprint);
+    expect(saved.score.scored_fingerprint).toBe(saved.fingerprint);
+  });
+
+  it("preserves evidence when pending reads fail and when an offer retires", async () => {
+    await refreshWithEvidence();
+    const original = deps.store.rows.get("tx-1").evaluation;
+    deps.readPending.mockRejectedValueOnce(new Error("ESPN down"));
+    await expect(refreshTradeInbox({ persist: true }, deps)).rejects.toThrow(
+      "ESPN down",
+    );
+    expect(deps.store.rows.get("tx-1").evaluation).toEqual(original);
+    deps.readPending.mockResolvedValue({ trades: [] });
+    deps.readHistory.mockResolvedValue([{ id: "tx-1", status: "CANCELED" }]);
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.store.rows.get("tx-1")).toMatchObject({
+      evaluation: original,
+      status: "withdrawn",
+    });
+  });
+
   it("is quiet off-season and opens no session", async () => {
     deps.readState.mockResolvedValue({ ...STATE, season_type: "off" });
     await expect(refreshTradeInbox({ persist: true }, deps)).resolves.toEqual({ status: "off_season" });
