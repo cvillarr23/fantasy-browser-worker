@@ -276,17 +276,38 @@ have sent.
 
 It always refuses to send for any of these:
 - the offer is gone, or expires within five minutes;
-- the offer is already being responded to;
+- the offer isn't open in the inbox, or changed since it was read;
+- another response to the offer is already claimed, in progress, settled, unknown
+  or rejected;
 - for an accept, the roster is locked, the offer has no current score, or the trade
   would put us over the roster limit.
 
-Each decision key is claimed before the POST. ESPN is read back afterwards,
-including after an unknown outcome. Anything the reads can't confirm stops for
-manual verification in ESPN and is never resent. Veto and league-manager actions
-are not offered.
+**Claims.** Before checking the offer, it looks for an existing claim on the
+approval's decision key. A responded key returns `duplicate`. A responding or
+unknown one is settled by reading ESPN back, even when the offer has already left
+the pending list, and is never resent. Otherwise it claims the offer under the same
+`trade-inbox:{league}:{transactionId}` advisory lock that the inbox refresh and
+core-pipeline use. Under that lock it re-checks the stored entry and writes the
+claim row and the entry's `responding` status in one transaction. Only one response
+per offer can be claimed, so an accept and a decline can't both be sent. ESPN is
+read back after the POST, including after an unknown outcome. Anything the reads
+can't confirm stops for manual verification in ESPN. Core-pipeline's
+`outcome_details` publication metadata is never rewritten. Veto and league-manager
+actions are not offered.
+
+**Retrying.** A response that ESPN rejected stays blocked until a human retries it.
+So does one whose outcome is unknown. To retry, send the same approval with a new
+`tracking_id` and `retry: {of_claim_id, approved_by, verified_not_answered}`, where
+`of_claim_id` is the `trade_response` row id. A rejected response can be retried
+directly. An unknown one also needs `verified_not_answered: true`, meaning someone
+checked ESPN, and a fresh read that still shows the offer pending with no related
+history row. If the reads now confirm the earlier response, it is settled instead
+of resent. The retried row becomes `superseded` in the same transaction as the new
+claim.
 
 ```bash
 node src/bots/trade_response.js '{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"}}'
+node src/bots/trade_response.js '{"tracking_id":"<new uuid>","espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"},"retry":{"of_claim_id":123,"approved_by":"you","verified_not_answered":true}}'
 ```
 
 `computeDecisionKey` in `src/lib/trade_inbox.js` defines the key, which is a

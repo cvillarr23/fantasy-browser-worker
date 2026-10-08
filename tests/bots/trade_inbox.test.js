@@ -198,6 +198,20 @@ describe("refreshTradeInbox", () => {
     expect(deps.store.update).not.toHaveBeenCalled();
   });
 
+  it("keeps a still-pending offer's responding status and decision through a refresh", async () => {
+    const decision = { decision_key: "k".repeat(64), outcome: "pending" };
+    deps.store = memoryStore([
+      { ...mergeEntry(null, toInboxEntry(trade(), "8"), NOW), status: STATUS.RESPONDING, decision },
+    ]);
+    deps.readPending.mockResolvedValue({
+      trades: [trade(), trade({ id: "acc", type: "TRADE_ACCEPT", proposingTeamId: "8", relatedTransactionId: "tx-1" })],
+    });
+
+    await refreshTradeInbox({ persist: true }, deps);
+
+    expect(deps.store.rows.get("tx-1")).toMatchObject({ status: STATUS.RESPONDING, decision });
+  });
+
   it("skips retiring offers when the history read fails", async () => {
     const stored = mergeEntry(null, toInboxEntry(trade({ id: "gone" }), "8"), NOW);
     deps.store = memoryStore([stored]);

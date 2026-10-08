@@ -101,11 +101,19 @@ beforeEach(() => {
       order.push(`inbox:${inbox.status}`);
       return inbox;
     }),
-    claim: jest.fn(async () => {
+    findResponse: jest.fn().mockResolvedValue(null),
+    claimOffer: jest.fn(async (_id, _scope, { decision, validate }) => {
       order.push("claim");
+      if (validate) validate(inbox);
+      inbox = { ...inbox, status: STATUS.RESPONDING, decision };
       return { claimed: true, id: 31 };
     }),
-    finalize: jest.fn(async (_id, status) => order.push(`finalize:${status}`)),
+    settleOffer: jest.fn(async (_id, _scope, { ledgerStatus, mutate }) => {
+      order.push(`settle:${ledgerStatus}`);
+      inbox = mutate(inbox) ?? inbox;
+      return { settled: true };
+    }),
+    recordOutcome: jest.fn(),
     recordBlocked: jest.fn(),
     beforeExternalWrite: jest.fn(async () => order.push("before-write")),
     submit: jest.fn(async () => {
@@ -133,6 +141,9 @@ describe("requireResponsePayload", () => {
     [{ espn_transaction_id: "tx-1", action: "veto" }, /action must be accept or decline/],
     [{ espn_transaction_id: "tx-1", action: "decline", comment: 5 }, /comment must be a string/],
     [{ espn_transaction_id: "tx-1", action: "decline", approval: { decision_key: "x" } }, /approval needs/],
+    [{ espn_transaction_id: "tx-1", action: "decline", retry: { of_claim_id: 0, approved_by: "conor" } }, /retry needs/],
+    [{ espn_transaction_id: "tx-1", action: "decline", retry: { of_claim_id: 4, approved_by: " " } }, /retry needs/],
+    [{ espn_transaction_id: "tx-1", action: "decline", retry: { of_claim_id: 4, approved_by: "conor", verified_not_answered: "yes" } }, /retry needs/],
   ])("rejects %j", (input, message) => {
     expect(() => requireResponsePayload(input)).toThrow(message);
   });
@@ -153,7 +164,7 @@ describe("executeTradeResponse locks", () => {
     expect(result).toMatchObject({ status: "response_blocked", closedLocks: [lock] });
     expect(result.wouldSend).toMatchObject({ type: "TRADE_DECLINE", relatedTransactionId: "tx-1" });
     expect(deps.submit).not.toHaveBeenCalled();
-    expect(deps.claim).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
     expect(deps.beforeExternalWrite).not.toHaveBeenCalled();
     expect(deps.recordBlocked).toHaveBeenCalledWith(expect.objectContaining({ closedLocks: [lock] }));
     expect(deps.inbox()).toMatchObject({ status: STATUS.OPEN, decision: { outcome: "blocked", closed_locks: [lock] } });
@@ -217,9 +228,30 @@ describe("executeTradeResponse pre-flight", () => {
     expect(deps.submit).not.toHaveBeenCalled();
   });
 
-  it("refuses while responding to an offer already being responded to", async () => {
-    deps.loadEntry.mockResolvedValue(storedEntry({ status: STATUS.RESPONDING }));
-    await expect(executeTradeResponse(payload(), deps)).rejects.toThrow(/already being responded to/);
+  it("refuses an approval whose existing claim is for another offer or action", async () => {
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responding", espn_transaction_id: "tx-2", action: "decline" });
+    await expect(executeTradeResponse(payload(), deps)).rejects.toThrow(/doesn't match/);
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responding", espn_transaction_id: "tx-1", action: "accept" });
+    await expect(executeTradeResponse(payload(), deps)).rejects.toThrow(/doesn't match/);
+    expect(deps.submit).not.toHaveBeenCalled();
+  });
+
+  it("refuses a key whose earlier send ESPN rejected, unless a human retries it", async () => {
+    deps.findResponse.mockResolvedValue({ id: 4, status: "rejected", espn_transaction_id: "tx-1", action: "decline" });
+    await expect(executeTradeResponse(payload(), deps)).rejects.toThrow(/rejected/);
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+  });
+
+  it("does not let a blocked dry run overwrite a claim in progress", async () => {
+    delete process.env.TRADE_RESPONSE_ENABLED;
+    const responding = storedEntry({ status: STATUS.RESPONDING, decision: { decision_key: keyFor("accept"), outcome: "pending" } });
+    deps.loadEntry.mockResolvedValue(responding);
+
+    await executeTradeResponse(payload(), deps);
+
+    const mutate = deps.updateEntry.mock.calls[0][2];
+    expect(mutate(responding)).toBeNull();
+    expect(mutate(storedEntry())).toMatchObject({ decision: { outcome: "blocked" } });
   });
 });
 
@@ -227,7 +259,8 @@ describe("executeTradeResponse live path", () => {
   it("claims, marks the external write, posts, then verifies a decline", async () => {
     const result = await executeTradeResponse(payload(), deps);
 
-    expect(order).toEqual(["claim", "inbox:responding", "before-write", "post", "finalize:responded", "inbox:declined"]);
+    expect(order).toEqual(["claim", "before-write", "post", "settle:responded"]);
+    expect(deps.inbox().status).toBe(STATUS.DECLINED);
     expect(deps.submit).toHaveBeenCalledWith(
       {},
       expect.objectContaining({ action: "decline", transactionId: "tx-1", memberId: "{SWID}", scoringPeriodId: 5, teamId: "8" }),
@@ -248,18 +281,53 @@ describe("executeTradeResponse live path", () => {
     expect(deps.inbox().status).toBe(STATUS.ACCEPTED_PENDING_PROCESSING);
   });
 
-  it("does nothing for a decision already responded to", async () => {
-    deps.claim.mockResolvedValue({ claimed: false, existing: "responded", id: 4 });
+  it("does nothing for a decision already responded to, without opening ESPN", async () => {
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responded", espn_transaction_id: "tx-1", action: "decline" });
     await expect(executeTradeResponse(payload(), deps)).resolves.toMatchObject({ status: "duplicate" });
+    expect(deps.openSession).not.toHaveBeenCalled();
     expect(deps.submit).not.toHaveBeenCalled();
   });
 
-  it("reconciles a claim left responding by reading, never by posting again", async () => {
-    deps.claim.mockResolvedValue({ claimed: false, existing: "responding", id: 4 });
+  it("reconciles a claim found responding before any fresh-offer check", async () => {
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responding", espn_transaction_id: "tx-1", action: "decline" });
+    deps.loadEntry.mockResolvedValue(storedEntry({ status: STATUS.RESPONDING }));
+    deps.readPending.mockReset().mockResolvedValue({ trades: [] });
+
+    const result = await executeTradeResponse(payload(), deps);
+
+    expect(result).toMatchObject({ status: "responded", outcome: STATUS.DECLINED, reconciled: true });
+    expect(deps.settleOffer).toHaveBeenCalledWith("tx-1", expect.any(Object), expect.objectContaining({ claimId: 4, ledgerStatus: "responded" }));
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+    expect(deps.submit).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a vanished accept from ESPN's accept row instead of calling it no longer pending", async () => {
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responding", espn_transaction_id: "tx-1", action: "accept" });
+    deps.readPending.mockReset().mockResolvedValue({ trades: [] });
+    deps.readHistory.mockResolvedValue([{ id: "a", type: "TRADE_ACCEPT", status: "EXECUTED", relatedTransactionId: "tx-1" }]);
+
+    const result = await executeTradeResponse(payload("accept"), deps);
+
+    expect(result).toMatchObject({ status: "responded", outcome: STATUS.ACCEPTED, reconciled: true });
+    expect(deps.submit).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a claim that another delivery took between the lookup and the claim", async () => {
+    deps.claimOffer.mockResolvedValue({ claimed: false, existing: "responding", id: 4 });
     const result = await executeTradeResponse(payload(), deps);
     expect(deps.submit).not.toHaveBeenCalled();
-    expect(deps.finalize).toHaveBeenCalledWith(4, "responded", null);
+    expect(deps.settleOffer).toHaveBeenCalledWith("tx-1", expect.any(Object), expect.objectContaining({ claimId: 4, ledgerStatus: "responded" }));
     expect(result).toMatchObject({ status: "responded", outcome: STATUS.DECLINED, reconciled: true });
+  });
+
+  it("stops for manual verification when ESPN confirms but the outcome can't be saved", async () => {
+    deps.settleOffer.mockRejectedValue(new Error("connection reset"));
+    await expect(executeTradeResponse(payload(), deps)).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/declined.*couldn't be recorded/),
+    });
+    expect(deps.activityEvent).toHaveBeenCalledWith("manual_verification_required", expect.any(Object));
+    expect(deps.submit).toHaveBeenCalledTimes(1);
   });
 
   it("treats a definite rejection as final, with ESPN's details, and reopens the offer", async () => {
@@ -268,14 +336,18 @@ describe("executeTradeResponse live path", () => {
 
     await expect(executeTradeResponse(payload(), deps)).rejects.toMatchObject({ permanent: true });
 
-    expect(deps.finalize).toHaveBeenCalledWith(31, "rejected", expect.stringMatching(/409/));
+    expect(deps.settleOffer).toHaveBeenCalledWith(
+      "tx-1",
+      expect.any(Object),
+      expect.objectContaining({ claimId: 31, ledgerStatus: "rejected", errorMessage: expect.stringMatching(/409/) }),
+    );
     expect(deps.inbox()).toMatchObject({ status: STATUS.OPEN, decision: { outcome: "rejected", details: [{ type: "TRAN_X" }] } });
   });
 
   it("treats an expired session as not sent and asks for a fresh approval", async () => {
     deps.submit.mockRejectedValue(new SessionExpiredError("HTTP 401"));
     await expect(executeTradeResponse(payload(), deps)).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/session/) });
-    expect(deps.finalize).toHaveBeenCalledWith(31, "rejected", expect.any(String));
+    expect(deps.settleOffer).toHaveBeenCalledWith("tx-1", expect.any(Object), expect.objectContaining({ claimId: 31, ledgerStatus: "rejected" }));
     expect(deps.inbox().status).toBe(STATUS.OPEN);
   });
 
@@ -291,7 +363,7 @@ describe("executeTradeResponse live path", () => {
       message: expect.stringMatching(/manual verification/),
     });
 
-    expect(deps.finalize).toHaveBeenCalledWith(31, "response_unknown", expect.any(String));
+    expect(deps.settleOffer).toHaveBeenCalledWith("tx-1", expect.any(Object), expect.objectContaining({ claimId: 31, ledgerStatus: "response_unknown" }));
     expect(deps.inbox()).toMatchObject({ status: STATUS.RESPONDING, decision: { outcome: "unknown" } });
     expect(deps.activityEvent).toHaveBeenCalledWith("manual_verification_required", expect.any(Object));
     expect(deps.submit).toHaveBeenCalledTimes(1);
@@ -306,7 +378,11 @@ describe("executeTradeResponse live path", () => {
   it("fails closed when the verification read itself fails", async () => {
     deps.readHistory.mockRejectedValue(new Error("history down"));
     await expect(executeTradeResponse(payload(), deps)).rejects.toThrow(/manual verification/);
-    expect(deps.finalize).toHaveBeenCalledWith(31, "response_unknown", expect.stringMatching(/history down/));
+    expect(deps.settleOffer).toHaveBeenCalledWith(
+      "tx-1",
+      expect.any(Object),
+      expect.objectContaining({ ledgerStatus: "response_unknown", errorMessage: expect.stringMatching(/history down/) }),
+    );
   });
 
   it("fails closed on evidence of a different outcome", async () => {

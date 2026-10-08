@@ -13,8 +13,8 @@ const {
   claimTradeSubmission,
   finalizeTradeSubmission,
   recordTradeOfferFill,
-  claimTradeResponse,
-  finalizeTradeResponse,
+  findTradeResponse,
+  recordTradeResponseOutcome,
   recordTradeResponseBlocked,
 } = require("../../src/db/execution_log");
 const activity = require("../../src/db/activity");
@@ -180,41 +180,37 @@ describe("trade responses", () => {
     approvedBy: "conor",
   };
 
-  it("claims a decision key under an advisory lock with a responding row", async () => {
-    const client = fakeClient([[/INSERT INTO execution_log/, { rows: [{ id: 21 }] }]]);
+  it("finds a key's claim in any blocking state, a settled response first", async () => {
+    pool.query.mockResolvedValue({ rows: [{ id: 4, status: "response_unknown", espn_transaction_id: "tx-1", action: "decline" }] });
 
-    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).resolves.toEqual({ claimed: true, id: 21 });
-
-    const sqls = statements(client);
-    expect(sqls[1]).toMatch(/pg_advisory_xact_lock\(hashtext\(\$1\)\)/);
-    expect(client.query.mock.calls[1][1]).toEqual([DECISION_KEY]);
-    expect(sqls[2]).toMatch(/transaction_type = 'trade_response'/);
-    const [insertSql, params] = client.query.mock.calls[3];
-    expect(insertSql).toMatch(/'responding'/);
-    expect(JSON.parse(params.find((p) => typeof p === "string" && p.startsWith("{")))).toEqual({
-      decision_key: DECISION_KEY,
+    await expect(findTradeResponse(DECISION_KEY)).resolves.toEqual({
+      id: 4,
+      status: "response_unknown",
       espn_transaction_id: "tx-1",
       action: "decline",
-      comment: null,
-      approved_by: "conor",
     });
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/transaction_type = 'trade_response'/);
+    expect(sql).toMatch(/ORDER BY array_position\(\$2::text\[\], status\)/);
+    expect(params).toEqual([DECISION_KEY, ["responded", "responding", "response_unknown", "rejected"]]);
   });
 
-  it.each(["responding", "responded"])("does not claim a key already %s", async (status) => {
-    const client = fakeClient([[/SELECT id, status/, { rows: [{ id: 4, status }] }]]);
-    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).resolves.toEqual({ claimed: false, existing: status, id: 4 });
-    expect(statements(client).some((sql) => /INSERT/.test(sql))).toBe(false);
+  it("finds nothing for an unclaimed key", async () => {
+    pool.query.mockResolvedValue({ rows: [] });
+    await expect(findTradeResponse(DECISION_KEY)).resolves.toBeNull();
   });
 
-  it("throws on a DB error, since it is the only guard against a second live response", async () => {
-    fakeClient([[/INSERT INTO execution_log/, new Error("disk full")]]);
-    await expect(claimTradeResponse(DECISION_KEY, RESPONSE)).rejects.toThrow(/disk full/);
-  });
-
-  it("finalizes best-effort and records the outcome on the activity", async () => {
+  it("throws on a DB error, since a missed claim could mean a second live response", async () => {
     pool.query.mockRejectedValue(new Error("down"));
-    await expect(finalizeTradeResponse(21, "responded", null)).resolves.toBeUndefined();
+    await expect(findTradeResponse(DECISION_KEY)).rejects.toThrow(/down/);
+  });
+
+  it("records a settled response on the activity", async () => {
+    await recordTradeResponseOutcome(21, "responded", null);
     expect(activity.event).toHaveBeenCalledWith("trade_response_responded", { ledgerId: 21, errorMessage: null }, "submitted", "responded");
+    await recordTradeResponseOutcome(21, "rejected", "HTTP 409");
+    expect(activity.event).toHaveBeenCalledWith("trade_response_rejected", { ledgerId: 21, errorMessage: "HTTP 409" }, "failed", "unknown");
   });
 
   it("records a blocked dry run with the locks that stayed closed", async () => {
