@@ -284,8 +284,13 @@ decline one inbox offer. **It answers real offers from other managers.** It send
 only when all of these hold:
 - `DRY_RUN=false`.
 - `TRADE_RESPONSE_ENABLED=true`. This is separate from `TRADE_SUBMIT_ENABLED`.
-- A human approval `{decision_key, approved_by}` whose key matches the offer as a
-  fresh ESPN read shows it, including the action and note.
+- A human approval `{decision_key, approved_by, reviewed_note}` whose key matches
+  the offer as a fresh ESPN read shows it, including the action and response note.
+  `reviewed_note` is the exact proposer note the human reviewed, a string or `null`
+  when absent. It must match the fresh ESPN proposer note, including whitespace;
+  an empty string differs from `null`. Missing or changed reviewed notes permanently
+  refuse fresh executions before any claim or POST. Existing claims still reconcile
+  without resending. The publisher must include this field on decisions and retries.
 - The action is listed in `VERIFIED_TRADE_RESPONSE_ACTIONS`.
 - `PENDING_TRADE_SHAPE_VERIFIED` is set. Both of these last two start empty or
   false until real captures confirm ESPN's request and pending-trade shapes.
@@ -325,8 +330,8 @@ of resent. The retried row becomes `superseded` in the same transaction as the n
 claim.
 
 ```bash
-node src/bots/trade_response.js '{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"}}'
-node src/bots/trade_response.js '{"tracking_id":"<new uuid>","espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"},"retry":{"of_claim_id":123,"approved_by":"you","verified_not_answered":true}}'
+node src/bots/trade_response.js '{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you","reviewed_note":null}}'
+node src/bots/trade_response.js '{"tracking_id":"<new uuid>","espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you","reviewed_note":null},"retry":{"of_claim_id":123,"approved_by":"you","verified_not_answered":true}}'
 ```
 
 `computeDecisionKey` in `src/lib/trade_inbox.js` defines the key, which is a

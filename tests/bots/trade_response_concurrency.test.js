@@ -76,7 +76,7 @@ function payload(action = "decline", overrides = {}) {
     tracking_id: `track-${action}`,
     espn_transaction_id: "tx-1",
     action,
-    approval: { decision_key: keyFor(action), approved_by: "conor" },
+    approval: { decision_key: keyFor(action), approved_by: "conor", reviewed_note: null },
     ...overrides,
   };
 }

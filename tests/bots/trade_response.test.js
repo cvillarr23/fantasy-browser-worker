@@ -71,7 +71,7 @@ function payload(action = "decline", overrides = {}) {
     tracking_id: "track-1",
     espn_transaction_id: "tx-1",
     action,
-    approval: { decision_key: keyFor(action), approved_by: "conor" },
+    approval: { decision_key: keyFor(action), approved_by: "conor", reviewed_note: null },
     ...overrides,
   };
 }
@@ -137,6 +137,12 @@ afterEach(() => {
 });
 
 describe("requireResponsePayload", () => {
+  it.each([5, false, {}, [], undefined])("rejects a malformed reviewed_note %j", (reviewedNote) => {
+    const request = payload();
+    request.approval.reviewed_note = reviewedNote;
+    expect(() => requireResponsePayload(request)).toThrow(/reviewed_note must be a string or null/);
+  });
+
   it.each([
     [null, /JSON object/],
     [{ action: "decline" }, /espn_transaction_id/],
@@ -193,10 +199,106 @@ describe("executeTradeResponse pre-flight", () => {
     expect(deps.submit).not.toHaveBeenCalled();
   });
 
-  it("refuses an approval for a different note", async () => {
+  it("refuses an approval for a different response note", async () => {
     await expect(executeTradeResponse(payload("decline", { comment: "No thanks" }), deps)).rejects.toThrow(
       /approval does not match/,
     );
+  });
+
+  it.each(["accept", "decline"])("refuses a %s when only the proposer note changed", async (action) => {
+    const request = payload(action);
+    request.approval.reviewed_note = "Original proposer note";
+    const changed = trade({ comment: "Edited proposer note" });
+    expect(toInboxEntry(changed, "8").fingerprint).toBe(toInboxEntry(trade(), "8").fingerprint);
+    deps.readPending.mockReset().mockResolvedValue({ trades: [changed] });
+
+    await expect(executeTradeResponse(request, deps)).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/proposer note.*changed since it was reviewed/),
+    });
+    expect(deps.submit).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+    expect(deps.beforeExternalWrite).not.toHaveBeenCalled();
+    const session = await deps.openSession.mock.results[0].value;
+    expect(session.browser.close).toHaveBeenCalled();
+  });
+
+  it.each([
+    [null, ""],
+    ["", null],
+    [" note ", "note"],
+    ["note", "note\n"],
+    [null, "added"],
+    ["removed", undefined],
+  ])("refuses an exact proposer note mismatch (%j to %j) even when disabled", async (reviewedNote, freshNote) => {
+    delete process.env.TRADE_RESPONSE_ENABLED;
+    const request = payload();
+    request.approval.reviewed_note = reviewedNote;
+    deps.readPending.mockReset().mockResolvedValue({ trades: [trade({ comment: freshNote })] });
+
+    await expect(executeTradeResponse(request, deps)).rejects.toMatchObject({ permanent: true });
+    expect(deps.submit).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+    expect(deps.recordBlocked).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fresh execution without the reviewed proposer note", async () => {
+    const request = payload();
+    delete request.approval.reviewed_note;
+
+    await expect(executeTradeResponse(request, deps)).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/reviewed_note is required/),
+    });
+    expect(deps.submit).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+  });
+
+  it("keeps reconciling an already responded legacy approval without the reviewed note", async () => {
+    const request = payload();
+    delete request.approval.reviewed_note;
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responded", espn_transaction_id: "tx-1", action: "decline" });
+
+    await expect(executeTradeResponse(request, deps)).resolves.toMatchObject({ status: "duplicate" });
+    expect(deps.openSession).not.toHaveBeenCalled();
+    expect(deps.submit).not.toHaveBeenCalled();
+  });
+
+  it("settles a legacy responding claim by reading ESPN without the reviewed note", async () => {
+    const request = payload();
+    delete request.approval.reviewed_note;
+    deps.findResponse.mockResolvedValue({ id: 4, status: "responding", espn_transaction_id: "tx-1", action: "decline" });
+    deps.readPending.mockReset().mockResolvedValue({ trades: [] });
+    deps.readHistory.mockResolvedValue([{ type: "TRADE_DECLINE", relatedTransactionId: "tx-1" }]);
+
+    await expect(executeTradeResponse(request, deps)).resolves.toMatchObject({ status: "responded", reconciled: true });
+    expect(deps.submit).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+  });
+
+  it("refuses a retry when the proposer note changed after review", async () => {
+    const request = payload("decline", { retry: { of_claim_id: 4, approved_by: "conor" } });
+    deps.findResponse.mockResolvedValue({ id: 4, status: "rejected", espn_transaction_id: "tx-1", action: "decline" });
+    deps.readPending.mockReset().mockResolvedValue({ trades: [trade({ comment: "Added after review" })] });
+
+    await expect(executeTradeResponse(request, deps)).rejects.toMatchObject({ permanent: true });
+    expect(deps.submit).not.toHaveBeenCalled();
+    expect(deps.claimOffer).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [null, undefined],
+    [null, null],
+    ["", ""],
+    [" exact proposer note\n", " exact proposer note\n"],
+  ])("allows a matching reviewed proposer note (%j and %j)", async (reviewedNote, freshNote) => {
+    const request = payload();
+    request.approval.reviewed_note = reviewedNote;
+    deps.readPending.mockReset().mockResolvedValueOnce({ trades: [trade({ comment: freshNote })] }).mockResolvedValue({ trades: [] });
+    deps.readHistory.mockResolvedValue([{ type: "TRADE_DECLINE", relatedTransactionId: "tx-1" }]);
+
+    await expect(executeTradeResponse(request, deps)).resolves.toMatchObject({ status: "responded" });
+    expect(deps.submit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ comment: null }));
   });
 
   it("refuses an offer that is no longer pending", async () => {
