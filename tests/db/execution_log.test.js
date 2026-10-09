@@ -166,6 +166,20 @@ describe("recordTradeOfferFill", () => {
     await recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true });
     expect(JSON.parse(pool.query.mock.calls[0][1][7])).not.toHaveProperty("evaluation");
   });
+
+  it("keeps a counter's link to the incoming offer and thread, and omits it otherwise", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    const fill = { offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true };
+    await recordTradeOfferFill({ ...ROW, ...fill, relatedTransactionId: "tx-3", threadRootId: "tx-1" });
+    await recordTradeOfferFill({ ...ROW, ...fill, relatedTransactionId: null, threadRootId: null });
+    expect(JSON.parse(pool.query.mock.calls[0][1][7])).toMatchObject({
+      related_transaction_id: "tx-3",
+      thread_root_id: "tx-1",
+    });
+    const unlinked = JSON.parse(pool.query.mock.calls[1][1][7]);
+    expect(unlinked).not.toHaveProperty("related_transaction_id");
+    expect(unlinked).not.toHaveProperty("thread_root_id");
+  });
 });
 
 describe("trade responses", () => {

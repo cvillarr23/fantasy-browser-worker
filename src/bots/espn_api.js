@@ -598,6 +598,9 @@ async function submitDraftPick(
  * docs/espn-reverse-engineering.md "Trade proposals". trade_builder.js compares this against the
  * body the click path actually sends, so the first live submit verifies it before any REST
  * submit relies on it.
+ *
+ * A counter adds `relatedTransactionId`, the incoming offer it answers. The bundle sends it only
+ * then, so it is left out of any other proposal.
  */
 function buildTradeProposalBody({
   teamId,
@@ -608,6 +611,7 @@ function buildTradeProposalBody({
   outgoingPlayerIds,
   expirationDate,
   comment,
+  relatedTransactionId,
 }) {
   const ours = Number(teamId);
   const theirs = Number(toTeamId);
@@ -630,8 +634,20 @@ function buildTradeProposalBody({
     ],
     expirationDate: new Date(expirationDate).toISOString(),
     comment: comment ?? "",
+    ...(relatedTransactionId ? { relatedTransactionId } : {}),
   };
 }
+
+/**
+ * Whether a counter sent from here is known to reach ESPN linked to the offer it answers. Until it
+ * is, trade_builder.js will not live-submit an offer carrying a relatedTransactionId.
+ *
+ * UNVERIFIED. The bundle shows a counter is a TRADE_PROPOSAL with `relatedTransactionId`, but no
+ * counter has been captured, and trade_builder.js fills the plain "Propose Trade" page, which
+ * builds an unlinked proposal. Such a submit would leave the original offer pending beside a new
+ * one. Set this only in a change that cites a captured counter and makes the fill path send it.
+ */
+const COUNTER_LINKAGE_VERIFIED = false;
 
 const TRADE_TRANSACTION_TYPES = ["TRADE_PROPOSAL", "TRADE_ACCEPT", "TRADE_DECLINE", "TRADE_VETO", "TRADE_UPHOLD"];
 
@@ -769,6 +785,7 @@ module.exports = {
   submitTradeResponse,
   VERIFIED_TRADE_RESPONSE_ACTIONS,
   PENDING_TRADE_SHAPE_VERIFIED,
+  COUNTER_LINKAGE_VERIFIED,
   readRoster,
   readRosters,
   readPendingTrades,

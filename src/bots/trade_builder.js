@@ -9,6 +9,9 @@ const {
   buildTradeProposalBody,
   captureWriteArtifact,
 } = require("./espn_api");
+// Read as espnApi.COUNTER_LINKAGE_VERIFIED at submit time, like SELECTORS._verified, so the lock
+// tracks the module's current value rather than a copy taken at load.
+const espnApi = require("./espn_api");
 const { captureDebugSnapshot } = require("./debug_capture");
 const {
   findTradeSubmission,
@@ -37,6 +40,8 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *                                   a different note to the manager: the message is in the key).
  *   4. verified selectors         — every TRADE_SUBMIT_SELECTOR_KEYS entry must be listed under
  *                                   espn_selectors.json's `_verified`. They start out unverified.
+ *   5. verified counter linkage   — only for an offer that counters an incoming one
+ *                                   (relatedTransactionId): espn_api.js's COUNTER_LINKAGE_VERIFIED.
  * With any lock closed the run is a dry fill: tick the boxes, verify them, screenshot, and stop on
  * the first screen without clicking Continue. A BrowserContext-wide write guard (covering popups
  * too) aborts every non-GET ESPN request until the instant before the final click, so a
@@ -124,6 +129,15 @@ function requireIdList(raw, label) {
   return ids;
 }
 
+// An ESPN transaction id is opaque, so only its presence and whitespace are checked.
+function optionalTransactionId(raw, label) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || raw.trim() === "" || raw !== raw.trim()) {
+    throw new PermanentError(`[Trade Builder] ${label} must be a non-blank ESPN transaction id when present.`);
+  }
+  return raw;
+}
+
 /**
  * Validates and normalizes an offer (all ids to strings). Everything rejected here is a
  * PermanentError, since no redelivery can fix a malformed offer.
@@ -153,6 +167,14 @@ function normalizeTradeOffer(raw) {
   }
   const message = raw.message && raw.message.trim() !== "" ? raw.message : null;
 
+  // A counter names the incoming offer it answers (relatedTransactionId) and that offer's thread
+  // (threadRootId, the first offer of the counter chain). Both are null for a fresh proposal.
+  const relatedTransactionId = optionalTransactionId(raw.relatedTransactionId, "relatedTransactionId");
+  const threadRootId = optionalTransactionId(raw.threadRootId, "threadRootId");
+  if (threadRootId !== null && relatedTransactionId === null) {
+    throw new PermanentError("[Trade Builder] threadRootId needs the relatedTransactionId it belongs to.");
+  }
+
   return {
     leagueId,
     seasonId,
@@ -161,6 +183,8 @@ function normalizeTradeOffer(raw) {
     incomingPlayerIds,
     outgoingPlayerIds,
     message,
+    relatedTransactionId,
+    threadRootId: relatedTransactionId === null ? null : (threadRootId ?? relatedTransactionId),
   };
 }
 
@@ -169,9 +193,12 @@ function normalizeTradeOffer(raw) {
  * within each side, so LLM re-ordering doesn't change it, but the sides stay distinct, so a
  * mirrored trade does. The note to the other manager is included: approving an offer approves
  * exactly what they'll read, so a redelivered message with an edited note can't ride an old key.
+ * A counter's relatedTransactionId is appended, because it decides which incoming offer ESPN marks
+ * countered. An unlinked offer keeps its original key. threadRootId is tracing only and is not in
+ * the key.
  */
 function computeOfferKey(offer) {
-  const canonical = JSON.stringify([
+  const fields = [
     "trade-offer-v1",
     String(offer.leagueId),
     String(offer.seasonId),
@@ -180,7 +207,9 @@ function computeOfferKey(offer) {
     offer.incomingPlayerIds.map(String).sort(),
     offer.outgoingPlayerIds.map(String).sort(),
     offer.message ?? null,
-  ]);
+  ];
+  if (offer.relatedTransactionId) fields.push(String(offer.relatedTransactionId));
+  const canonical = JSON.stringify(fields);
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
@@ -317,7 +346,9 @@ const CLAIM_CLOCK_SKEW_MS = 60000;
  * `claimedAt` (the claim is written before the click), and whose comment, when ESPN lists one, is
  * `comment`. Without the last two, an older pending offer for the same players, or one with a
  * different note (a different offer_key), would "confirm" a submit that never went out. A missing
- * or unparseable proposedDate is no match. Throws when the read fails.
+ * or unparseable proposedDate is no match. A counter also needs ESPN's own relatedTransactionId to
+ * name the offer it answers: an unlinked look-alike is a new proposal, not that counter. Throws
+ * when the read fails.
  */
 async function findPendingOffer(context, offer, { claimedAt, comment }) {
   const { trades: pending } = await readPendingTrades(context, {
@@ -335,7 +366,9 @@ async function findPendingOffer(context, offer, { claimedAt, comment }) {
         t.proposingTeamId === String(offer.fromTeamId) &&
         JSON.stringify(tradeItemKeys(t.items)) === want &&
         new Date(t.proposedDate ?? NaN).getTime() >= notBefore &&
-        (!("comment" in t) || (t.comment ?? "") === (comment ?? "")),
+        (!("comment" in t) || (t.comment ?? "") === (comment ?? "")) &&
+        (offer.relatedTransactionId === null ||
+          String(t.relatedTransactionId) === offer.relatedTransactionId),
     ) ?? null
   );
 }
@@ -355,9 +388,10 @@ function diffProposalBody(postData, offer, messageAttached) {
     outgoingPlayerIds: offer.outgoingPlayerIds,
     expirationDate: Date.now(),
     comment: messageAttached ? offer.message : "",
+    relatedTransactionId: offer.relatedTransactionId,
   });
   const mismatches = [];
-  for (const key of ["isLeagueManager", "teamId", "type", "executionType", "comment"]) {
+  for (const key of ["isLeagueManager", "teamId", "type", "executionType", "comment", "relatedTransactionId"]) {
     if (actual[key] !== expected[key]) {
       mismatches.push(`${key}: sent ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])}`);
     }
@@ -575,6 +609,9 @@ async function submitTradeOffer(
   if (unverified.length > 0) {
     closedLocks.push(`selectors not yet verified: ${unverified.join(", ")}`);
   }
+  if (offer.relatedTransactionId && !espnApi.COUNTER_LINKAGE_VERIFIED) {
+    closedLocks.push("ESPN counter linkage (relatedTransactionId) not yet verified");
+  }
   if (!approval) closedLocks.push("no approval for this offer");
   const live = closedLocks.length === 0;
 
@@ -588,6 +625,8 @@ async function submitTradeOffer(
     outgoingPlayerIds: offer.outgoingPlayerIds,
     approvedBy: approval ? approval.approved_by : null,
     message: offer.message,
+    relatedTransactionId: offer.relatedTransactionId,
+    threadRootId: offer.threadRootId,
     // Score evidence for the reviewer. Only generated proposals are scored, and it is never part
     // of the offer_key: approval binds what the other manager receives, not our reasoning.
     ...(source === "proposal" && evaluation ? { evaluation } : {}),
@@ -839,10 +878,13 @@ async function submitTradeOffer(
  *   { "tracking_id": "...", "season": 2026, "to_team_id": "3",
  *     "incoming_player_ids": ["4259545", "-16021"], "outgoing_player_ids": ["3139477"],
  *     "source": "counter_offer" | "proposal" | "manual", "message": "optional note",
+ *     "related_transaction_id": "<incoming offer this counters, optional>",
+ *     "thread_root_id": "<first offer of that counter chain, optional>",
  *     "approval": { "offer_key": "<computeOfferKey(offer)>", "approved_by": "conor" } }
  *
  * Without `approval` this is a dry fill. Use it to stage an offer and get its offer_key and a
- * screenshot to review.
+ * screenshot to review. A staged counter keeps its link to the incoming thread but never changes
+ * the inbox: only ESPN's own relatedTransactionId, seen by the inbox refresh, marks it countered.
  */
 async function executeTradeSubmission(payload) {
   requirePlainObjectPayload(payload, "[Trade Builder]");
@@ -877,6 +919,8 @@ async function executeTradeSubmission(payload) {
       incomingPlayerIds: payload.incoming_player_ids,
       outgoingPlayerIds: payload.outgoing_player_ids,
       message,
+      relatedTransactionId: payload.related_transaction_id,
+      threadRootId: payload.thread_root_id,
     },
     {
       approval,

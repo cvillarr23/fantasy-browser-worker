@@ -204,9 +204,22 @@ function requireEvaluationPayload(payload) {
   return requireTradeIdFields(payload, "[Trade Evaluator]");
 }
 
+// Optional, so a caller with no incoming offer behind it (a manual run) still works unchanged.
+function optionalTransactionId(raw, field) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" || raw.trim() === "" || raw !== raw.trim()) {
+    throw new PermanentError(
+      `[Trade Negotiator] ${field} must be a non-blank ESPN transaction id when present.`,
+    );
+  }
+  return raw;
+}
+
 /** Same id-pair/season/week validation as requireEvaluationPayload, plus offering_team_id —
  * negotiateTradeProposal needs it to know which manager's chat DM to open, so a message missing
- * it can never succeed on redelivery either. */
+ * it can never succeed on redelivery either. related_transaction_id and thread_root_id, when
+ * present, name the incoming offer being countered and its thread, so the staged offer can be
+ * traced back to it. */
 function requireNegotiationPayload(payload) {
   requirePlainObjectPayload(payload, "[Trade Negotiator]");
   const fields = requireTradeIdFields(payload, "[Trade Negotiator]");
@@ -218,7 +231,18 @@ function requireNegotiationPayload(payload) {
     );
   }
 
-  return { ...fields, offeringTeamId };
+  const relatedTransactionId = optionalTransactionId(
+    payload.related_transaction_id,
+    "related_transaction_id",
+  );
+  const threadRootId = optionalTransactionId(payload.thread_root_id, "thread_root_id");
+  if (threadRootId !== null && relatedTransactionId === null) {
+    throw new PermanentError(
+      "[Trade Negotiator] thread_root_id needs the related_transaction_id it belongs to.",
+    );
+  }
+
+  return { ...fields, offeringTeamId, relatedTransactionId, threadRootId };
 }
 
 /** Maps a POST /v1/trade/evaluate failure to PermanentError vs plain Error, mirroring
@@ -488,15 +512,20 @@ async function executeTradeEvaluation(payload) {
  * "trade_submissions" message carrying that offer_key (see trade_builder.js's header).
  */
 async function negotiateTradeProposal(payload) {
-  const { incoming, outgoing, season, week, offeringTeamId } =
+  const { incoming, outgoing, season, week, offeringTeamId, relatedTransactionId, threadRootId } =
     requireNegotiationPayload(payload);
   const tracking = payload.tracking_id ?? "no-tracking-id";
   const leagueId = process.env.ESPN_LEAGUE_ID;
 
   logger.info(
     `[Trade Negotiator][${tracking}] Negotiating trade from team ${offeringTeamId} ` +
-      `for season ${season} week ${week}...`,
+      `for season ${season} week ${week}` +
+      (relatedTransactionId ? `, countering offer ${relatedTransactionId}` : "") +
+      "...",
   );
+  // Carried onto the staged offer and both log rows. Staging never marks the incoming offer
+  // countered: the inbox does that only when ESPN itself links a pending offer to it.
+  const linkage = relatedTransactionId ? { relatedTransactionId, threadRootId } : {};
 
   let session = null;
   let counterOffer;
@@ -553,6 +582,7 @@ async function negotiateTradeProposal(payload) {
           toTeamId: offeringTeamId,
           incomingPlayerIds: incomingEspnIds,
           outgoingPlayerIds: outgoingEspnIds,
+          ...linkage,
         },
         { source: "counter_offer", trackingId: tracking, session },
       );
@@ -581,7 +611,7 @@ async function negotiateTradeProposal(payload) {
       leagueId,
       season,
       offeringTeamId,
-      counterOffer,
+      counterOffer: counterOffer && { ...counterOffer, ...linkage },
       dryRun: true, // never sends: staging is approval-less, see the function doc comment
       status,
       errorMessage,

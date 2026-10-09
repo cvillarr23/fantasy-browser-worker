@@ -655,6 +655,10 @@ The names below are the minified bundle's, so they will change between builds.
     toTeamId}`), FAAB (`{acquisitionBudget, type: "ACQUISITION_BUDGET_TRADE", fromTeamId, toTeamId}`),
     and roster-fix drops (`{playerId, type: "DROP", fromTeamId}`, when ESPN answers that a drop is
     required). `relatedTransactionId` is sent only on a counter (`TRADE_PROPOSAL` with a related id).
+    No counter has been captured. `trade_builder.js` fills the plain "Propose Trade" page, which
+    sends an unlinked proposal. So an offer carrying a `relatedTransactionId` is never live-submitted
+    until `espn_api.js`'s `COUNTER_LINKAGE_VERIFIED` is set. A pending match for a counter must
+    also carry ESPN's `relatedTransactionId` for the offer it answers.
   - `isActingAsTeamOwner` / `skipTransactionCounters` are sent only when `isLeagueManager` is true.
 
   `submitLineup`'s verified body is the same envelope (`isLeagueManager, teamId, type, memberId,

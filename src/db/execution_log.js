@@ -171,6 +171,10 @@ function tradeOfferJson(offerKey, row) {
     approved_by: row.approvedBy || null,
     // Part of the offer_key, so an approver must see it: it's what the other manager will read.
     message: row.message || null,
+    // A counter's link to the incoming offer it answers and that offer's thread. Left out of a
+    // fresh proposal's row. Staging records the link; it never marks the offer countered.
+    related_transaction_id: row.relatedTransactionId || undefined,
+    thread_root_id: row.threadRootId || undefined,
     screenshot_path: row.screenshotPath || null,
     reasons: row.reasons || undefined,
     // A generated proposal's score evidence, read by core's offer list for the reviewer UI.
