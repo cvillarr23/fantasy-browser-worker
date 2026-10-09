@@ -9,7 +9,8 @@
  *      (TRADE_SUBMIT_ENABLED) doesn't arm responses.
  *   3. A human approval {decision_key, approved_by} is present, and decision_key equals the key
  *      recomputed from a FRESH pending read. An approval therefore can't carry over to an offer
- *      the other manager changed or replaced, to the other action, or to a different note.
+ *      the other manager changed or replaced, to the other action, or to a different response note.
+ *      approval.reviewed_note must also equal the exact proposer note from that fresh read.
  *   4. The action is in espn_api.js's VERIFIED_TRADE_RESPONSE_ACTIONS, which starts out empty: no
  *      accept or decline request has been captured yet.
  *   5. espn_api.js's PENDING_TRADE_SHAPE_VERIFIED is true, which needs a captured pending trade.
@@ -121,6 +122,13 @@ function requireResponsePayload(payload) {
       /^[0-9a-f]{64}$/.test(approval.decision_key) &&
       isNonBlank(approval.approved_by);
     if (!valid) throw new PermanentError(`${LABEL} approval needs a 64-hex decision_key and approved_by.`);
+    if (
+      Object.prototype.hasOwnProperty.call(approval, "reviewed_note") &&
+      approval.reviewed_note !== null &&
+      typeof approval.reviewed_note !== "string"
+    ) {
+      throw new PermanentError(`${LABEL} approval.reviewed_note must be a string or null.`);
+    }
   }
   return {
     transactionId,
@@ -375,6 +383,16 @@ async function executeTradeResponse(payload, overrides = {}) {
           "replaced, or a different action or note). Approve it again from the inbox.",
       );
     }
+    // The fingerprint excludes the proposer note. Compare it separately without trimming or
+    // treating an empty string as null, so a note-only edit invalidates the human's review.
+    if (approval && !Object.prototype.hasOwnProperty.call(approval, "reviewed_note")) {
+      throw new PermanentError(`${LABEL} approval.reviewed_note is required before responding. Approve it again from the inbox.`);
+    }
+    if (approval && approval.reviewed_note !== (offer.comment ?? null)) {
+      throw new PermanentError(
+        `${LABEL} The proposer note for offer ${transactionId} changed since it was reviewed. Approve it again from the inbox.`,
+      );
+    }
     if (new Date(fresh.expiration_date ?? NaN).getTime() - now.getTime() <= RESPONSE_EXPIRY_MARGIN_MS) {
       throw new PermanentError(`${LABEL} Offer ${transactionId} expires too soon to respond safely.`);
     }
@@ -502,7 +520,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/trade_response.js " +
-        `'{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you"}}'`,
+        `'{"espn_transaction_id":"...","action":"decline","approval":{"decision_key":"<64 hex>","approved_by":"you","reviewed_note":null}}'`,
     );
     process.exit(EXIT_FAILURE);
   }
