@@ -56,7 +56,7 @@ function storedEntry(overrides = {}) {
 
 function keyFor(action, comment = null) {
   return computeDecisionKey({
-    leagueId: "1248158344",
+    leagueId: "1234567890",
     seasonId: 2026,
     ourTeamId: "8",
     transactionId: "tx-1",
@@ -81,7 +81,7 @@ let order;
 let savedEnv;
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
   process.env.DRY_RUN = "false";
   process.env.TRADE_RESPONSE_ENABLED = "true";
@@ -366,7 +366,7 @@ describe("executeTradeResponse live path", () => {
       const entry = deps.inbox();
       if (kind === "valid") {
         const { request } = buildScoreRequest(entry, {
-          leagueId: "1248158344",
+          leagueId: "1234567890",
           season: 2026,
           week: 5,
         });
@@ -411,7 +411,7 @@ describe("executeTradeResponse live path", () => {
         [
           {},
           {
-            leagueId: "1248158344",
+            leagueId: "1234567890",
             seasonId: "2026",
             teamId: "8",
             memberId: "{SWID}",

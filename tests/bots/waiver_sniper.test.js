@@ -10,7 +10,7 @@ let savedEnv;
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
 
   createAuthenticatedSession.mockResolvedValue({
@@ -141,7 +141,7 @@ describe("executeInstantWaiverClaim", () => {
         dropPlayerId: "200",
         memberId: "{TEST-SWID}",
         scoringPeriodId: 3,
-        leagueId: "1248158344",
+        leagueId: "1234567890",
         teamId: "8",
       }),
     );

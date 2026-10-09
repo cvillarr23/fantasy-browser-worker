@@ -25,7 +25,7 @@ const pool = Pool.mock.results[0].value;
 
 const OFFER_KEY = "a".repeat(64);
 const ROW = {
-  leagueId: "1248158344",
+  leagueId: "1234567890",
   season: 2026,
   source: "counter_offer",
   fromTeamId: "8",
@@ -185,7 +185,7 @@ describe("recordTradeOfferFill", () => {
 describe("trade responses", () => {
   const DECISION_KEY = "d".repeat(64);
   const RESPONSE = {
-    leagueId: "1248158344",
+    leagueId: "1234567890",
     season: 2026,
     transactionId: "tx-1",
     proposingTeamId: "3",

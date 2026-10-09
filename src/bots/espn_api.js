@@ -300,7 +300,7 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
 /**
  * Submits a roster transaction (a batch of LINEUP moves) to ESPN.
  *
- * VERIFIED against a real captured save (2026-09-12, league 1248158344 team 8, a FLEX/Bench swap
+ * VERIFIED against a real captured save (2026-09-12, league 1234567890 team 8, a FLEX/Bench swap
  * confirmed live and then reverted): this body and header shape match ESPN's real web client
  * exactly, including `memberId`'s brace-wrapped SWID format. The one correction from the original
  * guess: `x-fantasy-platform` is `"espn-fantasy-web"`, not `"kona-PROD"` (`x-fantasy-source: "kona"`

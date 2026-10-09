@@ -569,7 +569,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/lineup_bot.js '<lineup_updates JSON payload>'\n" +
-        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/lineup_bot.js \\\n" +
+        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1234567890 node src/bots/lineup_bot.js \\\n" +
         `  '{"team_id":"8","optimized_swaps":[{"drop_player_id":"3139477","add_player_id":"4259545","slot":"FLEX"}]}'`,
     );
     process.exit(1);

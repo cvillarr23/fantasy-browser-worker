@@ -24,6 +24,8 @@ const { logger } = require("../telemetry/logger");
  *   - Whether a same-transaction drop uses item `type: "DROP"` the way this guesses, or something
  *     else.
  *
+ * Requires ESPN_LEAGUE_ID to select your league.
+ *
  * Usage:
  *   node src/bots/waiver_recon.js               # roster snapshot only
  *   node src/bots/waiver_recon.js --watch-save  # also record XHR while you add/claim a player by hand
@@ -31,7 +33,8 @@ const { logger } = require("../telemetry/logger");
  * Auth: ESPN_S2/SWID env vars, then OpenBao, then a visible browser you log into yourself.
  */
 
-const LEAGUE_ID = process.env.ESPN_LEAGUE_ID || "1248158344";
+const LEAGUE_ID = (process.env.ESPN_LEAGUE_ID || "").trim();
+const EXIT_CODE_FAILURE = 1;
 const TEAM_ID = process.env.ESPN_TEAM_ID || "8";
 const SEASON_ID = process.env.CURRENT_YEAR || "2026";
 
@@ -73,6 +76,12 @@ function recordApiTraffic(page) {
 }
 
 async function runWaiverRecon() {
+  if (!LEAGUE_ID) {
+    logger.error("[Waiver Recon] ESPN_LEAGUE_ID is required.");
+    process.exitCode = EXIT_CODE_FAILURE;
+    return;
+  }
+
   const watchSave = process.argv.includes("--watch-save");
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   logger.info(`[Waiver Recon] Output directory: ${OUTPUT_DIR}`);
@@ -132,7 +141,7 @@ async function runWaiverRecon() {
     logger.error(`[Waiver Recon] Fatal error: ${error.message}`, {
       err: error,
     });
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE_FAILURE;
   } finally {
     if (session && session.browser) {
       await session.browser.close();

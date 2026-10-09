@@ -54,7 +54,7 @@ function routeFetch(url) {
 
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
 
   session = {
@@ -113,7 +113,7 @@ describe("negotiateTradeProposal -> trade builder", () => {
     expect(submitTradeOffer).toHaveBeenCalledTimes(1);
     const [offer, opts] = submitTradeOffer.mock.calls[0];
     expect(offer).toEqual({
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       fromTeamId: "8",
       toTeamId: "3",
@@ -216,12 +216,12 @@ describe("negotiateTradeProposal -> pending trade and chat reads (#101)", () => 
     await negotiateTradeProposal(payload);
 
     expect(readPendingTrades).toHaveBeenCalledWith(session.context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: 2026,
       teamId: "8",
     });
     expect(readLeagueChat).toHaveBeenCalledWith(session.context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: 2026,
     });
     expect(session.page.goto).not.toHaveBeenCalled();

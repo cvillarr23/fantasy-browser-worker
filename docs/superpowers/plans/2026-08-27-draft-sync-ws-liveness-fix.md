@@ -13,8 +13,8 @@
 **Tracking issue:** cvillarr23/fantasy-browser-worker#72 (corrects the mis-filed cvillarr23/fantasy-core-pipeline#108, now closed).
 
 **Spec:** This plan is derived directly from a live production-log investigation (Grafana/Loki, `service_name="draft-sync"`), not a separate written spec. The evidence trail is reproduced in each task below so an implementer with zero prior context can verify every claim independently. Two runs were analyzed:
-  - Incident run: `trackingId=13ccdbab-8717-4385-8656-f38f71323980`, league `156611456`, team 8, pod `practice-draft-sync-1787859146-jpr8f` (2026-08-27, ~19:32–21:16 UTC).
-  - Fresh reproduction run (requested mid-investigation, still live when captured): `trackingId=ac341959-8c62-4700-a8e0-aef1171619a5`, league `1768748895`, team 8, pod `practice-draft-sync-1787866737-6d7kv` (2026-08-27, started ~21:38 UTC) — reproduced the *identical* failure signature: 7 picks published via WS in the first ~60s, then a `LEFT` frame, the JOIN socket closes, and the job spins "Reconnect-loop tick." indefinitely afterward with the DOM tier reporting a 100% selector-miss streak the whole time.
+  - Incident run: `trackingId=00000000-0000-0000-0000-000000000001`, league `1234567892`, team 8, pod `practice-draft-sync-1787859146-jpr8f` (2026-08-27, ~19:32–21:16 UTC).
+  - Fresh reproduction run (requested mid-investigation, still live when captured): `trackingId=00000000-0000-0000-0000-000000000002`, league `1234567893`, team 8, pod `practice-draft-sync-1787866737-6d7kv` (2026-08-27, started ~21:38 UTC) — reproduced the *identical* failure signature: 7 picks published via WS in the first ~60s, then a `LEFT` frame, the JOIN socket closes, and the job spins "Reconnect-loop tick." indefinitely afterward with the DOM tier reporting a 100% selector-miss streak the whole time.
 
 ## Global Constraints
 
@@ -37,14 +37,14 @@
 - Produces: `isDraftRoomSocketUrl(url)` — a new exported pure function `(url: string) => boolean`, used by Task 1 itself and available for Task 3's diagnostics if needed. `attachDraftListeners`'s returned handle keeps its existing shape (`{ isDead, hasOpenSocket, debugSnapshot }`) — no signature change, only internal behavior.
 
 **Evidence this task fixes:**
-- Log (incident run): `WebSocket opened: wss://fantasydraft.espn.com/game-1/league-156611456/JOIN?...` at `19:32:52.102Z` (`socket_id: 1`) — the ONLY JOIN socket opened all run.
+- Log (incident run): `WebSocket opened: wss://fantasydraft.espn.com/game-1/league-1234567892/JOIN?...` at `19:32:52.102Z` (`socket_id: 1`) — the ONLY JOIN socket opened all run.
 - Log: `WebSocket closed after 38 frame(s), 7 pick(s): wss://fantasydraft.espn.com/.../JOIN...` at `19:33:25.476Z`, immediately preceded by `First-seen frame type this run: LEFT` — ESPN's own eviction signal. **No further JOIN socket was ever opened for the rest of the ~1h43m run.**
 - Meanwhile `WebSocket opened`/`closed` fired 7 more times for `wss://espn.connections.edge.bamgrid.com/5d3054/connection?...` (socket_ids 2–8) — Disney/BAM's identity-SDK socket, reconnecting on its own schedule (observed reconnect events at 19:37:28, 20:08:36, 20:42:06, 21:15:50 UTC), completely unrelated to draft picks.
 - Because `attachDraftListeners`'s `page.on("websocket", (ws) => {...})` handler (line 882) increments/decrements the SAME closure-scoped `openSockets` counter and bumps the SAME `lastActivityAt` for **every** socket the page opens, the BAM socket's churn kept `openSockets > 0` (or briefly 0 then immediately back to 1) and kept refreshing `lastActivityAt` for the entire session — even though the real draft-room socket had been dead since `19:33:25`.
 - Confirmed via the health heartbeat itself: `[Draft Sync] Reconnect-loop tick.` logged `open_sockets: 1, idle_ms: 991073` at `21:32:24Z` — i.e., `isDead()`'s own `idle_ms` operand shows ~16.5 minutes of silence (33x past the 30000ms `WS_DEAD_GRACE_MS` threshold), yet `isDead()` returned `false` throughout because `openSockets` never sustainably reached 0. **This is why `connectAndStream()`'s `while (!handle.isDead() ...)` loop in `streamLiveDraftRoom` never exited to trigger a reconnect, and the browser session that could rejoin the draft room was never relaunched.**
 - Same root cause also explains the misreported health status: `emitHealthHeartbeat` (line ~1353) is called with `wsConnected: handle.hasOpenSocket()` (line ~1660 in the `heartbeatInterval`), which is `openSockets > 0` — the exact same contaminated counter. This is why every heartbeat log line said `ws=connected` the entire outage (`[Draft Sync] Health: ws=connected picks=7 ... rest_empty=23/23`), and why the same lie was written to Redis for `fantasy-core-pipeline`'s status endpoint (and, downstream, `fantasy-web-ui`'s dashboard) to read.
 - Also explains the garbled `state.health.ws.other_frames` entries: raw BAM-SDK JSON event payloads (e.g. `{"data":null,"type":"urn:dss:transport:edge:event:authenticated",...}`) were logged as if they were draft-room frame types, because the frame-type accounting at line ~1001 runs for every socket's frames indiscriminately, not just the JOIN socket's.
-- Reproduced identically in the fresh run: JOIN socket (league `1768748895`) opened `21:39:00.971Z`, 7 picks published within the first ~10s, `LEFT` frame + close at `21:39:57.614Z` (`42 frame(s), 7 pick(s)`), and no further JOIN socket ever reopened — job was still spinning `Reconnect-loop tick.` when captured.
+- Reproduced identically in the fresh run: JOIN socket (league `1234567893`) opened `21:39:00.971Z`, 7 picks published within the first ~10s, `LEFT` frame + close at `21:39:57.614Z` (`42 frame(s), 7 pick(s)`), and no further JOIN socket ever reopened — job was still spinning `Reconnect-loop tick.` when captured.
 
 - [ ] **Step 1: Write the failing test for the new URL classifier**
 
@@ -55,7 +55,7 @@ describe("isDraftRoomSocketUrl", () => {
   it("recognizes the real ESPN draft-room JOIN socket", () => {
     expect(
       isDraftRoomSocketUrl(
-        "wss://fantasydraft.espn.com/game-1/league-156611456/JOIN?1=1&2=156611456",
+        "wss://fantasydraft.espn.com/game-1/league-1234567892/JOIN?1=1&2=1234567892",
       ),
     ).toBe(true);
   });
@@ -259,7 +259,7 @@ liveness clock, that socket's unrelated churn kept isDead() (and the
 ws_connected health field reported to fantasy-core-pipeline/fantasy-web-ui)
 permanently reporting healthy even after the real draft-room JOIN socket
 was evicted and never reconnected. Confirmed via two independent incident
-logs (trackingId 13ccdbab... and ac341959...)."
+logs (trackingId 00000000...0001 and 00000000...0002)."
 ```
 
 ---
@@ -273,8 +273,8 @@ logs (trackingId 13ccdbab... and ac341959...)."
 **Newly confirmed evidence (found while re-verifying the user's claim that issue #70/#71's session-registry delegation already fixes duplicate-session eviction — it does not, in practice, ever engage):**
 
 - `fantasy-browser-worker` PR #71 ("Session registry + delegation to stop draft_clicker from evicting draft_sync") merged 2026-08-27 12:47:45 -05:00 — *before* both incident runs re-examined here (14:32 and 16:39 local). Its stated fix: `draft_clicker.js` (queue name `draft_targets`) checks `decideOwnership()` before submitting a pick, and if `draft_sync.js` already owns a live session, delegates the pick over `draft_commands:{leagueId}` instead of opening a second, colliding JOIN.
-- In the re-examined incident run (`trackingId=13ccdbab-8717-4385-8656-f38f71323980`), the delegation path *did* engage correctly on the `worker` side:
-  - `14:33:22.696` — `"Live connector found (owner practice-draft-sync-1787859146-jpr8f) for league 156611456 — delegating pick submission via draft_commands:156611456 instead of opening a new session that would evict it."`
+- In the re-examined incident run (`trackingId=00000000-0000-0000-0000-000000000001`), the delegation path *did* engage correctly on the `worker` side:
+  - `14:33:22.696` — `"Live connector found (owner practice-draft-sync-1787859146-jpr8f) for league 1234567892 — delegating pick submission via draft_commands:1234567892 instead of opening a new session that would evict it."`
   - `14:33:27.701` (exactly `CONFIRM_TIMEOUT_MS` = 5000ms later) — `"Delegated pick submission timed out with no result — falling back to a direct session for this attempt."`
   - `14:33:27.701` — `"Connecting to draft room socket to submit pick..."` (opens the exact second, colliding JOIN #70/#71 exists to avoid)
   - `14:33:28.338` — `"SUCCESS: Pick submitted and confirmed for Christian McCaffrey (lineup slot 2)."`
@@ -433,7 +433,7 @@ was a complete no-op on the consuming side until now."
 - Produces: `state.permanentError` (new field on the object returned by `createDraftState()`, parallel to the existing `state.sessionExpiredError`). Consumed by the main `while` loop guard and by `streamLiveDraftRoom`'s outer error handling.
 
 **Evidence this task fixes:**
-- Log: `[Draft Sync] Periodic session check failed: [Session Health] League 156611456 not found (HTTP 404) — the room no longer exists (ended, cancelled, or never existed for this season); retrying can't help.` — this exact message repeated every ~15s from `21:15:53Z` to at least `21:32:24Z` (17+ minutes, still going when captured) with **zero effect on the job's behavior** other than the log line.
+- Log: `[Draft Sync] Periodic session check failed: [Session Health] League 1234567892 not found (HTTP 404) — the room no longer exists (ended, cancelled, or never existed for this season); retrying can't help.` — this exact message repeated every ~15s from `21:15:53Z` to at least `21:32:24Z` (17+ minutes, still going when captured) with **zero effect on the job's behavior** other than the log line.
 - `session_health.js`'s `assertCookieSessionValid` (already, correctly) throws this as a `PermanentError` — but the periodic-check callback in `draft_sync.js` (~line 1622-1638) only special-cases `SessionExpiredError` (setting `state.sessionExpiredError`); every other error type (including `PermanentError`) falls into the generic `else` branch, which just logs and does nothing further. The main `while` loop (~line 1683) only checks `state.sessionExpiredError`, so a `PermanentError` here is silently swallowed forever.
 - `reconcileFromRest`'s catch block (~line 627) has the identical gap: `fetchDraftDetail` throws a plain `Error` (not `PermanentError`) for its own `LEAGUE_NOT_FOUND_DELETED` case (~line 471-481) as well as for any other non-ok HTTP status (~line 484), so even a definitively-permanent REST failure just increments `state.health.rest.failed_polls` forever with no termination path — this is why `failed_polls` reached 462 in the incident run (roughly one failure per 15s REST-reconcile tick for nearly the entire ~1h55m pod lifetime).
 
@@ -443,7 +443,7 @@ Add to `tests/bots/draft_sync.test.js`, in the existing `describe` block that al
 
 ```javascript
   it("throws a PermanentError (not a plain Error) for LEAGUE_NOT_FOUND_DELETED", async () => {
-    const state = { leagueId: "156611456", seasonId: "2026" };
+    const state = { leagueId: "1234567892", seasonId: "2026" };
     const context = {
       request: {
         get: jest.fn().mockResolvedValue({
@@ -459,7 +459,7 @@ Add to `tests/bots/draft_sync.test.js`, in the existing `describe` block that al
   });
 
   it("throws a PermanentError for any other non-ok HTTP status from mDraftDetail", async () => {
-    const state = { leagueId: "156611456", seasonId: "2026" };
+    const state = { leagueId: "1234567892", seasonId: "2026" };
     const context = {
       request: {
         get: jest.fn().mockResolvedValue({
@@ -575,7 +575,7 @@ Add a new `describe` block near the existing `reconcileFromRest`-adjacent tests 
 describe("reconcileFromRest permanent-error handling", () => {
   it("stores a PermanentError on state.permanentError instead of only counting it as a failed poll", async () => {
     const state = {
-      leagueId: "156611456",
+      leagueId: "1234567892",
       seasonId: "2026",
       health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
       permanentError: null,
@@ -596,7 +596,7 @@ describe("reconcileFromRest permanent-error handling", () => {
 
   it("does not touch state.permanentError for an ordinary (transient) REST failure", async () => {
     const state = {
-      leagueId: "156611456",
+      leagueId: "1234567892",
       seasonId: "2026",
       health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
       permanentError: null,
@@ -1018,7 +1018,7 @@ Replace with:
 
 ```javascript
   const playerIdNodeCount = document.querySelectorAll("[data-player-id]").length;
-  // Confirmed incident (2026-08-27, both trackingId 13ccdbab... and ac341959...): a selector miss
+  // Confirmed incident (2026-08-27, both trackingId 00000000...0001 and 00000000...0002): a selector miss
   // with ZERO player_id_nodes anywhere on the page — not just within a strategy's selector, the
   // WHOLE document — was indistinguishable in the logs from a genuinely stale CSS selector, when
   // the far more likely explanation (per this file's header, and session_health.js's documented
@@ -1241,10 +1241,10 @@ downstream, `fantasy-web-ui`'s dashboard) — so the outage was invisible
 end-to-end, not just to this bot.
 
 Reproduced identically in two independent runs:
-- `trackingId=13ccdbab-8717-4385-8656-f38f71323980` (league 156611456): JOIN
+- `trackingId=00000000-0000-0000-0000-000000000001` (league 1234567892): JOIN
   socket opens 19:32:52Z, 7 picks in ~12s, `LEFT` + close at 19:33:25Z, never
   reopens for the remaining ~1h43m of the pod's life.
-- `trackingId=ac341959-8c62-4700-a8e0-aef1171619a5` (league 1768748895): JOIN
+- `trackingId=00000000-0000-0000-0000-000000000002` (league 1234567893): JOIN
   socket opens 21:39:00Z, 7 picks in ~10s, `LEFT` + close at 21:39:57Z, never
   reopens (still stuck when captured).
 

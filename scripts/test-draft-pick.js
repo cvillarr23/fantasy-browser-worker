@@ -21,9 +21,9 @@ const { executeAutomatedDraftSelection } = require("../src/bots/draft_clicker");
  * confirmation. --live only ever makes sense against a room where it's genuinely your team's
  * turn; sending SELECT off-turn is unconfirmed behavior (see draft_room_socket.js's header).
  *
- * Example (from the WORKER-06 recon session, league 1714419714, team 8):
+ * Example (synthetic league and member IDs; replace with your own):
  *   node scripts/test-draft-pick.js \
- *     'https://fantasy.espn.com/football/draft?leagueId=1714419714&seasonId=2026&teamId=8&memberId={74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}' \
+ *     'https://fantasy.espn.com/football/draft?leagueId=1234567891&seasonId=2026&teamId=8&memberId={00000000-0000-0000-0000-000000000000}' \
  *     4362249 "Test Player" --live
  */
 

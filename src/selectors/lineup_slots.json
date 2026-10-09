@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "ESPN lineupSlotId map. Verified live on 2026-08-11 against league 1248158344 via",
+    "ESPN lineupSlotId map. Verified live on 2026-08-11 against league 1234567890 via",
     "GET .../seasons/2026/segments/0/leagues/{id}?view=mSettings -> settings.rosterSettings.",
     "lineupSlotCounts, cross-checked against the slot labels rendered on the team page.",
     "Unlike espn_selectors.json's DOM selectors, these values are confirmed.",

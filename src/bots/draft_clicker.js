@@ -635,7 +635,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/draft_clicker.js '<draft_targets JSON payload>'\n" +
-        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1248158344 node src/bots/draft_clicker.js \\\n" +
+        "Example: DRY_RUN=true ESPN_LEAGUE_ID=1234567890 node src/bots/draft_clicker.js \\\n" +
         `  '{"team_id":"8","player_id":"4360438","name":"Breece Hall"}'`,
     );
     process.exit(1);

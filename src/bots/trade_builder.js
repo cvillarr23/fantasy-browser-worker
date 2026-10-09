@@ -920,7 +920,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/trade_builder.js '<trade_submissions JSON payload>'\n" +
-        "Dry fill (DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1248158344 ESPN_TEAM_ID=8 \\\n" +
+        "Dry fill (DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1234567890 ESPN_TEAM_ID=8 \\\n" +
         "  node src/bots/trade_builder.js \\\n" +
         `  '{"season":2026,"to_team_id":"3","incoming_player_ids":["4259545"],"outgoing_player_ids":["3139477"]}'`,
     );

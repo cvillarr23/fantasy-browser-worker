@@ -19,7 +19,7 @@ const { claimOfferResponse } = require("../../src/db/trade_inbox");
 const { STATUS, toInboxEntry, mergeEntry, computeDecisionKey, scoreFromResponse } = require("../../src/lib/trade_inbox");
 const { PermanentError } = require("../../src/errors");
 
-const LEAGUE = "1248158344";
+const LEAGUE = "1234567890";
 const SCOPE = { leagueId: LEAGUE, season: 2026, teamId: "8" };
 const NOW = new Date("2026-10-06T18:00:00Z");
 const EXPIRES = Date.parse("2026-10-07T18:00:00Z");

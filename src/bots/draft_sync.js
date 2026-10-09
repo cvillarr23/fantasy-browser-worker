@@ -233,7 +233,7 @@ function parseSelectingFrame(raw) {
 /**
  * Parses ESPN's own periodic countdown broadcast — `CLOCK <slot> <msRemaining> <teamId>`,
  * documented in docs/espn-reverse-engineering.md. Confirmed live 2026-08-28 (league
- * 1986717528): this room never sent a single SELECTING frame for its whole session (checked
+ * 1234567897): this room never sent a single SELECTING frame for its whole session (checked
  * against 287 log lines) - CLOCK ticks roughly once a second and was the ONLY on-the-clock
  * signal this room ever emitted, so relying on SELECTING alone left fantasy-core-pipeline
  * with zero real clock visibility here, falling back to DRAFT_PICK_CLOCK_SECONDS's
@@ -583,7 +583,7 @@ const NON_DRAFTABLE_LINEUP_SLOT_IDS = new Set([21]);
  * #62's proactive terminal-detection fast path — lets connectAndStream exit the instant the
  * ledger reaches this size, instead of waiting for the WS_DEAD_GRACE_MS watchdog.
  *
- * CONFIRMED 2026-08-25 against a real ephemeral practice draft (league 20050783, 10 teams, 160
+ * CONFIRMED 2026-08-25 against a real ephemeral practice draft (league 1234567898, 10 teams, 160
  * picks): returns real teams/rosterSettings data while the draft is in progress — unlike its
  * sibling mDraftDetail, which never worked for practice drafts at all. AFTER the draft completes,
  * the league is torn down (`LEAGUE_NOT_FOUND_DELETED`, same as mDraftDetail's confirmed
@@ -1124,7 +1124,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
         const tokens = line.split(/\s+/);
         const type = tokens[0] || "EMPTY";
 
-        // CONFIRMED 2026-08-25 (real practice draft, league 20050783, 10 teams/160 picks): `STATE`
+        // CONFIRMED 2026-08-25 (real practice draft, league 1234567898, 10 teams/160 picks): `STATE`
         // carries 1 at connection start (draft in progress) and 2 exactly once, immediately after
         // the final SELECTED — the terminal frame docs/espn-reverse-engineering.md flagged as
         // unconfirmed. The socket did NOT close afterward (plain PING/PONG continued), so this is
