@@ -1,5 +1,5 @@
 const { CORE_PIPELINE_URL } = require("./core_pipeline");
-const { classifyHttpStatusError } = require("../errors");
+const { classifyHttpStatusError, withRetryDelay } = require("../errors");
 
 /**
  * Deterministic scoring for generated outgoing offers, on fantasy-core-pipeline's league trade
@@ -18,8 +18,6 @@ const SCORE_HORIZON_WEEKS = 4;
 // Core reads ESPN on a context-cache miss and then solves two lineups per team per week.
 const DEFAULT_TRADE_SCORE_TIMEOUT_MS = 30_000;
 const DEFAULT_TRADE_CONTEXT_TIMEOUT_MS = 30_000;
-// Same delay and rationale as trade_bot.js's TRANSIENT_RETRY_DELAY_MS.
-const TRANSIENT_RETRY_DELAY_MS = 5000;
 const HTTP_CONFLICT = 409;
 const HTTP_TOO_MANY_REQUESTS = 429;
 const HTTP_CLIENT_ERROR_MIN = 400;
@@ -38,13 +36,6 @@ const POINTER_LEADING_SEGMENTS = 1;
 
 function timeoutMs(name, fallback) {
   return Number(process.env[name]) || fallback;
-}
-
-function withRetryDelay(error) {
-  if (!error.permanent && error.retryDelayMs === undefined) {
-    error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
-  }
-  return error;
 }
 
 async function fetchTradeContext({ leagueId, season, week, horizon }) {

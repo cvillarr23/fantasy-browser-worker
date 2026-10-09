@@ -84,9 +84,22 @@ function classifyHttpStatusError(status, message) {
   return new Error(message);
 }
 
+// A bare nack requeues instantly under channel-wide prefetch, so a degraded dependency can
+// otherwise hot-loop retries and block every consumer. Credential failures keep their longer
+// SessionExpiredError delay unless the caller explicitly requests an overwrite.
+const TRANSIENT_RETRY_DELAY_MS = 5000;
+
+function withRetryDelay(error, { overwriteExisting = false } = {}) {
+  if (!error.permanent && (overwriteExisting || error.retryDelayMs === undefined)) {
+    error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
+  }
+  return error;
+}
+
 module.exports = {
   PermanentError,
   SessionExpiredError,
   requirePlainObjectPayload,
   classifyHttpStatusError,
+  withRetryDelay,
 };

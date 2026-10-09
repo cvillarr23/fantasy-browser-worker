@@ -16,9 +16,10 @@ const {
   finalizeTradeSubmission,
   recordTradeOfferFill,
 } = require("../db/execution_log");
-const { PermanentError, requirePlainObjectPayload } = require("../errors");
+const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
 const { requirePlayerId } = require("../lib/espn_ids");
 const SELECTORS = require("../selectors/espn_selectors.json");
+const { resolveDryRun } = require("../lib/env");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -72,23 +73,6 @@ const TRADE_SUBMIT_SELECTOR_KEYS = [
 
 const SOURCES = new Set(["counter_offer", "proposal", "manual"]);
 const SUBMIT_RESPONSE_TIMEOUT_MS = 30000;
-// Same rationale and value as trade_bot.js's TRANSIENT_RETRY_DELAY_MS (a bare nack would hot-loop
-// a Chromium launch under connection.js's channel-wide prefetch(1)). Not imported: trade_bot.js
-// requires this module, so importing back would be circular.
-const TRANSIENT_RETRY_DELAY_MS = 5000;
-
-function withRetryDelay(error) {
-  if (!error.permanent && error.retryDelayMs === undefined) {
-    error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
-  }
-  return error;
-}
-
-function resolveDryRun() {
-  const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return true;
-  return !/^(0|false|no)$/i.test(raw);
-}
 
 function isSubmitArmed() {
   return /^(1|true|yes)$/i.test((process.env.TRADE_SUBMIT_ENABLED || "").trim());
@@ -569,7 +553,7 @@ async function submitTradeOffer(
   if (approval !== undefined && approval !== null) requireApproval(approval, offerKey);
 
   const closedLocks = [];
-  if (resolveDryRun()) closedLocks.push("DRY_RUN is not explicitly false");
+  if (resolveDryRun(true).dryRun) closedLocks.push("DRY_RUN is not explicitly false");
   if (!isSubmitArmed()) closedLocks.push("TRADE_SUBMIT_ENABLED is not true");
   const unverified = unverifiedSubmitSelectors();
   if (unverified.length > 0) {

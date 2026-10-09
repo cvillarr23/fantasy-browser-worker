@@ -19,13 +19,12 @@ const {
   evaluationFits,
 } = require("../lib/trade_scoring");
 const { logger } = require("../telemetry/logger");
-const { PermanentError, requirePlainObjectPayload } = require("../errors");
+const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
 
 // Bounds one scan to 2 LLM calls and at most this many score calls, inside trade_scan.js's
 // runtime limit, while still giving the ranking real alternatives to compare.
 const MAX_TARGET_TEAMS = 3;
 const MAX_CANDIDATE_PACKAGES = 6;
-const TRANSIENT_RETRY_DELAY_MS = 5000;
 const TOP_RANK = 1;
 
 function requireProposalPayload(payload) {
@@ -289,8 +288,7 @@ async function generateTradeProposal(payload) {
     }
     return { target, offer, evaluation, submission };
   } catch (error) {
-    if (!error.permanent && error.retryDelayMs === undefined) error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
-    throw error;
+    throw withRetryDelay(error);
   } finally {
     if (session?.browser) await session.browser.close();
   }
