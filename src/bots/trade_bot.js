@@ -619,7 +619,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/trade_bot.js '<trade_negotiations JSON payload>'\n" +
-        "Example: ESPN_LEAGUE_ID=1248158344 node src/bots/trade_bot.js \\\n" +
+        "Example: ESPN_LEAGUE_ID=1234567890 node src/bots/trade_bot.js \\\n" +
         `  '{"incoming_player_ids":["101"],"outgoing_player_ids":["202"],"season":2026,"week":3,"offering_team_id":"7"}'`,
     );
     process.exit(1);

@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # Builds the worker image and imports it into the cluster's containerd for local testing.
 #
-# This does its work over SSH on the actual k8s node (cvill-server / `server` in ~/.ssh/config) —
-# NOT on this desktop. Docker networking on this desktop is broken (unrelated veth/bridge issue),
-# and more fundamentally, this desktop was never the right place to build from: it only has remote
-# kubectl access to the cluster, it isn't a node. See scripts/remote-build-and-import.sh, which
-# does the actual build/import work over there.
+# Runs over SSH on a Kubernetes node with Docker and containerd installed.
+# Set NODE to the node hostname or an alias from your SSH config.
+# scripts/remote-build-and-import.sh performs the build/import on that node.
 #
 # Requires:
-#   - SSH access to the node (Host "server" in ~/.ssh/config, or override NODE via env)
+#   - SSH access to the node (Host "k8s-node" in ~/.ssh/config, or override NODE via env)
 #   - Passwordless sudo for /usr/bin/ctr on the node (see fantasy-browser-worker README/PR notes
 #     for the one-time `/etc/sudoers.d/ctr-nopasswd` setup) — docker.service itself may still need
 #     an interactive sudo the first time if it's not already enabled+running on the node.
@@ -16,7 +14,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-NODE="${NODE:-server}"
+NODE="${NODE:-k8s-node}"
 REMOTE_DIR="${REMOTE_DIR:-~/fantasy-browser-worker}"
 
 echo "==> Syncing repo to ${NODE}:${REMOTE_DIR}..."

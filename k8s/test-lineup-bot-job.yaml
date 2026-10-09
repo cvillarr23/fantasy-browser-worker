@@ -11,7 +11,7 @@
 # to "false" when you actually intend to mutate the live lineup.
 #
 # PREREQUISITE: the league must have drafted. lineup_bot.js refuses to run against an empty roster,
-# and as of 2026-08-11 league 1248158344 had none (mRoster returned entries: []). Before the first
+# and as of 2026-08-11 league 1234567890 had none (mRoster returned entries: []). Before the first
 # non-dry run, capture the real save request with:
 #   node src/bots/lineup_recon.js --watch-save
 # and confirm it matches what espn_api.js's submitLineup() sends — that body is still unverified.
@@ -24,7 +24,7 @@
 #   kubectl logs -f job/lineup-bot-test -n default
 #
 # To inspect the roster the bot sees, without the Job:
-#   ESPN_LEAGUE_ID=1248158344 node src/bots/lineup_recon.js
+#   ESPN_LEAGUE_ID=1234567890 node src/bots/lineup_recon.js
 apiVersion: batch/v1
 kind: Job
 metadata:

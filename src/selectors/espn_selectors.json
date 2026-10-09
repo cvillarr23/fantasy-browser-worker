@@ -7,7 +7,7 @@
     "(see below). `search_input`, `draft_button` and `waiver_confirm_button` are left here only as",
     "a documented record of what didn't work; nothing in the codebase reads them anymore.",
     "",
-    "Recon on 2026-08-11 (src/bots/lineup_recon.js, league 1248158344) found that ESPN's roster",
+    "Recon on 2026-08-11 (src/bots/lineup_recon.js, league 1234567890) found that ESPN's roster",
     "table exposes NO per-player identifier in the DOM: `tr[data-player-id]`, `tr[data-playerid]`",
     "and any attribute matching /player.?id/i all return ZERO matches. Rows carry only `data-idx`,",
     "a positional index. That is why lineup_bot.js and waiver_sniper.js drive ESPN's REST API",
@@ -15,7 +15,7 @@
     "",
     "`roster_table` was `.roster-table`, which matched nothing; it is now the verified `.Table`.",
     "",
-    "Live capture on 2026-09-12 (a real FLEX/Bench swap against league 1248158344 team 8, confirmed",
+    "Live capture on 2026-09-12 (a real FLEX/Bench swap against league 1234567890 team 8, confirmed",
     "and then reverted) drove `move_button` and `here_button` end-to-end and both worked as written:",
     "clicking `move_button` on a player puts the row into move mode, then `here_button` on the target",
     "row's own `.Table__TR` completes the move. There is NO separate save_button click needed for a",
@@ -28,7 +28,7 @@
     "trade_builder.js REFUSES a real submit until every key in its TRADE_SUBMIT_SELECTOR_KEYS is listed",
     "under `_verified`. trade_headshot_img is a template: `{id}` is replaced with the ESPN player id.",
     "",
-    "Verified 2026-10-03 (#123) by a scripted no-send recon against league 1248158344, team 8 vs team 1,",
+    "Verified 2026-10-03 (#123) by a scripted no-send recon against league 1234567890, team 8 vs team 1,",
     "with trade_builder's write guard on the whole BrowserContext (0 ESPN writes blocked or allowed):",
     "- Each roster row is a .Table__TR holding a visible span[role=checkbox] (aria-checked tracks state)",
     "  that wraps a hidden input[type=checkbox]. Playwright check() on the span works.",
@@ -44,7 +44,7 @@
   ],
 
   "_verified": {
-    "source": "lineup_recon.js + a live driven swap against league 1248158344 team 8, 2026-08-11 / 2026-09-12; trade_* keys: no-send trade-builder recon, 2026-10-03 (#123)",
+    "source": "lineup_recon.js + a live driven swap against league 1234567890 team 8, 2026-08-11 / 2026-09-12; trade_* keys: no-send trade-builder recon, 2026-10-03 (#123)",
     "keys": [
       "roster_table",
       "roster_row",

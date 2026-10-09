@@ -13,7 +13,7 @@ const { logger } = require("../telemetry/logger");
  * One-off recon tool for the team/roster page — NOT part of the production worker pipeline.
  * Sibling of draft_recon.js, same idea: capture what ESPN actually does rather than guessing.
  *
- * What the first run (2026-08-11, league 1248158344 team 8) established, and why lineup_bot.js
+ * What the first run (2026-08-11, league 1234567890 team 8) established, and why lineup_bot.js
  * ended up API-driven:
  *   - `tr[data-player-id]` -> 0 matches. So does `tr[data-playerid]`, and so does a sweep for ANY
  *     attribute matching /player.?id/i. The roster DOM exposes no player identifier at all.
@@ -36,6 +36,8 @@ const { logger } = require("../telemetry/logger");
  * revert. Run --watch-save and move them to IR, then back to the bench. lineup-xhr.jsonl records
  * both requests and ESPN's responses, including the rejection body for an ineligible player.
  *
+ * Requires ESPN_LEAGUE_ID to select your league.
+ *
  * Usage:
  *   node src/bots/lineup_recon.js               # DOM + selector probe + API snapshot
  *   node src/bots/lineup_recon.js --watch-save  # also record XHR while you save a lineup by hand
@@ -43,7 +45,8 @@ const { logger } = require("../telemetry/logger");
  * Auth: ESPN_S2/SWID env vars, then OpenBao, then a visible browser you log into yourself.
  */
 
-const LEAGUE_ID = process.env.ESPN_LEAGUE_ID || "1248158344";
+const LEAGUE_ID = (process.env.ESPN_LEAGUE_ID || "").trim();
+const EXIT_CODE_FAILURE = 1;
 const TEAM_ID = process.env.ESPN_TEAM_ID || "8";
 const SEASON_ID = process.env.CURRENT_YEAR || "2026";
 
@@ -171,6 +174,12 @@ function summarizeRoster(roster) {
 }
 
 async function runLineupRecon() {
+  if (!LEAGUE_ID) {
+    logger.error("[Lineup Recon] ESPN_LEAGUE_ID is required.");
+    process.exitCode = EXIT_CODE_FAILURE;
+    return;
+  }
+
   const watchSave = process.argv.includes("--watch-save");
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   logger.info(`[Lineup Recon] Output directory: ${OUTPUT_DIR}`);
@@ -245,7 +254,7 @@ async function runLineupRecon() {
     logger.error(`[Lineup Recon] Fatal error: ${error.message}`, {
       err: error,
     });
-    process.exitCode = 1;
+    process.exitCode = EXIT_CODE_FAILURE;
   } finally {
     if (session && session.browser) {
       await session.browser.close();

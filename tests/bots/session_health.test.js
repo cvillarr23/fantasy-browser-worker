@@ -50,7 +50,7 @@ describe("assertCookieSessionValid", () => {
   it("throws PermanentError on a 404 — the league is gone, not just unreachable", async () => {
     const context = makeContext(404);
     const promise = assertCookieSessionValid(context, {
-      leagueId: "1650162962",
+      leagueId: "1234567895",
       seasonId: "2026",
     });
     await expect(promise).rejects.toBeInstanceOf(PermanentError);

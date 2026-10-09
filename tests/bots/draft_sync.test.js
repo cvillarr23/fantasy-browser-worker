@@ -59,7 +59,7 @@ describe("parseSelectingFrame", () => {
 });
 
 describe("parseClockFrame", () => {
-  // Confirmed live 2026-08-28 (league 1986717528): some rooms never send a single SELECTING
+  // Confirmed live 2026-08-28 (league 1234567897): some rooms never send a single SELECTING
   // frame for their whole session - CLOCK is the only on-the-clock signal they emit. Token
   // order is CLOCK <slot> <msRemaining> <teamId>, deliberately different from SELECTING's
   // <teamId> <clockMs> - both must resolve to the identical {team_id, clock_ms} shape so they
@@ -164,10 +164,10 @@ describe("fetchDraftDetail", () => {
     };
 
     await expect(
-      fetchDraftDetail(context, { leagueId: "294773976", seasonId: "2026" }),
+      fetchDraftDetail(context, { leagueId: "1234567896", seasonId: "2026" }),
     ).rejects.toThrow(/LEAGUE_NOT_FOUND_DELETED/);
     await expect(
-      fetchDraftDetail(context, { leagueId: "294773976", seasonId: "2026" }),
+      fetchDraftDetail(context, { leagueId: "1234567896", seasonId: "2026" }),
     ).rejects.toThrow(/Set DRAFT_ROOM_URL/);
   });
 
@@ -188,7 +188,7 @@ describe("fetchDraftDetail", () => {
   });
 
   it("throws a PermanentError (not a plain Error) for LEAGUE_NOT_FOUND_DELETED", async () => {
-    const state = { leagueId: "156611456", seasonId: "2026" };
+    const state = { leagueId: "1234567892", seasonId: "2026" };
     const context = {
       request: {
         get: jest.fn().mockResolvedValue({
@@ -204,7 +204,7 @@ describe("fetchDraftDetail", () => {
   });
 
   it("throws a PermanentError for any other non-ok HTTP status from mDraftDetail", async () => {
-    const state = { leagueId: "156611456", seasonId: "2026" };
+    const state = { leagueId: "1234567892", seasonId: "2026" };
     const context = {
       request: {
         get: jest.fn().mockResolvedValue({
@@ -245,7 +245,7 @@ describe("fetchDraftDetail", () => {
 describe("reconcileFromRest permanent-error handling", () => {
   it("stores a PermanentError on state.permanentError instead of only counting it as a failed poll", async () => {
     const state = {
-      leagueId: "156611456",
+      leagueId: "1234567892",
       seasonId: "2026",
       health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
       permanentError: null,
@@ -266,7 +266,7 @@ describe("reconcileFromRest permanent-error handling", () => {
 
   it("does not touch state.permanentError for an ordinary (transient) REST failure", async () => {
     const state = {
-      leagueId: "156611456",
+      leagueId: "1234567892",
       seasonId: "2026",
       health: { rest: { polls: 0, empty_polls: 0, failed_polls: 0 } },
       permanentError: null,
@@ -459,7 +459,7 @@ describe("fetchDraftTotals", () => {
   });
 
   it("excludes the IR slot (21) from the roster-slot sum — the real practice-draft recon finding", async () => {
-    // Real capture (league 20050783, 2026-08-25): 10 teams, rosterSettings.lineupSlotCounts
+    // Real capture (league 1234567898, 2026-08-25): 10 teams, rosterSettings.lineupSlotCounts
     // summed to 17 (including one IR slot), but the draft only ever produced 160 picks (10 x 16),
     // not the naively-computed 170. IR is filled via free agency/waivers, never during the draft.
     const context = {
@@ -504,7 +504,7 @@ describe("isDraftRoomSocketUrl", () => {
   it("recognizes the real ESPN draft-room JOIN socket", () => {
     expect(
       isDraftRoomSocketUrl(
-        "wss://fantasydraft.espn.com/game-1/league-156611456/JOIN?1=1&2=156611456",
+        "wss://fantasydraft.espn.com/game-1/league-1234567892/JOIN?1=1&2=1234567892",
       ),
     ).toBe(true);
   });
@@ -1271,7 +1271,7 @@ describe("connectAndStream", () => {
   });
 
   it("routes a CLOCK frame to the same on-the-clock handler as SELECTING, not the generic unknown-frame counter (issue #108 follow-up)", async () => {
-    // Confirmed live 2026-08-28 (league 1986717528): some rooms only ever send CLOCK, never
+    // Confirmed live 2026-08-28 (league 1234567897): some rooms only ever send CLOCK, never
     // SELECTING, for on-the-clock state - CLOCK must therefore update
     // draft:{leagueId}:selecting the same way SELECTING does, not be silently discarded.
     const { session, pageListeners } = buildSession({

@@ -14,7 +14,7 @@ const { loadInbox, updateEntry, setTriage, claimOfferResponse, settleOfferRespon
 const { PermanentError } = require("../../src/errors");
 
 const pool = Pool.mock.results[0].value;
-const SCOPE = { leagueId: "1248158344", season: 2026 };
+const SCOPE = { leagueId: "1234567890", season: 2026 };
 const NOW = new Date("2026-10-06T18:00:00Z");
 
 function fakeClient(responses) {
@@ -50,7 +50,7 @@ describe("loadInbox", () => {
     ]);
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/transaction_type = 'trade_inbox'/);
-    expect(params).toEqual(["1248158344"]);
+    expect(params).toEqual(["1234567890"]);
   });
 
   it("throws on a DB error so a refresh never works from a partial view", async () => {
@@ -89,12 +89,12 @@ describe("updateEntry", () => {
     const sqls = statements(client);
     expect(sqls[0]).toBe("BEGIN");
     expect(sqls[1]).toMatch(/pg_advisory_xact_lock\(hashtext\(\$1\)\)/);
-    expect(client.query.mock.calls[1][1]).toEqual(["trade-inbox:1248158344:tx-1"]);
+    expect(client.query.mock.calls[1][1]).toEqual(["trade-inbox:1234567890:tx-1"]);
     expect(sqls[2]).toMatch(/FOR UPDATE/);
     expect(mutate).toHaveBeenCalledWith(null);
     expect(sqls[3]).toMatch(/^INSERT INTO execution_log/);
     const params = client.query.mock.calls[3][1];
-    expect(params).toEqual(["open", "1248158344", 2026, "3", expect.any(String)]);
+    expect(params).toEqual(["open", "1234567890", 2026, "3", expect.any(String)]);
     expect(JSON.parse(params[4])).toEqual({ espn_transaction_id: "tx-1", proposing_team_id: "3" });
     expect(sqls[4]).toBe("COMMIT");
     expect(client.release).toHaveBeenCalled();
@@ -174,7 +174,7 @@ describe("claimOfferResponse", () => {
   const KEY = "d".repeat(64);
   const OTHER_KEY = "e".repeat(64);
   const FP = "f".repeat(64);
-  const ROW = { leagueId: "1248158344", season: 2026, transactionId: "tx-1", proposingTeamId: "3", action: "decline", comment: null, approvedBy: "conor" };
+  const ROW = { leagueId: "1234567890", season: 2026, transactionId: "tx-1", proposingTeamId: "3", action: "decline", comment: null, approvedBy: "conor" };
   const open = (overrides = {}) =>
     storedRow({ fingerprint: FP, parse_issues: [], proposing_team_id: "3", decision: null, ...overrides });
   const claim = (extra = {}) =>
@@ -200,12 +200,12 @@ describe("claimOfferResponse", () => {
     const sqls = statements(client);
     const calls = client.query.mock.calls;
     expect(sqls[0]).toBe("BEGIN");
-    expect(calls[1][1]).toEqual(["trade-inbox:1248158344:tx-1"]);
+    expect(calls[1][1]).toEqual(["trade-inbox:1234567890:tx-1"]);
     expect(sqls[2]).toMatch(/'trade_inbox'[\s\S]*FOR UPDATE/);
     expect(sqls[2]).not.toMatch(/LIMIT/);
     expect(calls[3][1]).toEqual([KEY]);
     expect(sqls[4]).toMatch(/'trade_response'[\s\S]*espn_transaction_id/);
-    expect(calls[4][1]).toEqual(["1248158344", "tx-1", ["responded", "responding", "response_unknown", "rejected"]]);
+    expect(calls[4][1]).toEqual(["1234567890", "tx-1", ["responded", "responding", "response_unknown", "rejected"]]);
     expect(JSON.parse(calls[5][1][5])).toEqual({
       decision_key: KEY,
       espn_transaction_id: "tx-1",
@@ -345,7 +345,7 @@ describe("settleOfferResponse", () => {
     ).resolves.toMatchObject({ settled: true });
 
     const calls = client.query.mock.calls;
-    expect(calls[1][1]).toEqual(["trade-inbox:1248158344:tx-1"]);
+    expect(calls[1][1]).toEqual(["trade-inbox:1234567890:tx-1"]);
     expect(calls[2][0]).toMatch(/SET status = \$2, error_message = \$3\s+WHERE id = \$1 AND transaction_type = 'trade_response' AND status = ANY\(\$4\)/);
     expect(calls[2][1]).toEqual([21, "responded", null, ["responding", "response_unknown"]]);
     const update = calls.find(([sql]) => /counter_offer = \$3::jsonb/.test(sql));

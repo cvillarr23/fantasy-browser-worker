@@ -67,7 +67,7 @@ function memoryStore(initial = []) {
 let deps;
 let browser;
 beforeEach(() => {
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
   delete process.env.TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE;
   delete process.env.TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE;
@@ -112,7 +112,7 @@ describe("refreshTradeInbox", () => {
   async function refreshWithEvidence(final = 3) {
     const body = {
       ...fullScore(final),
-      league_id: "1248158344",
+      league_id: "1234567890",
       our_team: { team_id: "8", name: "Us" },
     };
     deps.score.mockResolvedValue({ ok: true, body });
@@ -202,7 +202,7 @@ describe("refreshTradeInbox", () => {
     await refreshWithEvidence();
     for (const body of [
       scoreBody(7),
-      { ...fullScore(7), league_id: "1248158344", our_team: { team_id: "8", name: "Us" }, padding: "x".repeat(65536) },
+      { ...fullScore(7), league_id: "1234567890", our_team: { team_id: "8", name: "Us" }, padding: "x".repeat(65536) },
     ]) {
       deps.store.rows.get("tx-1").score.retry = true;
       deps.score.mockResolvedValue({ ok: true, body });
@@ -242,7 +242,7 @@ describe("refreshTradeInbox", () => {
     const body = {
       ...fullScore(4),
       as_of_week: 6,
-      league_id: "1248158344",
+      league_id: "1234567890",
       our_team: { team_id: "8", name: "Us" },
     };
     deps.score.mockResolvedValue({ ok: true, body });
@@ -289,7 +289,7 @@ describe("refreshTradeInbox", () => {
   it("stores a new offer with core's score and closes the browser", async () => {
     const result = await refreshTradeInbox({ persist: true }, deps);
 
-    expect(deps.readPending).toHaveBeenCalledWith({}, { leagueId: "1248158344", seasonId: "2026", teamId: "8" });
+    expect(deps.readPending).toHaveBeenCalledWith({}, { leagueId: "1234567890", seasonId: "2026", teamId: "8" });
     expect(deps.score).toHaveBeenCalledWith(
       expect.objectContaining({ send_espn_ids: ["4429795"], receive_espn_ids: ["-16021"], week: 5 }),
     );
@@ -498,7 +498,7 @@ describe("CLI", () => {
     await main(["--triage", "tx-1", "dismissed", "conor"]);
     expect(inboxDb.setTriage).toHaveBeenCalledWith(
       "tx-1",
-      { leagueId: "1248158344" },
+      { leagueId: "1234567890" },
       expect.objectContaining({ state: "dismissed", by: "conor" }),
     );
   });

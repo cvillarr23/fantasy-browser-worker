@@ -50,7 +50,7 @@ beforeEach(() => {
   jest.useFakeTimers();
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   savedEnv.CURRENT_YEAR = process.env.CURRENT_YEAR;
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.CURRENT_YEAR = "2026";
 
   createAuthenticatedSession.mockResolvedValue({
@@ -196,12 +196,12 @@ describe("executeAutomatedDraftSelection", () => {
   });
 
   it("prefers payload.league_id over ESPN_LEAGUE_ID, so a shared worker never acts against the wrong league", async () => {
-    process.env.ESPN_LEAGUE_ID = "1248158344";
-    const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, league_id: "1768121792" });
+    process.env.ESPN_LEAGUE_ID = "1234567890";
+    const runPromise = executeAutomatedDraftSelection({ ...BASE_PAYLOAD, league_id: "1234567894" });
     await jest.advanceTimersByTimeAsync(1000);
     await runPromise;
     expect(recordDraftPickClick).toHaveBeenCalledWith(
-      expect.objectContaining({ leagueId: "1768121792" }),
+      expect.objectContaining({ leagueId: "1234567894" }),
     );
   });
 
@@ -257,10 +257,10 @@ describe("executeAutomatedDraftSelection", () => {
       await jest.advanceTimersByTimeAsync(1000);
       await runPromise;
 
-      expect(decideOwnership).toHaveBeenCalledWith(expect.anything(), "1248158344");
+      expect(decideOwnership).toHaveBeenCalledWith(expect.anything(), "1234567890");
       expect(publishCommand).toHaveBeenCalledWith(
         expect.anything(),
-        "1248158344",
+        "1234567890",
         expect.objectContaining({
           command: "submit_pick",
           team_id: "8",
@@ -270,14 +270,14 @@ describe("executeAutomatedDraftSelection", () => {
       );
       expect(awaitCommandResult).toHaveBeenCalledWith(
         expect.anything(),
-        "1248158344",
+        "1234567890",
         "cmd-1",
         expect.any(Number),
       );
       expect(connectToDraftRoom).not.toHaveBeenCalled();
       expect(clickPickViaDom).not.toHaveBeenCalled();
       expect(recordDraftPickClick).toHaveBeenCalledWith({
-        leagueId: "1248158344",
+        leagueId: "1234567890",
         season: "2026",
         playerId: "4360438",
         playerName: "Breece Hall",
@@ -301,7 +301,7 @@ describe("executeAutomatedDraftSelection", () => {
       const runPromise = executeAutomatedDraftSelection({
         ...BASE_PAYLOAD,
         pick_number: 14,
-        idempotency_key: "1248158344:14:4360438",
+        idempotency_key: "1234567890:14:4360438",
       });
       // Suppresses the unhandled-rejection warning that would otherwise fire the instant the
       // rejection settles during the timer advance below, before the `.rejects` assertion has
@@ -321,10 +321,10 @@ describe("executeAutomatedDraftSelection", () => {
       // retry with the next-best candidate within the same pick clock.
       expect(publishPickRejection).toHaveBeenCalledWith(
         expect.anything(),
-        "1248158344",
+        "1234567890",
         expect.objectContaining({
           pick_number: 14,
-          idempotency_key: "1248158344:14:4360438",
+          idempotency_key: "1234567890:14:4360438",
           team_id: "8",
           player_id: "4360438",
           error_code: 1,
@@ -400,7 +400,7 @@ describe("executeAutomatedDraftSelection", () => {
     expect(socket.sendPick).toHaveBeenCalledWith("4360438");
     expect(socket.close).toHaveBeenCalled();
     expect(recordDraftPickClick).toHaveBeenCalledWith({
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
@@ -418,7 +418,7 @@ describe("executeAutomatedDraftSelection", () => {
     const runPromise = executeAutomatedDraftSelection({
       ...BASE_PAYLOAD,
       pick_number: 14,
-      idempotency_key: "1248158344:14:4360438",
+      idempotency_key: "1234567890:14:4360438",
     });
     await jest.advanceTimersByTimeAsync(1000);
     socket.handlers.onError({ code: 1, message: "Invalid Selection." });
@@ -430,7 +430,7 @@ describe("executeAutomatedDraftSelection", () => {
     expect(socket.close).toHaveBeenCalled();
     expect(clickPickViaDom).not.toHaveBeenCalled();
     expect(recordDraftPickClick).toHaveBeenCalledWith({
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
@@ -441,10 +441,10 @@ describe("executeAutomatedDraftSelection", () => {
     // to a direct-path rejection identically to a delegated one.
     expect(publishPickRejection).toHaveBeenCalledWith(
       expect.anything(),
-      "1248158344",
+      "1234567890",
       expect.objectContaining({
         pick_number: 14,
-        idempotency_key: "1248158344:14:4360438",
+        idempotency_key: "1234567890:14:4360438",
         team_id: "8",
         player_id: "4360438",
         error_code: 1,
@@ -463,11 +463,11 @@ describe("executeAutomatedDraftSelection", () => {
     await runPromise;
 
     expect(clickPickViaDom).toHaveBeenCalledWith(
-      { leagueId: "1248158344", seasonId: "2026", teamId: "8" },
+      { leagueId: "1234567890", seasonId: "2026", teamId: "8" },
       "4360438",
     );
     expect(recordDraftPickClick).toHaveBeenCalledWith({
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",
@@ -489,7 +489,7 @@ describe("executeAutomatedDraftSelection", () => {
     await assertion;
 
     expect(recordDraftPickClick).toHaveBeenCalledWith({
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       season: "2026",
       playerId: "4360438",
       playerName: "Breece Hall",

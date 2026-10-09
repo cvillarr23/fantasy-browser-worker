@@ -41,9 +41,9 @@ function fakeContext(responseBody, status = 200) {
 }
 
 const BASE_URL =
-  "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/";
+  "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890/transactions/";
 
-// Confirmed 2026-09-12 against a real captured save (league 1248158344 team 8): both headers, and
+// Confirmed 2026-09-12 against a real captured save (league 1234567890 team 8): both headers, and
 // this envelope shape, match ESPN's actual web client exactly.
 const EXPECTED_HEADERS = {
   "Content-Type": "application/json",
@@ -77,7 +77,7 @@ describe("D/ST negative player ids", () => {
     };
 
     const roster = await readRoster(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
     });
@@ -114,7 +114,7 @@ describe("D/ST negative player ids", () => {
     };
 
     const roster = await readRoster(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
     });
@@ -151,7 +151,7 @@ describe("D/ST negative player ids", () => {
     };
 
     const roster = await readRoster(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
     });
@@ -174,7 +174,7 @@ describe("D/ST negative player ids", () => {
 
     const rosters = await readRosters(
       { request: { get } },
-      { leagueId: "1248158344", seasonId: "2026", teamIds: ["3", "8"] },
+      { leagueId: "1234567890", seasonId: "2026", teamIds: ["3", "8"] },
     );
 
     expect(get).toHaveBeenCalledTimes(1);
@@ -186,7 +186,7 @@ describe("D/ST negative player ids", () => {
     const context = fakeContext({ id: "abc" });
 
     await submitWaiverClaim(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -211,10 +211,10 @@ describe("submitLineup", () => {
     ];
 
     await submitLineup(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
-      memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+      memberId: "{00000000-0000-0000-0000-000000000000}",
       scoringPeriodId: 1,
       items,
     });
@@ -225,7 +225,7 @@ describe("submitLineup", () => {
         isLeagueManager: false,
         teamId: 8,
         type: "ROSTER",
-        memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+        memberId: "{00000000-0000-0000-0000-000000000000}",
         scoringPeriodId: 1,
         executionType: "EXECUTE",
         items,
@@ -295,10 +295,10 @@ describe("submitWaiverClaim", () => {
     const context = fakeContext({ id: "abc" });
 
     await submitWaiverClaim(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
-      memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+      memberId: "{00000000-0000-0000-0000-000000000000}",
       scoringPeriodId: 1,
       addPlayerId: "111",
       dropPlayerId: "222",
@@ -310,7 +310,7 @@ describe("submitWaiverClaim", () => {
         isLeagueManager: false,
         teamId: 8,
         type: "FREEAGENT",
-        memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+        memberId: "{00000000-0000-0000-0000-000000000000}",
         scoringPeriodId: 1,
         executionType: "EXECUTE",
         items: [
@@ -327,7 +327,7 @@ describe("submitWaiverClaim", () => {
     const context = fakeContext({ id: "abc" });
 
     await submitWaiverClaim(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -359,7 +359,7 @@ describe("submitWaiverClaim", () => {
   it.each([401, 403])("retries HTTP %s after the session is refreshed", async (status) => {
     const context = fakeContext({ message: "authentication required" }, status);
     const error = await submitWaiverClaim(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -384,7 +384,7 @@ describe("submitWaiverClaim", () => {
     const context = fakeContext(rejection, 409);
 
     await expect(submitWaiverClaim(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -417,7 +417,7 @@ describe("buildTradeProposalBody", () => {
   const base = {
     teamId: "8",
     toTeamId: "1",
-    memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+    memberId: "{00000000-0000-0000-0000-000000000000}",
     scoringPeriodId: 4,
     incomingPlayerIds: ["3117251", "-16019"],
     outgoingPlayerIds: ["4429795"],
@@ -429,7 +429,7 @@ describe("buildTradeProposalBody", () => {
       isLeagueManager: false,
       teamId: 8,
       type: "TRADE_PROPOSAL",
-      memberId: "{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}",
+      memberId: "{00000000-0000-0000-0000-000000000000}",
       scoringPeriodId: 4,
       executionType: "EXECUTE",
       items: [
@@ -473,7 +473,7 @@ describe("write-artifact capture", () => {
     const context = fakeContext({ id: "abc" });
 
     await submitLineupFresh(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -489,7 +489,7 @@ describe("write-artifact capture", () => {
     expect(record).toMatchObject({
       kind: "lineup",
       trackingId: "test-tracking",
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       teamId: "8",
       responseStatus: 200,
       responseOk: true,
@@ -503,7 +503,7 @@ describe("write-artifact capture", () => {
     const context = fakeContext({ id: "abc" });
 
     await submitLineupFresh(context, {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
       memberId: "x",
@@ -529,7 +529,7 @@ function fakeGetContext(responseBody, status = 200) {
 }
 
 const LEAGUE_READ_URL =
-  "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344";
+  "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890";
 
 // Rosters/owners as mRoster+mTeam return them. The pending-trade entries are a GUESS at the
 // populated shape (only the empty state has been observed live, #101): mTransactions2's verified
@@ -562,7 +562,7 @@ function pendingTrade(overrides = {}) {
 }
 
 describe("readPendingTrades", () => {
-  const ids = { leagueId: "1248158344", seasonId: "2026", teamId: "8" };
+  const ids = { leagueId: "1234567890", seasonId: "2026", teamId: "8" };
 
   it("reads the same views the clubhouse page loads", async () => {
     const context = fakeGetContext({ teams: LEAGUE_TEAMS });
@@ -717,7 +717,7 @@ describe("readPendingTrades", () => {
 });
 
 describe("readLeagueChat", () => {
-  const ids = { leagueId: "1248158344", seasonId: "2026" };
+  const ids = { leagueId: "1234567890", seasonId: "2026" };
 
   function chatTopic(messages) {
     return { id: "bde68199", type: "CHAT_ALL_MEMBERS", messages };
@@ -790,7 +790,7 @@ describe("readLeagueChat", () => {
 });
 
 describe("readTradeHistory", () => {
-  const ids = { leagueId: "1248158344", seasonId: "2026" };
+  const ids = { leagueId: "1234567890", seasonId: "2026" };
 
   it("reads mTransactions2 filtered to trade transaction types", async () => {
     const context = fakeGetContext({ transactions: [] });
@@ -877,7 +877,7 @@ describe("trade responses", () => {
 
     const result = await submitTradeResponse(context, {
       ...base,
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       action: "decline",
       trackingId: "t-1",
@@ -891,7 +891,7 @@ describe("trade responses", () => {
   });
 
   it("raises SessionExpiredError on 401/403 and a PermanentError carrying ESPN's details on other 4xx", async () => {
-    const args = { ...base, leagueId: "1248158344", seasonId: "2026", action: "accept" };
+    const args = { ...base, leagueId: "1234567890", seasonId: "2026", action: "accept" };
     await expect(submitTradeResponse(fakeContext({}, 403), args)).rejects.toBeInstanceOf(SessionExpiredError);
 
     const rejected = submitTradeResponse(
@@ -906,7 +906,7 @@ describe("trade responses", () => {
   });
 
   it("marks a 5xx as an unknown outcome rather than a rejection", async () => {
-    const args = { ...base, leagueId: "1248158344", seasonId: "2026", action: "accept" };
+    const args = { ...base, leagueId: "1234567890", seasonId: "2026", action: "accept" };
     await expect(submitTradeResponse(fakeContext({}, 503), args)).rejects.toMatchObject({
       status: 503,
       outcomeUnknown: true,

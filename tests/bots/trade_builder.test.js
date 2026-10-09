@@ -61,7 +61,7 @@ const OUR_ROWS = [
 
 function offerFixture(overrides = {}) {
   return {
-    leagueId: "1248158344",
+    leagueId: "1234567890",
     seasonId: "2026",
     fromTeamId: "8",
     toTeamId: "3",
@@ -200,7 +200,7 @@ function makeBuilderPage(
           } else {
             const response = {
               url: () =>
-                "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/?platformVersion=35f16ade",
+                "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890/transactions/?platformVersion=35f16ade",
               status: () => submitResponse.status,
               ok: () => submitResponse.status >= 200 && submitResponse.status < 300,
               text: async () => submitResponse.body,
@@ -302,7 +302,7 @@ beforeEach(() => {
   savedVerifiedKeys = SELECTORS._verified.keys;
   delete process.env.DRY_RUN;
   delete process.env.TRADE_SUBMIT_ENABLED;
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
 
   mockRosters();
@@ -435,7 +435,7 @@ describe("normalizeTradeOffer", () => {
 describe("buildTradeBuilderUrl", () => {
   it("puts the other manager in teamId and us in fromTeamId", () => {
     expect(buildTradeBuilderUrl(offerFixture())).toBe(
-      "https://fantasy.espn.com/football/team/trade?leagueId=1248158344&teamId=3&fromTeamId=8&seasonId=2026",
+      "https://fantasy.espn.com/football/team/trade?leagueId=1234567890&teamId=3&fromTeamId=8&seasonId=2026",
     );
   });
 });
@@ -478,7 +478,7 @@ describe("installWriteGuard", () => {
 
 describe("isTradeProposalResponse", () => {
   const WRITES =
-    "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/";
+    "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890/transactions/";
   const response = (url, method, postData) => ({
     url: () => url,
     request: () => ({ method: () => method, postData: () => postData }),
@@ -852,7 +852,7 @@ describe("submitTradeOffer: approval gate", () => {
       transactionId: "tx-1",
     });
     expect(readPendingTrades).toHaveBeenCalledWith(expect.anything(), {
-      leagueId: "1248158344",
+      leagueId: "1234567890",
       seasonId: "2026",
       teamId: "8",
     });

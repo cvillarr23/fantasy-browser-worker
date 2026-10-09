@@ -7,6 +7,9 @@ picks made in live practice drafts (`recon-output/websockets.jsonl`, captured vi
 Nothing here is guessed; where something is still a guess, it's labeled as such. Dates below are
 when each finding was confirmed, all 2026.
 
+League IDs and member IDs in these examples are synthetic placeholders. Replace them with your
+own identifiers when running a probe.
+
 ## The draft-room WebSocket protocol
 
 Host: `wss://fantasydraft.espn.com`. This is a *separate* backend from ESPN's general fantasy REST
@@ -22,7 +25,7 @@ wss://fantasydraft.espn.com/game-1/league-{leagueId}/JOIN
 ```
 
 - `{memberId}` is the `SWID` cookie value **including its braces** (e.g.
-  `{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}`).
+  `{00000000-0000-0000-0000-000000000000}`).
 - `-301672673` is a fixed constant — identical across captures against different leagues and
   different sessions (2026-08-10 and 2026-08-16/17). Not session-derived.
 - Fields `1`, `6`, `7`, `8` are passed through as the literal constants observed (`8=KONA` matches
@@ -50,7 +53,7 @@ three together got past it; unconfirmed which one (or both) the 403 was actually
 |---|---|---|
 | `INIT <base64 blob>` | server→client | Full draft-state sync, sent once per connection. Large (10-20KB+). |
 | `TOKEN 1:{leagueId}:{teamId}:{memberId}:-301672673` | server→client | Echoes the JOIN token back. |
-| `STATE <n>` | server→client | **Draft lifecycle flag — confirmed 2026-08-25** (real practice draft, league 20050783, 10 teams/160 picks): `1` seen once at connection start (in progress); `2` seen exactly once, immediately after the final `SELECTED`, and never again. The socket stayed open afterward (plain `PING`/`PONG` only) — it did **not** close. This is the fastest, most authoritative draft-completion signal available (see issue #62 below); previously unconfirmed and silently discarded. |
+| `STATE <n>` | server→client | **Draft lifecycle flag — confirmed 2026-08-25** (real practice draft, league 1234567898, 10 teams/160 picks): `1` seen once at connection start (in progress); `2` seen exactly once, immediately after the final `SELECTED`, and never again. The socket stayed open afterward (plain `PING`/`PONG` only) — it did **not** close. This is the fastest, most authoritative draft-completion signal available (see issue #62 below); previously unconfirmed and silently discarded. |
 | `CLOCK <slot> <msRemaining> <teamId>` | server→client | Periodic countdown-clock update. |
 | `AUTOSUGGEST <playerId>` | server→client | Best-available-player suggestion broadcast. |
 | `AUTODRAFT <teamId> <bool>` | server→client | A team's autodraft toggle state changed. |
@@ -123,7 +126,7 @@ Host: `lm-api-reads.fantasy.espn.com` / `lm-api-writes.fantasy.espn.com` (`apis/
 
 ## Clubhouse: pending trades and league chat (issue #101, recon 2026-10-03)
 
-Read-only headless probe against league 1248158344, team 8. `installWriteGuard` was on the whole
+Read-only headless probe against league 1234567890, team 8. `installWriteGuard` was on the whole
 BrowserContext before the first navigation: it blocked 0 and allowed 0 writes, and both probes
 only navigated and read. No trade was pending in the league, so only the empty state was observed.
 
@@ -342,7 +345,7 @@ A genuinely finished draft used to look, at the transport layer, identical to a 
 connection: `mDraftDetail` 404s or goes empty (practice drafts never had it working anyway — see
 above), and the DOM board scan misses (the board is gone). Before #62, `draft_sync.js` treated this
 as always-transient and reconnected forever — a fresh headless Chromium every ~32s, indefinitely.
-Live recon (2026-08-25, practice league 20050783, 10 teams/160 picks) found the WS does **not**
+Live recon (2026-08-25, practice league 1234567898, 10 teams/160 picks) found the WS does **not**
 actually close on completion — it stays open, idle apart from `PING`/`PONG` — so the original
 issue's assumption of a closing socket doesn't reproduce; what does reliably signal completion is
 the `STATE 2` frame documented above.
@@ -444,11 +447,11 @@ types) is also captured now: every non-`INIT`, non-`SELECTED` frame increments
 
 ### Confirmed request and eligibility
 
-The live capture on 2026-10-06 used league **1248158344**, team **8**, and
+The live capture on 2026-10-06 used league **1234567890**, team **8**, and
 `submitLineup`'s normal transaction endpoint and headers:
 
 ```text
-POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/
+POST https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890/transactions/
 Content-Type: application/json
 x-fantasy-source: kona
 x-fantasy-platform: espn-fantasy-web
@@ -595,7 +598,7 @@ before submitting the add-only action. Give each action its own idempotency key.
 
 Worked out on 2026-10-03 by **static analysis of ESPN's own frontend JS. Nothing was sent.** No
 trade was proposed and no box was ticked. The only live browser run loaded the trade builder
-(`buildTradeBuilderUrl`, league 1248158344, team 8 → team 1) to collect bundle URLs. It ran with
+(`buildTradeBuilderUrl`, league 1234567890, team 8 → team 1) to collect bundle URLs. It ran with
 `installWriteGuard` on the BrowserContext, a stricter route that aborts every non-GET request to
 any host, `routeWebSocket` closing every socket, and `serviceWorker.register` stubbed, all
 installed before the first navigation. Result: guard **blocked 0 / allowed 0**. The stricter route

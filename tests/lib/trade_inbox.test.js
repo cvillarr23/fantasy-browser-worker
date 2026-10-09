@@ -134,7 +134,7 @@ describe("tradeFingerprint", () => {
 
 describe("computeDecisionKey", () => {
   const args = {
-    leagueId: "1248158344",
+    leagueId: "1234567890",
     seasonId: "2026",
     ourTeamId: "8",
     transactionId: "tx-1",
@@ -163,12 +163,12 @@ describe("computeDecisionKey", () => {
 });
 
 describe("buildScoreRequest", () => {
-  const period = { leagueId: "1248158344", season: 2026, week: 5 };
+  const period = { leagueId: "1234567890", season: 2026, week: 5 };
 
   it("scores from our side: what we send and what we receive", () => {
     expect(buildScoreRequest(entry(), period)).toEqual({
       request: {
-        league_id: "1248158344",
+        league_id: "1234567890",
         season: 2026,
         week: 5,
         our_team_id: "8",

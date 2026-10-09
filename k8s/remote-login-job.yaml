@@ -14,6 +14,8 @@
 #   - The Tailscale ingress (homelab-deployment#8) for reaching this from a phone. Until that
 #     lands, use the kubectl port-forward fallback below.
 #
+# Set ESPN_LEAGUE_ID below to your league ID before applying this Job.
+#
 # Usage:
 #   git push origin main                                     # triggers the build+publish workflow
 #   kubectl delete job remote-login --ignore-not-found -n default
@@ -74,7 +76,7 @@ spec:
               name: novnc-web
           env:
             - name: ESPN_LEAGUE_ID
-              value: "1248158344"
+              value: "YOUR_LEAGUE_ID"
             - name: ESPN_TEAM_ID
               value: "8"
             - name: OPENBAO_ESPN_SESSION_STATE_PATH

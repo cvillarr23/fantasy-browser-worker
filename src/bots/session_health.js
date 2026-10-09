@@ -36,7 +36,7 @@ async function assertCookieSessionValid(context, { leagueId, seasonId }) {
   // A cancelled/expired practice room 404s here permanently — every redelivery of a message
   // targeting it fails identically forever, since the league itself is gone, not merely
   // slow/unreachable. Confirmed live 2026-08-27: a message for a cancelled room's league_id
-  // (1650162962) requeued via a plain Error every ~0.5s for 3+ hours, pinning a worker replica,
+  // (1234567895) requeued via a plain Error every ~0.5s for 3+ hours, pinning a worker replica,
   // until manually purged. A 5xx/other non-ok status stays a plain (retryable) Error below —
   // those genuinely can recover on their own.
   if (response.status() === 404) {

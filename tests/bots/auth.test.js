@@ -40,7 +40,7 @@ function fakeBrowser({ status = 200, getThrows = null } = {}) {
 beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth-test-"));
-  process.env.ESPN_LEAGUE_ID = "1248158344";
+  process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.CURRENT_YEAR = "2026";
   chromium.launch.mockReset();
 });
@@ -62,7 +62,7 @@ describe("createSessionFromStoredState: stale stored login (#128)", () => {
 
     expect(session).toMatchObject({ browser, swid: "{SWID}" });
     expect(get).toHaveBeenCalledWith(
-      "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344?view=mTeam",
+      "https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1234567890?view=mTeam",
       { timeout: 5000 },
     );
     expect(browser.close).not.toHaveBeenCalled();

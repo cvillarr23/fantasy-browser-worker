@@ -25,7 +25,7 @@ const { logger } = require("../telemetry/logger");
  *     &6=false&7=false&8=KONA&nocache={random}
  * `-301672673` was identical across two captures against different leagues/sessions (2026-08-10
  * and 2026-08-15), confirming it's a fixed constant, not session-derived. `memberId` is the SWID
- * cookie value including its braces (e.g. `{74F98EAE-F0AD-4E1C-91DC-00EBA32AF50E}`). Fields
+ * cookie value including its braces (e.g. `{00000000-0000-0000-0000-000000000000}`). Fields
  * 1/6/7/8 are left as the literal constants observed (8=KONA matches the `x-fantasy-platform:
  * kona-PROD` header espn_api.js already sends elsewhere) — meaning unchanged, unconfirmed.
  *
