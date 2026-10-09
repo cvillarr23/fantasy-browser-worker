@@ -2,6 +2,8 @@
 
 The headless execution worker layer of your automated fantasy football platform. It maps automated actions straight to the ESPN portal using node.js and Playwright.
 
+This project is unofficial and not affiliated with ESPN or Disney. It is for personal use on your own leagues. Read the [disclaimer and scope](https://github.com/cvillarr23/fantasy-project/blob/main/DISCLAIMER.md) before using it.
+
 ## Repository Layout
 *   `src/queue/`: RabbitMQ connection listeners that capture inbound activation payloads from the FastAPI gateway.
 *   `src/bots/`: Automated scripts handling physical transaction flows (Lineup adjustments, live draft sync, and fast sniping).
