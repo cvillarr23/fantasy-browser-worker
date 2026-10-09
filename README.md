@@ -266,6 +266,19 @@ why: `accepted`, `accepted_pending_processing`, `declined`, `countered`, `vetoed
 or `withdrawn`. Otherwise it is `expired` once its expiration passes, and
 `closed_unknown` after two unexplained misses. A failed ESPN read changes nothing.
 
+**Countering.** `--counter-payload` adds the offer's `related_transaction_id` and
+`thread_root_id` to the `trade_negotiations` payload. Both fields are optional, so
+payloads without them still work. The negotiator copies them onto the staged
+offer and its `execution_log` rows (`related_transaction_id`, `thread_root_id`),
+and a `trade_submissions` message passes them through. The countered offer is
+part of the `offer_key`, so an approval can't be reused to counter a different
+offer. The thread root is not part of the key, and an offer without linkage
+keeps its old key. Staging or queuing a counter never marks the original
+`countered`. Only a refresh that sees ESPN's own `relatedTransactionId` on a
+pending offer or history row does that. A linked counter stays `submit_blocked`
+until `espn_api.js`'s `COUNTER_LINKAGE_VERIFIED` is set. The trade-builder page
+it fills sends a new proposal, not a linked counter.
+
 **Shadow policy.** `TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE` and
 `TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE` (unset by default) record what a
 score-threshold policy *would* do with each offer. Nothing acts on it. It abstains

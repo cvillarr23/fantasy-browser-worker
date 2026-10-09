@@ -129,6 +129,21 @@ describe("negotiateTradeProposal -> trade builder", () => {
     );
   });
 
+  it("links a counter's staged offer and log row to the incoming offer and its thread", async () => {
+    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
+
+    await negotiateTradeProposal({ ...payload, related_transaction_id: "trade-1", thread_root_id: "trade-0" });
+
+    const [offer, opts] = submitTradeOffer.mock.calls[0];
+    expect(offer).toMatchObject({ relatedTransactionId: "trade-1", threadRootId: "trade-0" });
+    expect(opts.approval).toBeUndefined();
+    expect(recordTradeNegotiation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        counterOffer: expect.objectContaining({ relatedTransactionId: "trade-1", threadRootId: "trade-0" }),
+      }),
+    );
+  });
+
   it("keeps the negotiation result when staging fails, rather than requeueing the LLM call", async () => {
     submitTradeOffer.mockRejectedValue(new PermanentError("player 4259545 not on team 3"));
 

@@ -387,6 +387,11 @@ describe("resolveExit", () => {
     expect(resolveExit(entry(), { ...base, outgoing })).toMatchObject({ status: STATUS.COUNTERED });
   });
 
+  it("does not mark it countered for an unlinked pending offer to the same team", () => {
+    const outgoing = [trade({ id: "ours", proposingTeamId: "8" })];
+    expect(resolveExit(entry(), { ...base, outgoing })).not.toMatchObject({ status: STATUS.COUNTERED });
+  });
+
   it("closes an unexplained disappearance only after repeated misses", () => {
     const first = resolveExit(entry(), base);
     expect(first).toMatchObject({ status: STATUS.OPEN, missed_reads: 1 });
@@ -454,6 +459,16 @@ describe("buildNegotiationPayload", () => {
       offering_team_id: "3",
       incoming_player_ids: ["PHI"],
       outgoing_player_ids: ["9509"],
+      related_transaction_id: "tx-1",
+      thread_root_id: "tx-1",
+    });
+  });
+
+  it("carries the thread root of a multi-turn negotiation", () => {
+    const reply = { ...scored, espn_transaction_id: "tx-3", thread_root_id: "tx-1" };
+    expect(buildNegotiationPayload(reply, { season: 2026, week: 5, trackingId: "t" })).toMatchObject({
+      related_transaction_id: "tx-3",
+      thread_root_id: "tx-1",
     });
   });
 

@@ -609,7 +609,8 @@ function resolveExit(entry, { now, history, outgoing }) {
  * A trade_negotiations payload for countering this offer. negotiateTradeProposal works in
  * core-pipeline's internal id space, and ESPN ids collide with it numerically. So the ids come
  * from the score response's own espn_id -> player_id evidence, never from a numeric match. An
- * unmapped player refuses the counter.
+ * unmapped player refuses the counter. The offer's id and thread ride along so the staged counter
+ * can be traced to this entry; queuing it changes nothing here (see resolveExit).
  */
 function buildNegotiationPayload(entry, { season, week, trackingId }) {
   const players = entry.score?.players || {};
@@ -629,6 +630,8 @@ function buildNegotiationPayload(entry, { season, week, trackingId }) {
     offering_team_id: entry.proposing_team_id,
     incoming_player_ids: entry.receive_espn_ids.map(internal),
     outgoing_player_ids: entry.send_espn_ids.map(internal),
+    related_transaction_id: entry.espn_transaction_id,
+    thread_root_id: entry.thread_root_id ?? entry.espn_transaction_id,
   };
 }
 

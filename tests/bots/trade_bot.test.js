@@ -105,7 +105,26 @@ describe("requireNegotiationPayload", () => {
       season: 2026,
       week: 3,
       offeringTeamId: "7",
+      relatedTransactionId: null,
+      threadRootId: null,
     });
+  });
+
+  it("returns the incoming offer and thread a counter answers", () => {
+    expect(
+      requireNegotiationPayload(
+        validNegotiationPayload({ related_transaction_id: "tx-3", thread_root_id: "tx-1" }),
+      ),
+    ).toMatchObject({ relatedTransactionId: "tx-3", threadRootId: "tx-1" });
+  });
+
+  it.each([
+    [{ related_transaction_id: " " }, /related_transaction_id/],
+    [{ related_transaction_id: 42 }, /related_transaction_id/],
+    [{ related_transaction_id: "tx-1", thread_root_id: "" }, /thread_root_id/],
+    [{ thread_root_id: "tx-1" }, /needs the related_transaction_id/],
+  ])("rejects malformed linkage %j", (overrides, message) => {
+    expect(() => requireNegotiationPayload(validNegotiationPayload(overrides))).toThrow(message);
   });
 
   it("throws on a null payload", () => {

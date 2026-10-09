@@ -356,7 +356,57 @@ describe("computeOfferKey", () => {
   });
 });
 
+describe("computeOfferKey: counter linkage", () => {
+  it("leaves an unlinked offer's key as the original eight-field form core recomputes", () => {
+    const offer = offerFixture();
+    const original = require("crypto")
+      .createHash("sha256")
+      .update(
+        JSON.stringify([
+          "trade-offer-v1",
+          offer.leagueId,
+          offer.seasonId,
+          offer.fromTeamId,
+          offer.toTeamId,
+          [...offer.incomingPlayerIds].sort(),
+          [...offer.outgoingPlayerIds].sort(),
+          null,
+        ]),
+      )
+      .digest("hex");
+    expect(computeOfferKey(normalizeTradeOffer(offer))).toBe(original);
+  });
+
+  it("binds the countered offer but not the thread root", () => {
+    const linked = (overrides) => computeOfferKey(normalizeTradeOffer(offerFixture(overrides)));
+    const base = linked({ relatedTransactionId: "tx-3", threadRootId: "tx-1" });
+    expect(base).not.toBe(linked({}));
+    expect(base).not.toBe(linked({ relatedTransactionId: "tx-4", threadRootId: "tx-1" }));
+    expect(base).toBe(linked({ relatedTransactionId: "tx-3", threadRootId: "tx-0" }));
+  });
+});
+
 describe("normalizeTradeOffer", () => {
+  it("defaults a counter's thread root to the offer it answers, and leaves a proposal unlinked", () => {
+    expect(normalizeTradeOffer(offerFixture({ relatedTransactionId: "tx-3" }))).toMatchObject({
+      relatedTransactionId: "tx-3",
+      threadRootId: "tx-3",
+    });
+    expect(normalizeTradeOffer(offerFixture({ threadRootId: null }))).toMatchObject({
+      relatedTransactionId: null,
+      threadRootId: null,
+    });
+  });
+
+  it.each([
+    [{ relatedTransactionId: "" }, /relatedTransactionId/],
+    [{ relatedTransactionId: 7 }, /relatedTransactionId/],
+    [{ relatedTransactionId: "tx-3", threadRootId: " tx-1" }, /threadRootId/],
+    [{ threadRootId: "tx-1" }, /needs the relatedTransactionId/],
+  ])("rejects malformed linkage %j as permanent", (overrides, message) => {
+    expect(() => normalizeTradeOffer(offerFixture(overrides))).toThrow(message);
+  });
+
   it("accepts negative D/ST ids and numeric ids, normalizing to strings", () => {
     const offer = normalizeTradeOffer(
       offerFixture({ incomingPlayerIds: [4259545, -16021] }),
@@ -1037,6 +1087,99 @@ describe("submitTradeOffer: redelivery", () => {
 
     expect(first.state.clicks.filter((c) => c === "submit")).toHaveLength(1);
     expect(second.state.clicks).toEqual([]);
+  });
+});
+
+describe("submitTradeOffer: counter linkage", () => {
+  const espnApi = require("../../src/bots/espn_api");
+  const linked = (overrides) =>
+    offerFixture({ relatedTransactionId: "tx-3", threadRootId: "tx-1", ...overrides });
+
+  afterEach(() => {
+    espnApi.COUNTER_LINKAGE_VERIFIED = false;
+  });
+
+  it("stages a counter with its link recorded, and nothing sent", async () => {
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+
+    const result = await submitTradeOffer(linked(), { source: "counter_offer" });
+
+    expect(result).toMatchObject({ status: "awaiting_approval", dryRun: true });
+    expect(state.clicks).not.toContain("submit");
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({ relatedTransactionId: "tx-3", threadRootId: "tx-1" }),
+    );
+  });
+
+  it("keeps an approved counter blocked until ESPN's counter linkage is verified", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = linked();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(normalizeTradeOffer(offer)) });
+
+    expect(result).toMatchObject({ status: "submit_blocked", dryRun: true });
+    expect(result.closedLocks).toEqual([expect.stringMatching(/counter linkage/)]);
+    expect(state.clicks).not.toContain("continue");
+    expect(claimTradeSubmission).not.toHaveBeenCalled();
+  });
+
+  it("rejects an approval for the same players that countered a different offer", async () => {
+    armForLiveSubmit();
+    const reviewed = normalizeTradeOffer(linked({ relatedTransactionId: "tx-2" }));
+
+    await expect(submitTradeOffer(linked(), { approval: approvalFor(reviewed) })).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/offer_key/),
+    });
+  });
+
+  it("settles a stuck counter only from a pending offer ESPN links to the countered one", async () => {
+    armForLiveSubmit();
+    espnApi.COUNTER_LINKAGE_VERIFIED = true;
+    findTradeSubmission.mockResolvedValue({
+      id: 7,
+      status: "submitting",
+      executed_at: new Date(Date.now() - 60000),
+    });
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = linked();
+    const approval = approvalFor(normalizeTradeOffer(offer));
+
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
+    await expect(submitTradeOffer(offer, { approval })).rejects.toMatchObject({ permanent: true });
+    expect(finalizeTradeSubmission).not.toHaveBeenCalled();
+
+    readPendingTrades.mockResolvedValue(
+      pendingRead([pendingProposal(offer, { id: "tx-9", relatedTransactionId: "tx-3" })]),
+    );
+    await expect(submitTradeOffer(offer, { approval })).resolves.toMatchObject({
+      status: "already_submitted",
+      transactionId: "tx-9",
+    });
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined);
+  });
+
+  it("passes a trade_submissions payload's linkage into the offer", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+
+    await executeTradeSubmission({
+      season: 2026,
+      to_team_id: "3",
+      incoming_player_ids: ["4259545"],
+      outgoing_player_ids: ["3139477"],
+      source: "counter_offer",
+      related_transaction_id: "tx-3",
+      thread_root_id: "tx-1",
+    });
+
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({ relatedTransactionId: "tx-3", threadRootId: "tx-1" }),
+    );
   });
 });
 
