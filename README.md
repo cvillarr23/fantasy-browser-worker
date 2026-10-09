@@ -229,6 +229,7 @@ node src/bots/trade_inbox.js --refresh          # the same, persisted (scheduled
 node src/bots/trade_inbox.js --list [--all]     # ranked inbox from the database
 node src/bots/trade_inbox.js --triage <id> <new|seen|snoozed|dismissed> <you> [snooze-until ISO]
 node src/bots/trade_inbox.js --counter-payload <id>   # trade_negotiations payload for a counter
+node src/bots/trade_inbox.js --thread <id>            # the negotiation an offer or our counter belongs to
 ```
 
 **Ranking.** Offers with a numeric `final_score` come first, highest first. Every
@@ -280,6 +281,30 @@ keeps its old key. Staging or queuing a counter never marks the original
 pending offer or history row does that. A linked counter stays `submit_blocked`
 until `espn_api.js`'s `COUNTER_LINKAGE_VERIFIED` is set. The trade-builder page
 it fills sends a new proposal, not a linked counter.
+
+**Negotiation threads.** A negotiation is a thread of their offers and our
+counters, all sharing the first offer's `thread_root_id`. Each refresh records
+our counter on the entry it answers, as `our_counter`. That field holds what the
+counter trades, its dates, and a status: `open` while it is pending, then
+`accepted`, `accepted_pending_processing`, `declined`, `countered`, `vetoed`,
+`withdrawn`, `expired` or `closed_unknown`. Its status is decided the same way an
+incoming offer's is. Only `our_counter` changes; the answered entry stays
+`countered`. Their reply to our counter is a new `open` entry in the same
+thread, and a human decides whether to counter again, through the same counter
+path as any other offer. Nothing queues a counter on its own.
+
+`--thread` prints a thread's turns and its state, read from the latest turn:
+- `awaiting_us`: their offer is open;
+- `awaiting_them`: our counter is pending;
+- `agreed`;
+- `rejected`;
+- `expired`;
+- `abandoned`: withdrawn or closed unexplained.
+
+For a linked counter, the negotiator adds the thread's earlier turns to the
+LLM prompt, by player name. It refuses a fourth counter in one thread
+(`MAX_COUNTERS_PER_THREAD`). Only counters ESPN has shown count toward that
+limit, not ones that were only staged.
 
 **Shadow policy.** `TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE` and
 `TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE` (unset by default) record what a

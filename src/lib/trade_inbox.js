@@ -199,6 +199,7 @@ function mergeEntry(stored, fresh, now) {
       score: null,
       evaluation: null,
       shadow_policy: null,
+      our_counter: null,
       first_seen_at: seenAt,
       last_seen_at: seenAt,
       missed_reads: 0,
@@ -574,7 +575,7 @@ function statusFromRelated(row) {
  * after MISSED_READS_BEFORE_CLOSE reads. An entry we are responding to is never retired here:
  * the response executor owns it until it reconciles.
  */
-function resolveExit(entry, { now, history, outgoing }) {
+function resolveExit(entry, { now, history, outgoing, pendingCounterReason = "our counter is pending" }) {
   if (entry.status === STATUS.RESPONDING || FINISHED_STATUSES.has(entry.status)) return null;
   const id = entry.espn_transaction_id;
   const related = history.filter((row) => String(row.relatedTransactionId) === id);
@@ -589,7 +590,7 @@ function resolveExit(entry, { now, history, outgoing }) {
     if (status) return { status, missed_reads: 0, exit_reason: `${row.type} ${row.status ?? ""}`.trim() };
   }
   if (outgoing.some((t) => String(t.relatedTransactionId) === id)) {
-    return { status: STATUS.COUNTERED, missed_reads: 0, exit_reason: "our counter is pending" };
+    return { status: STATUS.COUNTERED, missed_reads: 0, exit_reason: pendingCounterReason };
   }
   const own = history.find((row) => String(row.id) === id);
   if (own && WITHDRAWN_HISTORY_STATUSES.has(own.status)) {
@@ -603,6 +604,139 @@ function resolveExit(entry, { now, history, outgoing }) {
     return { status: STATUS.CLOSED_UNKNOWN, missed_reads: missed, exit_reason: "left the pending list unexplained" };
   }
   return { status: entry.status, missed_reads: missed, exit_reason: null };
+}
+
+// Our counter's statuses that can still change. Every other status is final.
+const UNSETTLED_COUNTER_STATUSES = new Set([STATUS.OPEN, STATUS.ACCEPTED_PENDING_PROCESSING]);
+
+/**
+ * Our counter to an incoming offer, as stored on that offer's entry (`our_counter`). It keeps
+ * what the counter trades, so a later negotiation turn can see it, and an inbox-style status.
+ */
+function toCounterRecord(trade, ourTeamId, now) {
+  const offer = toInboxEntry(trade, ourTeamId);
+  return {
+    espn_transaction_id: offer.espn_transaction_id,
+    send_espn_ids: offer.send_espn_ids,
+    receive_espn_ids: offer.receive_espn_ids,
+    player_names: offer.player_names,
+    proposed_date: offer.proposed_date,
+    expiration_date: offer.expiration_date,
+    status: STATUS.OPEN,
+    missed_reads: 0,
+    exit_reason: null,
+    seen_at: now.toISOString(),
+  };
+}
+
+/**
+ * The next `our_counter` for a countered entry, or null when nothing changes.
+ *
+ * A pending offer of ours whose relatedTransactionId names the entry is our counter. Once it
+ * leaves the pending list, resolveExit settles it the same way it settles an incoming offer, with
+ * their pending reply (an incoming proposal related to our counter) as the counter evidence. A
+ * counter sent and answered between two refreshes is only in the history, as our TRADE_PROPOSAL
+ * related to the entry. `history` is null when its read failed, and then only the pending read
+ * counts. How ESPN links a counter is UNVERIFIED until a real one is captured.
+ */
+function resolveCounter(entry, { now, history, accepts, incoming, outgoing, ourTeamId }) {
+  const id = entry.espn_transaction_id;
+  const current = entry.our_counter ?? null;
+  const pending = outgoing.find((t) => String(t.relatedTransactionId) === id);
+  if (pending) {
+    const pendingId = String(pending.id);
+    if (current?.espn_transaction_id === pendingId && current.status === STATUS.OPEN) {
+      return current.missed_reads ? { ...current, missed_reads: 0 } : null;
+    }
+    return toCounterRecord(pending, ourTeamId, now);
+  }
+  if (!history) return null;
+
+  const ours = String(ourTeamId);
+  const sent = history.find(
+    (row) =>
+      row.type === "TRADE_PROPOSAL" &&
+      String(row.relatedTransactionId) === id &&
+      (row.proposingTeamId === undefined || String(row.proposingTeamId) === ours),
+  );
+  const counter = current ?? (sent ? toCounterRecord(sent, ourTeamId, now) : null);
+  if (!counter || !UNSETTLED_COUNTER_STATUSES.has(counter.status)) return null;
+
+  const exit = resolveExit(counter, {
+    now,
+    history: [...history, ...accepts],
+    outgoing: incoming,
+    pendingCounterReason: "their counter is pending",
+  });
+  if (!exit) return null;
+  return { ...counter, status: exit.status, missed_reads: exit.missed_reads, exit_reason: exit.exit_reason };
+}
+
+const THREAD_STATE = Object.freeze({
+  AWAITING_US: "awaiting_us",
+  AWAITING_THEM: "awaiting_them",
+  AGREED: "agreed",
+  REJECTED: "rejected",
+  EXPIRED: "expired",
+  ABANDONED: "abandoned",
+});
+
+const SETTLED_THREAD_STATES = {
+  [STATUS.ACCEPTED]: THREAD_STATE.AGREED,
+  [STATUS.ACCEPTED_PENDING_PROCESSING]: THREAD_STATE.AGREED,
+  [STATUS.DECLINED]: THREAD_STATE.REJECTED,
+  [STATUS.VETOED]: THREAD_STATE.REJECTED,
+  [STATUS.EXPIRED]: THREAD_STATE.EXPIRED,
+  [STATUS.WITHDRAWN]: THREAD_STATE.ABANDONED,
+  [STATUS.CLOSED_UNKNOWN]: THREAD_STATE.ABANDONED,
+};
+
+// Who moves next after the latest turn. A countered turn hands the move to the other side even
+// before their reply is stored.
+function threadState({ side, status }) {
+  if (SETTLED_THREAD_STATES[status]) return SETTLED_THREAD_STATES[status];
+  const theirs = side === "theirs";
+  if (status === STATUS.COUNTERED) return theirs ? THREAD_STATE.AWAITING_THEM : THREAD_STATE.AWAITING_US;
+  if (status === STATUS.OPEN) return theirs ? THREAD_STATE.AWAITING_US : THREAD_STATE.AWAITING_THEM;
+  return THREAD_STATE.AWAITING_US;
+}
+
+function toTurn(side, offer, extra = {}) {
+  return {
+    side,
+    espn_transaction_id: offer.espn_transaction_id,
+    status: offer.status,
+    send_espn_ids: offer.send_espn_ids,
+    receive_espn_ids: offer.receive_espn_ids,
+    player_names: offer.player_names,
+    proposed_date: offer.proposed_date,
+    ...extra,
+  };
+}
+
+/**
+ * One negotiation thread: their offers and our counters, oldest first, and its state. Only
+ * counters ESPN has shown count in `ourCounters`; a staged counter nobody sent is not a turn.
+ */
+function buildThread(entries, threadRootId) {
+  const root = String(threadRootId);
+  const turns = [];
+  for (const entry of entries) {
+    if ((entry.thread_root_id ?? entry.espn_transaction_id) !== root) continue;
+    turns.push(toTurn("theirs", entry, { proposing_team_id: entry.proposing_team_id, comment: entry.comment ?? null }));
+    if (entry.our_counter) turns.push(toTurn("ours", entry.our_counter, { counters: entry.espn_transaction_id }));
+  }
+  turns.sort(
+    (a, b) =>
+      sortableTime(a.proposed_date) - sortableTime(b.proposed_date) ||
+      a.espn_transaction_id.localeCompare(b.espn_transaction_id),
+  );
+  return {
+    threadRootId: root,
+    turns,
+    state: turns.length ? threadState(turns[turns.length - 1]) : null,
+    ourCounters: turns.filter((t) => t.side === "ours").length,
+  };
 }
 
 /**
@@ -689,4 +823,9 @@ module.exports = {
   shadowPolicy,
   resolveExit,
   buildNegotiationPayload,
+  UNSETTLED_COUNTER_STATUSES,
+  toCounterRecord,
+  resolveCounter,
+  THREAD_STATE,
+  buildThread,
 };
