@@ -59,8 +59,9 @@ const { readSeason, resolvePeriod } = require("./trade_scan");
 const { loadInbox, updateEntry, claimOfferResponse, settleOfferResponse } = require("../db/trade_inbox");
 const { findTradeResponse, recordTradeResponseOutcome, recordTradeResponseBlocked } = require("../db/execution_log");
 const activity = require("../db/activity");
-const { PermanentError, SessionExpiredError, requirePlainObjectPayload } = require("../errors");
+const { PermanentError, SessionExpiredError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
 const { STATUS, toInboxEntry, computeDecisionKey, verifyResponse } = require("../lib/trade_inbox");
+const { resolveDryRun } = require("../lib/env");
 const { logger } = require("../telemetry/logger");
 
 const LABEL = "[Trade Response]";
@@ -68,19 +69,10 @@ const ACTIONS = ["accept", "decline"];
 // ESPN may process an expiry before ours, so a response this close to it could cross with the
 // expiry and leave an unknowable outcome.
 const RESPONSE_EXPIRY_MARGIN_MS = 5 * 60_000;
-// Same value and reason as trade_bot.js's TRANSIENT_RETRY_DELAY_MS: a bare nack would hot-loop a
-// Chromium launch under connection.js's channel-wide prefetch(1).
-const TRANSIENT_RETRY_DELAY_MS = 5000;
 const EXIT_SUCCESS = 0;
 const EXIT_FAILURE = 1;
 const PAYLOAD_ARGUMENT_INDEX = 2;
 const CONFIRMED_OUTCOMES = new Set([STATUS.DECLINED, STATUS.ACCEPTED, STATUS.ACCEPTED_PENDING_PROCESSING]);
-
-function resolveDryRun() {
-  const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return true;
-  return !/^(0|false|no)$/i.test(raw);
-}
 
 function isResponseArmed() {
   return /^(1|true|yes)$/i.test((process.env.TRADE_RESPONSE_ENABLED || "").trim());
@@ -162,7 +154,7 @@ const defaultDeps = () => ({
 
 function closedLocks({ approval, action }, deps) {
   const locks = [];
-  if (resolveDryRun()) locks.push("dry_run");
+  if (resolveDryRun(true).dryRun) locks.push("dry_run");
   if (!isResponseArmed()) locks.push("not_armed");
   if (!approval) locks.push("no_approval");
   if (!deps.verifiedActions.includes(action)) locks.push("request_shape_unverified");
@@ -507,8 +499,7 @@ async function executeTradeResponse(payload, overrides = {}) {
     logger.info(`${LABEL} Offer ${transactionId}: ${action} confirmed as ${outcome}.`);
     return { status: "responded", outcome, decisionKey };
   } catch (error) {
-    if (!error.permanent && error.retryDelayMs === undefined) error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
-    throw error;
+    throw withRetryDelay(error);
   } finally {
     if (session?.browser) await session.browser.close();
   }

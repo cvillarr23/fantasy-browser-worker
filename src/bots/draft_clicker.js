@@ -17,6 +17,7 @@ const { updateContext } = require("../telemetry/context");
 const { withInstrumentation } = require("../telemetry/instrument");
 const { recordDraftPickClick } = require("../db/execution_log");
 const redis = require("redis");
+const { resolveDryRun: resolveEnvDryRun } = require("../lib/env");
 
 const REDIS_HOST =
   process.env.REDIS_HOST || "fantasy-cache.default.svc.cluster.local";
@@ -117,9 +118,7 @@ function jitter(minMs, maxMs) {
  * explicit intent is never second-guessed.
  */
 function resolveDryRun(mode) {
-  const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return { dryRun: mode !== "practice", defaulted: true };
-  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
+  return resolveEnvDryRun(mode !== "practice");
 }
 
 /**

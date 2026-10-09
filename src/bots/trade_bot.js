@@ -7,6 +7,7 @@ const {
   PermanentError,
   requirePlainObjectPayload,
   classifyHttpStatusError,
+  withRetryDelay: addRetryDelay,
 } = require("../errors");
 const { completeWithFallback } = require("../lib/llm_client");
 const { submitTradeOffer } = require("./trade_builder");
@@ -22,18 +23,8 @@ function evaluateTimeoutMs() {
   return Number(process.env.TRADE_EVALUATE_TIMEOUT_MS) || DEFAULT_EVALUATE_TIMEOUT_MS;
 }
 
-// Applied to a transient (non-permanent) failure from executeTradeEvaluation before it's thrown.
-// Without this, connection.js's default nack(msg, false, true) requeues instantly with no delay —
-// since prefetch(1) is channel-wide, a persistently unreachable/degraded core-pipeline would
-// otherwise hot-loop retries and block lineup_updates/waiver_actions/draft_targets too, hammering
-// the dependency the whole time. Shorter than SessionExpiredError's 30s (src/errors.js): that
-// case waits out a credential fix, which takes longer than a REST call recovering from a blip.
-const TRANSIENT_RETRY_DELAY_MS = 5000;
-
-function withRetryDelay(error) {
-  if (!error.permanent) error.retryDelayMs = TRANSIENT_RETRY_DELAY_MS;
-  return error;
-}
+// Preserve this bot's policy of replacing an existing delay on transient failures.
+const withRetryDelay = (error) => addRetryDelay(error, { overwriteExisting: true });
 
 // Confirmed live 2026-09-22: /football/team without a teamId renders ESPN's "Invalid Team ID"
 // error page, not the clubhouse — teamId is required, not optional. No longer read by the bot

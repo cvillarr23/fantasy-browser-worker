@@ -4,6 +4,8 @@ const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitWaiverClaim } = require("./espn_api");
 const { PermanentError, requirePlainObjectPayload } = require("../errors");
+const { requirePlayerId } = require("../lib/espn_ids");
+const { resolveDryRun: resolveEnvDryRun } = require("../lib/env");
 const { logger } = require("../telemetry/logger");
 const { updateContext } = require("../telemetry/context");
 
@@ -38,25 +40,7 @@ function resolveDryRun(payload) {
   if (typeof payload.dry_run === "boolean") {
     return { dryRun: payload.dry_run, defaulted: false };
   }
-  const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return { dryRun: true, defaulted: true };
-  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
-}
-
-/**
- * ESPN player ids are integers; anything else would serialize to a null playerId in the request.
- * A team defense (D/ST) has a NEGATIVE id, one per NFL team (Team 8's Eagles D/ST is -16021), and
- * readRoster keys it by that signed id as a string, so a leading minus is allowed (#116). "-0" and
- * other zero-padded negatives are rejected: Number("-0") would go out as playerId 0.
- */
-function requirePlayerId(raw, label) {
-  const id = String(raw ?? "").trim();
-  if (!/^(?:\d+|-[1-9]\d*)$/.test(id)) {
-    throw new PermanentError(
-      `${label} "${raw}" is not a valid numeric ESPN player id.`,
-    );
-  }
-  return id;
+  return resolveEnvDryRun(true);
 }
 
 function captureFailure(tracking, details) {

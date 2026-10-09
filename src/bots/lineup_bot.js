@@ -4,6 +4,8 @@ const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
 const { readRoster, submitLineup } = require("./espn_api");
 const { PermanentError } = require("../errors");
+const { requirePlayerId } = require("../lib/espn_ids");
+const { resolveDryRun } = require("../lib/env");
 const slotConfig = require("../selectors/lineup_slots.json");
 const { logger } = require("../telemetry/logger");
 const { updateContext } = require("../telemetry/context");
@@ -62,20 +64,8 @@ const IR_ELIGIBLE_INJURY_STATUSES = new Set(["OUT", "INJURY_RESERVE"]);
 const SWAP_KIND = "swap";
 const IR_KIND = "ir";
 const ACTIVATE_IR_KIND = "activate_ir";
-
-/**
- * Live writes are the default.
- *
- * submitLineup()'s request body was confirmed against a real capture and live-tested end-to-end
- * (2026-09-12, see espn_api.js and issue #15) — an unset DRY_RUN now means "write for real," matching
- * the production queue path's own lack of an env var. Set DRY_RUN=true explicitly to plan without
- * submitting.
- */
-function resolveDryRun() {
-  const raw = (process.env.DRY_RUN || "").trim();
-  if (raw === "") return { dryRun: false, defaulted: true };
-  return { dryRun: !/^(0|false|no)$/i.test(raw), defaulted: false };
-}
+// Swap diagnostics use one-based numbering for the zero-based payload array.
+const FIRST_SWAP_NUMBER = 1;
 
 /**
  * Maps a payload slot string to an ESPN lineupSlotId.
@@ -104,22 +94,6 @@ function resolveSlotId(slot) {
 
 function describeSlot(slotId) {
   return `${slotConfig.slot_names[String(slotId)] || "?"}(${slotId})`;
-}
-
-/**
- * ESPN player ids are integers; anything else would serialize to a null playerId in the request.
- * A team defense (D/ST) has a NEGATIVE id, one per NFL team (Team 8's Eagles D/ST is -16021), and
- * readRoster keys it by that signed id as a string, so a leading minus is allowed (#116). "-0" and
- * other zero-padded negatives are rejected: Number("-0") would go out as playerId 0.
- */
-function requirePlayerId(raw, label, index) {
-  const id = String(raw ?? "").trim();
-  if (!/^(?:\d+|-[1-9]\d*)$/.test(id)) {
-    throw new PermanentError(
-      `Swap #${index + 1}: ${label} "${raw}" is not a valid numeric ESPN player id.`,
-    );
-  }
-  return id;
 }
 
 /**
@@ -238,8 +212,14 @@ function requireFieldedSlot(index, slot, slotId, slotCounts) {
 
 /** A `kind: "swap"` entry: `drop_player_id` to the bench, `add_player_id` into `slot`. */
 function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
-  const dropId = requirePlayerId(swap.drop_player_id, "drop_player_id", index);
-  const addId = requirePlayerId(swap.add_player_id, "add_player_id", index);
+  const dropId = requirePlayerId(
+    swap.drop_player_id,
+    `Swap #${index + FIRST_SWAP_NUMBER}: drop_player_id`,
+  );
+  const addId = requirePlayerId(
+    swap.add_player_id,
+    `Swap #${index + FIRST_SWAP_NUMBER}: add_player_id`,
+  );
   const targetSlotId = resolveSlotId(swap.slot);
 
   if (dropId === addId) {
@@ -278,7 +258,10 @@ function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentS
  * slot empty: filling it is the producer's job, as an ordinary swap in a later message.
  */
 function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
-  const playerId = requirePlayerId(swap.player_id, "player_id", index);
+  const playerId = requirePlayerId(
+    swap.player_id,
+    `Swap #${index + FIRST_SWAP_NUMBER}: player_id`,
+  );
   const targetSlotId = resolveSlotId(swap.slot);
 
   if (kind === IR_KIND && targetSlotId !== IR_SLOT_ID) {
@@ -453,7 +436,8 @@ async function executeLineupAdjustments(payload) {
   updateContext({ leagueId, teamId });
 
   const target = { leagueId, seasonId, teamId };
-  const { dryRun, defaulted } = resolveDryRun();
+  // Lineup writes are deliberately live by default.
+  const { dryRun, defaulted } = resolveDryRun(false);
   log(
     `Starting realignment for team ${teamId} in league ${leagueId} (${seasonId})${dryRun ? " [DRY_RUN]" : ""}.`,
   );
