@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:25-bookworm-slim
 
 # Install system dependencies needed for Playwright headless browser rendering, plus (additive,
 # opt-in) xvfb/x11vnc/novnc/websockify for WORKER-11's remote-login Job (scripts/start-vnc.sh) —
