@@ -1,4 +1,8 @@
-# ESPN Fantasy Draft: Reverse-Engineering Notes
+---
+title: ESPN reverse-engineering notes
+description: What the project has confirmed about ESPN's draft-room WebSocket, REST endpoints, DOM selectors, auth and write requests.
+sidebar_position: 6
+---
 
 Everything in this doc was confirmed against real ESPN traffic — either by correlating actual
 picks made in live practice drafts (`recon-output/websockets.jsonl`, captured via
