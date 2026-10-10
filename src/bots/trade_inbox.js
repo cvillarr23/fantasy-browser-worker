@@ -14,6 +14,7 @@
  *   node src/bots/trade_inbox.js --list [--all]
  *   node src/bots/trade_inbox.js --triage <espn transaction id> <new|seen|snoozed|dismissed> <by> [snooze until ISO]
  *   node src/bots/trade_inbox.js --counter-payload <espn transaction id>
+ *   node src/bots/trade_inbox.js --thread <espn transaction id>   the negotiation it belongs to
  */
 
 const { randomUUID } = require("crypto");
@@ -37,6 +38,9 @@ const {
   rankInbox,
   shadowPolicy,
   resolveExit,
+  UNSETTLED_COUNTER_STATUSES,
+  resolveCounter,
+  buildThread,
   buildNegotiationPayload,
 } = require("../lib/trade_inbox");
 const { CORE_PIPELINE_URL } = require("../lib/core_pipeline");
@@ -197,13 +201,50 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
 
     const stored = persist ? await deps.store.load({ leagueId }) : [];
     const storedById = new Map(stored.map((e) => [e.espn_transaction_id, e]));
-    const threadRootOf = (relatedId) => storedById.get(relatedId)?.thread_root_id ?? relatedId;
     const acceptedIds = new Set(accepts.map((t) => String(t.relatedTransactionId)));
+    const withIds = incoming.filter((t) => t.id !== undefined && t.id !== null);
+    const freshIds = new Set(withIds.map((t) => String(t.id)));
+    const missing = stored.filter(
+      (e) => !freshIds.has(e.espn_transaction_id) && RETIRABLE_STATUSES.has(e.status),
+    );
+    const counterContext = { now, accepts, incoming, outgoing, ourTeamId: teamId };
 
-    const fresh = incoming
-      .filter((t) => t.id !== undefined && t.id !== null)
-      .map((t) => toInboxEntry(t, teamId, { threadRootOf }));
-    const freshIds = new Set(fresh.map((e) => e.espn_transaction_id));
+    // The history explains vanished offers, our counters that left the pending list, and a reply
+    // to a counter we never saw pending. It is read once, and only when one of those needs it.
+    const counterOwner = new Map(
+      stored.filter((e) => e.our_counter).map((e) => [e.our_counter.espn_transaction_id, e]),
+    );
+    const knownOffer = (relatedId) =>
+      storedById.has(relatedId) ||
+      counterOwner.has(relatedId) ||
+      outgoing.some((t) => String(t.id) === relatedId && storedById.has(String(t.relatedTransactionId)));
+    const unthreadedReply = withIds.some(
+      (t) => t.relatedTransactionId != null && !knownOffer(String(t.relatedTransactionId)),
+    );
+    const countered = stored.filter((e) => e.status === STATUS.COUNTERED);
+    const counterNeedsHistory = countered.some(
+      (e) =>
+        UNSETTLED_COUNTER_STATUSES.has(e.our_counter?.status) &&
+        !outgoing.some((t) => String(t.relatedTransactionId) === e.espn_transaction_id),
+    );
+    let history = null;
+    if (persist && (missing.length > 0 || unthreadedReply || counterNeedsHistory)) {
+      try {
+        history = await deps.readHistory(session.context, { leagueId, seasonId: String(season) });
+      } catch (error) {
+        logger.warn(`[Trade Inbox] Trade history read failed; leaving vanished offers and counters for next time: ${error.message}`);
+      }
+    }
+
+    const sentProposals = [...outgoing, ...(history || [])].filter((t) => t.type === "TRADE_PROPOSAL");
+    const threadRootOf = (relatedId) => {
+      const owner =
+        storedById.get(relatedId) ??
+        counterOwner.get(relatedId) ??
+        storedById.get(String(sentProposals.find((t) => String(t.id) === relatedId)?.relatedTransactionId));
+      return owner ? (owner.thread_root_id ?? owner.espn_transaction_id) : relatedId;
+    };
+    const fresh = withIds.map((t) => toInboxEntry(t, teamId, { threadRootOf }));
 
     // Scores are worked out from the loaded snapshot, then applied inside each row's lock, so a
     // triage written meanwhile survives.
@@ -242,18 +283,8 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
     }
 
     const exits = [];
+    const counterUpdates = [];
     if (persist) {
-      const missing = stored.filter(
-        (e) => !freshIds.has(e.espn_transaction_id) && RETIRABLE_STATUSES.has(e.status),
-      );
-      let history = null;
-      if (missing.length > 0) {
-        try {
-          history = await deps.readHistory(session.context, { leagueId, seasonId: String(season) });
-        } catch (error) {
-          logger.warn(`[Trade Inbox] Trade history read failed; leaving vanished offers for next time: ${error.message}`);
-        }
-      }
       for (const gone of history ? missing : []) {
         let exitStatus = null;
         const saved = await deps.store.update(gone.espn_transaction_id, scope, (current) => {
@@ -265,6 +296,28 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
         if (exitStatus) exits.push({ id: gone.espn_transaction_id, status: exitStatus });
         if (saved) entries.push(saved);
       }
+
+      // Only `our_counter` is written here: the countered entry's own status stays as it is.
+      const counterContextWithHistory = { ...counterContext, history };
+      const newlyCountered = exits.filter((e) => e.status === STATUS.COUNTERED).map((e) => e.id);
+      const candidates = [
+        ...countered.filter((e) => resolveCounter(e, counterContextWithHistory)).map((e) => e.espn_transaction_id),
+        ...newlyCountered,
+      ];
+      for (const id of candidates) {
+        let counterStatus = null;
+        await deps.store.update(id, scope, (current) => {
+          if (current?.status !== STATUS.COUNTERED) return null;
+          const next = resolveCounter(current, counterContextWithHistory);
+          if (!next) return null;
+          const previous = current.our_counter;
+          if (next.status !== previous?.status || next.espn_transaction_id !== previous?.espn_transaction_id) {
+            counterStatus = next.status;
+          }
+          return { ...current, our_counter: next };
+        });
+        if (counterStatus) counterUpdates.push({ id, status: counterStatus });
+      }
     }
 
     const ranked = rankInbox(entries, { now });
@@ -274,6 +327,7 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       week,
       scoreCalls,
       exits,
+      counterUpdates,
       openOfferTeamIds: [...new Set(incoming.map((t) => t.proposingTeamId))],
       ranked,
     };
@@ -298,9 +352,19 @@ function describeEntry(entry, rank) {
   );
 }
 
+function describeTurn(turn, number) {
+  const name = (id) => turn.player_names?.[id] ?? id;
+  const who = turn.side === "ours" ? "we countered" : `team ${turn.proposing_team_id} offered`;
+  return (
+    `${number}. ${turn.espn_transaction_id} ${who} [${turn.status}]: ` +
+    `get ${turn.receive_espn_ids.map(name).join(", ") || "nothing"}; ` +
+    `give ${turn.send_espn_ids.map(name).join(", ") || "nothing"}`
+  );
+}
+
 const USAGE =
   "Usage: node src/bots/trade_inbox.js [--check|--refresh|--list [--all]|" +
-  "--triage <id> <state> <by> [snoozeUntil]|--counter-payload <id>]";
+  "--triage <id> <state> <by> [snoozeUntil]|--counter-payload <id>|--thread <id>]";
 
 function usage() {
   return new Error(USAGE);
@@ -327,6 +391,9 @@ function parseArgs(args) {
     case "--counter-payload":
       if (rest.length !== 1) throw usage();
       return { mode: "counter-payload", id: rest[0] };
+    case "--thread":
+      if (rest.length !== 1) throw usage();
+      return { mode: "thread", id: rest[0] };
     default:
       throw usage();
   }
@@ -384,6 +451,17 @@ async function main(args = process.argv.slice(NODE_CLI_ARGUMENT_OFFSET)) {
       const payload = buildNegotiationPayload(entry, { ...period, trackingId: randomUUID() });
       logger.info(`[Trade Inbox] trade_negotiations payload: ${JSON.stringify(payload)}`);
       return payload;
+    }
+    case "thread": {
+      const entries = await loadInbox({ leagueId });
+      const entry = entries.find(
+        (e) => e.espn_transaction_id === options.id || e.our_counter?.espn_transaction_id === options.id,
+      );
+      if (!entry) throw new Error(`Offer ${options.id} is not in the inbox.`);
+      const thread = buildThread(entries, entry.thread_root_id ?? entry.espn_transaction_id);
+      logger.info(`[Trade Inbox] Thread ${thread.threadRootId}: ${thread.state}, ${thread.ourCounters} counter(s) from us`);
+      thread.turns.forEach((turn, index) => logger.info(`[Trade Inbox] ${describeTurn(turn, index + 1)}`));
+      return thread;
     }
     default:
       throw usage();

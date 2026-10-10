@@ -12,7 +12,7 @@ jest.mock("../../src/bots/auth", () => ({
 }));
 
 const { refreshTradeInbox, postTradeScore, parseArgs, main } = require("../../src/bots/trade_inbox");
-const { STATUS, toInboxEntry, mergeEntry } = require("../../src/lib/trade_inbox");
+const { STATUS, toInboxEntry, mergeEntry, toCounterRecord } = require("../../src/lib/trade_inbox");
 const inboxDb = require("../../src/db/trade_inbox");
 const { makeScore } = require("../fixtures/trade_score");
 
@@ -435,6 +435,97 @@ describe("refreshTradeInbox", () => {
     expect(deps.store.rows.get("counter").thread_root_id).toBe("root");
   });
 
+  describe("our counters", () => {
+    const ourCounter = (overrides = {}) =>
+      trade({ id: "ours-1", proposingTeamId: "8", relatedTransactionId: "root", proposedDate: Date.parse("2026-10-06T14:00:00Z"), ...overrides });
+    const countered = (counter = null) => ({
+      ...mergeEntry(null, toInboxEntry(trade({ id: "root" }), "8"), NOW),
+      status: STATUS.COUNTERED,
+      our_counter: counter,
+    });
+
+    it("records our pending counter on the entry it counters without changing its status", async () => {
+      deps.store = memoryStore([countered()]);
+      deps.readPending.mockResolvedValue({ trades: [ourCounter()] });
+
+      const result = await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.rows.get("root")).toMatchObject({
+        status: STATUS.COUNTERED,
+        our_counter: { espn_transaction_id: "ours-1", status: STATUS.OPEN, send_espn_ids: ["4429795"] },
+      });
+      expect(result.counterUpdates).toEqual([{ id: "root", status: STATUS.OPEN }]);
+      expect(deps.readHistory).not.toHaveBeenCalled();
+    });
+
+    it("writes nothing while a recorded counter is still pending", async () => {
+      deps.store = memoryStore([countered(toCounterRecord(ourCounter(), "8", NOW))]);
+      deps.readPending.mockResolvedValue({ trades: [ourCounter()] });
+
+      const result = await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.update).not.toHaveBeenCalled();
+      expect(result.counterUpdates).toEqual([]);
+    });
+
+    it("threads their reply to the original offer and settles our counter as countered", async () => {
+      deps.store = memoryStore([countered(toCounterRecord(ourCounter(), "8", NOW))]);
+      deps.readPending.mockResolvedValue({ trades: [trade({ id: "reply-1", relatedTransactionId: "ours-1" })] });
+
+      const result = await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.rows.get("reply-1")).toMatchObject({ status: STATUS.OPEN, thread_root_id: "root" });
+      expect(deps.store.rows.get("root").our_counter).toMatchObject({ status: STATUS.COUNTERED });
+      expect(result.counterUpdates).toEqual([{ id: "root", status: STATUS.COUNTERED }]);
+    });
+
+    it("settles a vanished counter from the history", async () => {
+      deps.store = memoryStore([countered(toCounterRecord(ourCounter(), "8", NOW))]);
+      deps.readPending.mockResolvedValue({ trades: [] });
+      deps.readHistory.mockResolvedValue([{ id: "dec", type: "TRADE_DECLINE", status: "EXECUTED", relatedTransactionId: "ours-1" }]);
+
+      await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.rows.get("root")).toMatchObject({ status: STATUS.COUNTERED, our_counter: { status: STATUS.DECLINED } });
+    });
+
+    it("settles nothing about a vanished counter when the history read fails", async () => {
+      const stored = countered(toCounterRecord(ourCounter(), "8", NOW));
+      deps.store = memoryStore([stored]);
+      deps.readPending.mockResolvedValue({ trades: [] });
+      deps.readHistory.mockRejectedValue(new Error("history down"));
+
+      await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.rows.get("root")).toEqual(stored);
+    });
+
+    it("threads a reply to a counter sent and answered between refreshes, from the history", async () => {
+      deps.store = memoryStore([mergeEntry(null, toInboxEntry(trade({ id: "root" }), "8"), NOW)]);
+      deps.readPending.mockResolvedValue({ trades: [trade({ id: "reply-1", relatedTransactionId: "ours-1" })] });
+      deps.readHistory.mockResolvedValue([{ ...ourCounter(), status: "EXECUTED" }]);
+
+      const result = await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.store.rows.get("reply-1").thread_root_id).toBe("root");
+      expect(deps.store.rows.get("root")).toMatchObject({
+        status: STATUS.COUNTERED,
+        our_counter: { espn_transaction_id: "ours-1", status: STATUS.COUNTERED },
+      });
+      expect(result.exits).toEqual([{ id: "root", status: STATUS.COUNTERED }]);
+    });
+
+    it("does not read the history for an old countered entry with no counter recorded", async () => {
+      deps.store = memoryStore([countered()]);
+      deps.readPending.mockResolvedValue({ trades: [] });
+
+      await refreshTradeInbox({ persist: true }, deps);
+
+      expect(deps.readHistory).not.toHaveBeenCalled();
+      expect(deps.store.update).not.toHaveBeenCalled();
+    });
+  });
+
   it("in check mode reads and scores but never touches the database", async () => {
     const result = await refreshTradeInbox({ persist: false }, deps);
     expect(deps.store.load).not.toHaveBeenCalled();
@@ -485,12 +576,35 @@ describe("CLI", () => {
     [["--list", "--all"], { mode: "list", all: true }],
     [["--triage", "tx-1", "snoozed", "conor", "2026-10-07T00:00:00Z"], { mode: "triage", id: "tx-1", state: "snoozed", by: "conor", snoozeUntil: "2026-10-07T00:00:00Z" }],
     [["--counter-payload", "tx-1"], { mode: "counter-payload", id: "tx-1" }],
+    [["--thread", "tx-1"], { mode: "thread", id: "tx-1" }],
   ])("parses %j", (args, expected) => {
     expect(parseArgs(args)).toEqual(expected);
   });
 
-  it.each([[["--stage"]], [["--triage", "tx-1"]], [["--list", "--bogus"]], [["--counter-payload"]]])("rejects %j", (args) => {
+  it.each([[["--stage"]], [["--triage", "tx-1"]], [["--list", "--bogus"]], [["--counter-payload"]], [["--thread"]], [["--thread", "a", "b"]]])("rejects %j", (args) => {
     expect(() => parseArgs(args)).toThrow(/Usage/);
+  });
+
+  it("prints a thread found by any of its offers, including our counter", async () => {
+    inboxDb.loadInbox.mockResolvedValue([
+      {
+        ...mergeEntry(null, toInboxEntry(trade({ id: "root" }), "8"), NOW),
+        status: STATUS.COUNTERED,
+        our_counter: toCounterRecord(
+          trade({ id: "ours-1", proposingTeamId: "8", relatedTransactionId: "root", proposedDate: Date.parse("2026-10-06T14:00:00Z") }),
+          "8",
+          NOW,
+        ),
+      },
+    ]);
+    const thread = await main(["--thread", "ours-1"]);
+    expect(thread).toMatchObject({ threadRootId: "root", state: "awaiting_them", ourCounters: 1 });
+    expect(thread.turns.map((t) => t.side)).toEqual(["theirs", "ours"]);
+  });
+
+  it("refuses a thread for an offer the inbox doesn't know", async () => {
+    inboxDb.loadInbox.mockResolvedValue([]);
+    await expect(main(["--thread", "nope"])).rejects.toThrow(/not in the inbox/);
   });
 
   it("triages through the inbox store", async () => {

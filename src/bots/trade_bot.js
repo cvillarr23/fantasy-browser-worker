@@ -12,12 +12,17 @@ const {
 const { completeWithFallback } = require("../lib/llm_client");
 const { submitTradeOffer } = require("./trade_builder");
 const { recordTradeNegotiation } = require("../db/execution_log");
+const { loadInbox } = require("../db/trade_inbox");
+const { buildThread } = require("../lib/trade_inbox");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
 const { CORE_PIPELINE_URL } = require("../lib/core_pipeline");
 
 const DEFAULT_EVALUATE_TIMEOUT_MS = 10000;
+// Counters we may send in one negotiation thread. Past this, a deal the two sides haven't found
+// is left to the humans rather than another LLM round.
+const MAX_COUNTERS_PER_THREAD = 3;
 
 function evaluateTimeoutMs() {
   return Number(process.env.TRADE_EVALUATE_TIMEOUT_MS) || DEFAULT_EVALUATE_TIMEOUT_MS;
@@ -49,6 +54,21 @@ function formatPendingTrades(trades) {
       }
       const sides = Array.from(sentByTeam, ([teamId, names]) => `team ${teamId} sends ${names.join(", ")}`);
       return `${trade.type} from team ${trade.proposingTeamId} (${trade.status}): ${sides.join("; ")}`;
+    })
+    .join(" | ");
+}
+
+/** Prompt text for a negotiation thread's earlier turns (lib/trade_inbox.js buildThread). Player
+ * names only, never ESPN ids, for the same reason as formatPendingTrades. */
+function formatNegotiationHistory(thread) {
+  if (!thread || thread.turns.length === 0) return "NO_PRIOR_TURNS";
+
+  return thread.turns
+    .map((turn, index) => {
+      const names = (ids) =>
+        ids.map((id) => turn.player_names?.[id] ?? "an unnamed player").join(", ") || "nothing";
+      const who = turn.side === "ours" ? "we countered" : `team ${turn.proposing_team_id} offered`;
+      return `${index + 1}. ${who}: we get ${names(turn.receive_espn_ids)}; we give ${names(turn.send_espn_ids)} (${turn.status})`;
     })
     .join(" | ");
 }
@@ -388,7 +408,7 @@ function requireEspnId(internalId, name, espnId) {
  * completeWithFallback (src/lib/llm_client.js) has no native JSON-mode opts field, so strict-JSON
  * output can only be enforced by instruction — parseNegotiationResponse below is the other half
  * of that contract, defensively handling a model that ignores it anyway. */
-function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog }) {
+function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog, history = "NO_PRIOR_TURNS" }) {
   return [
     "You are a fantasy football trade negotiation assistant. You will be given a pending trade",
     "proposal, recent league chat, this league's roster deficits by team, and a VORP-based",
@@ -405,10 +425,15 @@ function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog
     "counter-offer is staged in ESPN's trade builder for a human to review, and is only ever sent",
     "after that human explicitly approves it.",
     "",
+    "The negotiation history lists this thread's earlier offers and our earlier counters, oldest",
+    "first, each with how it ended. Do not repeat a counter the other manager already declined or",
+    "countered; move toward a deal both sides could accept.",
+    "",
     `Roster deficits: ${JSON.stringify(deficits)}`,
     `Trade evaluation: ${JSON.stringify(evaluation)}`,
     `Pending trade proposal(s): ${proposals}`,
     `Recent league chat: ${chatLog}`,
+    `Negotiation history: ${history}`,
   ].join("\n");
 }
 
@@ -501,6 +526,11 @@ async function executeTradeEvaluation(payload) {
  * offer's offer_key. It does that WITHOUT an approval, so submitTradeOffer's gate can't open here
  * whatever DRY_RUN/TRADE_SUBMIT_ENABLED say. The real send is a separate, human-approved
  * "trade_submissions" message carrying that offer_key (see trade_builder.js's header).
+ *
+ * A linked counter (related_transaction_id) is one turn of a negotiation thread. The thread's
+ * earlier offers and our earlier counters, as the inbox refresh recorded them, go into the
+ * prompt, and a thread with MAX_COUNTERS_PER_THREAD counters from us gets no further one. Each
+ * turn is still started by a human; nothing here queues the next one.
  */
 async function negotiateTradeProposal(payload) {
   const { incoming, outgoing, season, week, offeringTeamId, relatedTransactionId, threadRootId } =
@@ -523,6 +553,17 @@ async function negotiateTradeProposal(payload) {
   let status = "failure";
   let errorMessage;
   try {
+    // Before any browser or LLM work: a thread at its counter limit gets no further round.
+    const thread = relatedTransactionId
+      ? buildThread(await loadInbox({ leagueId }), threadRootId ?? relatedTransactionId)
+      : null;
+    if (thread && thread.ourCounters >= MAX_COUNTERS_PER_THREAD) {
+      throw new PermanentError(
+        `[Trade Negotiator] Thread ${thread.threadRootId} already has ${thread.ourCounters} counters ` +
+          `from us (limit ${MAX_COUNTERS_PER_THREAD}); answer this offer by hand.`,
+      );
+    }
+
     session =
       (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     const { proposals, chatLog } = await readTradeContext(session.context, {
@@ -542,6 +583,7 @@ async function negotiateTradeProposal(payload) {
       evaluation,
       proposals,
       chatLog,
+      history: formatNegotiationHistory(thread),
     });
     const { text } = await completeWithFallback(
       "Propose a counter-offer for the pending trade described above.",
@@ -655,4 +697,6 @@ module.exports = {
   buildTradePortalUrl,
   formatPendingTrades,
   formatLeagueChat,
+  formatNegotiationHistory,
+  MAX_COUNTERS_PER_THREAD,
 };

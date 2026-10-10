@@ -13,6 +13,9 @@ const {
   mergeEntry,
   buildNegotiationPayload,
   verifyResponse,
+  toCounterRecord,
+  resolveCounter,
+  buildThread,
   STATUS,
 } = require("../../src/lib/trade_inbox");
 
@@ -513,5 +516,205 @@ describe("verifyResponse", () => {
       status: "conflict",
       observed: STATUS.DECLINED,
     });
+  });
+});
+
+// Our counter to tx-1: we send Bijan back and ask for a different player.
+function ourCounterTrade(overrides = {}) {
+  return trade({
+    id: "ours-1",
+    proposingTeamId: OURS,
+    relatedTransactionId: "tx-1",
+    proposedDate: Date.parse("2026-10-06T14:00:00Z"),
+    items: [
+      { playerId: "3117251", playerName: "Christian McCaffrey", type: "TRADE", fromTeamId: "3", toTeamId: OURS },
+      { playerId: "4429795", playerName: "Bijan Robinson", type: "TRADE", fromTeamId: OURS, toTeamId: "3" },
+    ],
+    ...overrides,
+  });
+}
+
+describe("toCounterRecord", () => {
+  it("keeps what our counter trades, its dates and when it was first seen", () => {
+    expect(toCounterRecord(ourCounterTrade(), OURS, NOW)).toEqual({
+      espn_transaction_id: "ours-1",
+      send_espn_ids: ["4429795"],
+      receive_espn_ids: ["3117251"],
+      player_names: { 3117251: "Christian McCaffrey", 4429795: "Bijan Robinson" },
+      proposed_date: Date.parse("2026-10-06T14:00:00Z"),
+      expiration_date: EXPIRES,
+      status: STATUS.OPEN,
+      missed_reads: 0,
+      exit_reason: null,
+      seen_at: NOW.toISOString(),
+    });
+  });
+});
+
+describe("resolveCounter", () => {
+  const countered = (ourCounter = null) => entry({ status: STATUS.COUNTERED, our_counter: ourCounter });
+  const recorded = (overrides = {}) => ({ ...toCounterRecord(ourCounterTrade(), OURS, NOW), ...overrides });
+  const base = { now: NOW, history: [], accepts: [], incoming: [], outgoing: [], ourTeamId: OURS };
+
+  it("records our pending counter the first time ESPN shows it", () => {
+    expect(resolveCounter(countered(), { ...base, outgoing: [ourCounterTrade()] })).toEqual(recorded());
+  });
+
+  it("changes nothing while a recorded counter is still pending", () => {
+    expect(resolveCounter(countered(recorded()), { ...base, outgoing: [ourCounterTrade()] })).toBeNull();
+  });
+
+  it("resets the miss count when a counter missed once is pending again", () => {
+    const missed = recorded({ missed_reads: 1, seen_at: "2026-10-06T15:00:00Z" });
+    expect(resolveCounter(countered(missed), { ...base, outgoing: [ourCounterTrade()] })).toEqual({
+      ...missed,
+      missed_reads: 0,
+    });
+  });
+
+  it.each([
+    [{ type: "TRADE_ACCEPT", status: "EXECUTED", isPending: false }, STATUS.ACCEPTED],
+    [{ type: "TRADE_DECLINE", status: "EXECUTED" }, STATUS.DECLINED],
+    [{ type: "TRADE_VETO", status: "EXECUTED" }, STATUS.VETOED],
+    [{ type: "TRADE_PROPOSAL", status: "PENDING" }, STATUS.COUNTERED],
+  ])("settles a vanished counter from history row %j as %s", (row, status) => {
+    const history = [{ id: "later", relatedTransactionId: "ours-1", ...row }];
+    expect(resolveCounter(countered(recorded()), { ...base, history })).toMatchObject({
+      espn_transaction_id: "ours-1",
+      status,
+    });
+  });
+
+  it("marks it accepted-pending from a pending accept of our counter", () => {
+    const accepts = [{ id: "acc", type: "TRADE_ACCEPT", status: "PENDING", isPending: true, relatedTransactionId: "ours-1" }];
+    expect(resolveCounter(countered(recorded()), { ...base, accepts })).toMatchObject({
+      status: STATUS.ACCEPTED_PENDING_PROCESSING,
+    });
+  });
+
+  it("marks it countered when their pending reply answers it", () => {
+    const incoming = [trade({ id: "reply-1", relatedTransactionId: "ours-1" })];
+    expect(resolveCounter(countered(recorded()), { ...base, incoming })).toMatchObject({
+      status: STATUS.COUNTERED,
+      exit_reason: "their counter is pending",
+    });
+  });
+
+  it("treats our own canceled counter as withdrawn", () => {
+    const history = [{ id: "ours-1", type: "TRADE_PROPOSAL", status: "CANCELED" }];
+    expect(resolveCounter(countered(recorded()), { ...base, history })).toMatchObject({ status: STATUS.WITHDRAWN });
+  });
+
+  it("expires a counter past its expiration date", () => {
+    const stale = recorded({ expiration_date: Date.parse("2026-10-06T00:00:00Z") });
+    expect(resolveCounter(countered(stale), base)).toMatchObject({ status: STATUS.EXPIRED });
+  });
+
+  it("closes an unexplained disappearance only after repeated misses", () => {
+    expect(resolveCounter(countered(recorded()), base)).toMatchObject({ status: STATUS.OPEN, missed_reads: 1 });
+    expect(resolveCounter(countered(recorded({ missed_reads: 1 })), base)).toMatchObject({
+      status: STATUS.CLOSED_UNKNOWN,
+      missed_reads: 2,
+    });
+  });
+
+  it("settles nothing that needs the history when the history read failed", () => {
+    expect(resolveCounter(countered(recorded()), { ...base, history: null })).toBeNull();
+  });
+
+  it("leaves a settled counter alone", () => {
+    const history = [{ id: "later", type: "TRADE_DECLINE", status: "EXECUTED", relatedTransactionId: "ours-1" }];
+    expect(resolveCounter(countered(recorded({ status: STATUS.ACCEPTED })), { ...base, history })).toBeNull();
+  });
+
+  it("finds a counter that was sent and answered between refreshes in the history", () => {
+    const history = [
+      { ...ourCounterTrade(), status: "EXECUTED" },
+      { id: "dec", type: "TRADE_DECLINE", status: "EXECUTED", relatedTransactionId: "ours-1" },
+    ];
+    expect(resolveCounter(countered(), { ...base, history })).toMatchObject({
+      espn_transaction_id: "ours-1",
+      send_espn_ids: ["4429795"],
+      status: STATUS.DECLINED,
+    });
+  });
+
+  it("does not take another team's proposal in the history for our counter", () => {
+    const history = [{ ...ourCounterTrade(), proposingTeamId: "5" }];
+    expect(resolveCounter(countered(), { ...base, history })).toBeNull();
+  });
+});
+
+describe("buildThread", () => {
+  const counter = (overrides = {}) => ({ ...toCounterRecord(ourCounterTrade(), OURS, NOW), ...overrides });
+  const reply = (overrides = {}) =>
+    entry({
+      ...toInboxEntry(trade({ id: "reply-1", relatedTransactionId: "ours-1", proposedDate: Date.parse("2026-10-06T16:00:00Z") }), OURS),
+      thread_root_id: "tx-1",
+      status: STATUS.OPEN,
+      ...overrides,
+    });
+
+  it("is empty for a thread with no entries", () => {
+    expect(buildThread([entry()], "nope")).toEqual({ threadRootId: "nope", turns: [], state: null, ourCounters: 0 });
+  });
+
+  it("orders their offers and our counters by proposal time", () => {
+    const thread = buildThread(
+      [reply(), entry({ status: STATUS.COUNTERED, our_counter: counter({ status: STATUS.COUNTERED }) }), entry({ espn_transaction_id: "other", thread_root_id: "other" })],
+      "tx-1",
+    );
+    expect(thread.turns.map((t) => [t.side, t.espn_transaction_id])).toEqual([
+      ["theirs", "tx-1"],
+      ["ours", "ours-1"],
+      ["theirs", "reply-1"],
+    ]);
+    expect(thread).toMatchObject({ state: "awaiting_us", ourCounters: 1 });
+  });
+
+  it("is awaiting them while our counter is pending", () => {
+    expect(buildThread([entry({ status: STATUS.COUNTERED, our_counter: counter() })], "tx-1").state).toBe("awaiting_them");
+  });
+
+  it("is awaiting them when ESPN shows the original countered but our counter isn't recorded yet", () => {
+    expect(buildThread([entry({ status: STATUS.COUNTERED, our_counter: null })], "tx-1")).toMatchObject({
+      state: "awaiting_them",
+      ourCounters: 0,
+    });
+  });
+
+  it("is awaiting us when our counter was countered but the reply isn't stored yet", () => {
+    const thread = buildThread([entry({ status: STATUS.COUNTERED, our_counter: counter({ status: STATUS.COUNTERED }) })], "tx-1");
+    expect(thread.state).toBe("awaiting_us");
+  });
+
+  it.each([
+    [STATUS.ACCEPTED, "agreed"],
+    [STATUS.ACCEPTED_PENDING_PROCESSING, "agreed"],
+    [STATUS.DECLINED, "rejected"],
+    [STATUS.VETOED, "rejected"],
+    [STATUS.EXPIRED, "expired"],
+    [STATUS.WITHDRAWN, "abandoned"],
+    [STATUS.CLOSED_UNKNOWN, "abandoned"],
+  ])("reads our counter %s as %s", (status, state) => {
+    expect(buildThread([entry({ status: STATUS.COUNTERED, our_counter: counter({ status }) })], "tx-1").state).toBe(state);
+  });
+
+  it.each([
+    [STATUS.OPEN, "awaiting_us"],
+    [STATUS.UNPARSED, "awaiting_us"],
+    [STATUS.RESPONDING, "awaiting_us"],
+    [STATUS.ACCEPTED, "agreed"],
+    [STATUS.DECLINED, "rejected"],
+    [STATUS.EXPIRED, "expired"],
+    [STATUS.WITHDRAWN, "abandoned"],
+  ])("reads their latest offer %s as %s", (status, state) => {
+    expect(buildThread([entry({ status })], "tx-1").state).toBe(state);
+  });
+
+  it("treats an entry stored without a thread root as the root of its own thread", () => {
+    const legacy = entry();
+    delete legacy.thread_root_id;
+    expect(buildThread([legacy], "tx-1").turns).toHaveLength(1);
   });
 });

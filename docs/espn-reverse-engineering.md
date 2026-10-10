@@ -733,6 +733,12 @@ action until the action is listed in `espn_api.js`'s
   list: a `TRADE_ACCEPT`, `TRADE_DECLINE`, `TRADE_VETO` or counter
   `TRADE_PROPOSAL` whose `relatedTransactionId` names the offer, or a
   `CANCELED` status on the offer itself. None of these rows has been seen yet.
+- **Counter threads.** The inbox treats our pending `TRADE_PROPOSAL` whose
+  `relatedTransactionId` names an incoming offer as our counter to it. It treats
+  their incoming proposal whose `relatedTransactionId` names our counter as their
+  reply. Our counter is settled from the same history rows, matched against its
+  own id. This linkage is presumed, not observed: no counter or counter-back has
+  been captured.
 
 How to confirm, read-only first:
 

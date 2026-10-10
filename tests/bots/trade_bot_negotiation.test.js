@@ -6,6 +6,7 @@ jest.mock("../../src/lib/llm_client");
 jest.mock("../../src/db/execution_log");
 jest.mock("../../src/bots/trade_builder");
 jest.mock("../../src/bots/espn_api");
+jest.mock("../../src/db/trade_inbox");
 
 const {
   createAuthenticatedSession,
@@ -15,6 +16,8 @@ const { completeWithFallback } = require("../../src/lib/llm_client");
 const { recordTradeNegotiation } = require("../../src/db/execution_log");
 const { submitTradeOffer } = require("../../src/bots/trade_builder");
 const { readPendingTrades, readLeagueChat } = require("../../src/bots/espn_api");
+const { loadInbox } = require("../../src/db/trade_inbox");
+const { STATUS } = require("../../src/lib/trade_inbox");
 const { PermanentError } = require("../../src/errors");
 const { negotiateTradeProposal } = require("../../src/bots/trade_bot");
 
@@ -79,6 +82,7 @@ beforeEach(() => {
   ]);
   createSessionFromStoredState.mockResolvedValue(session);
   createAuthenticatedSession.mockResolvedValue(session);
+  loadInbox.mockResolvedValue([]);
   global.fetch = jest.fn(async (url) => routeFetch(url));
   completeWithFallback.mockResolvedValue({
     text: JSON.stringify({
@@ -291,5 +295,102 @@ describe("negotiateTradeProposal -> pending trade and chat reads (#101)", () => 
       expect.objectContaining({ status: "failure", errorMessage: expect.stringMatching(/HTTP 503/) }),
     );
     expect(session.browser.close).toHaveBeenCalled();
+  });
+});
+
+describe("negotiateTradeProposal -> negotiation thread", () => {
+  const linked = { ...payload, related_transaction_id: "reply-1", thread_root_id: "root" };
+
+  // One round: their offer "root", our counter "ours-N", and their reply. `rounds` stacks them.
+  function threadEntries(rounds) {
+    const entries = [];
+    for (let round = 1; round <= rounds; round += 1) {
+      const id = round === 1 ? "root" : `reply-${round - 1}`;
+      entries.push({
+        espn_transaction_id: id,
+        thread_root_id: "root",
+        proposing_team_id: "3",
+        status: STATUS.COUNTERED,
+        send_espn_ids: ["4429795"],
+        receive_espn_ids: ["4685720"],
+        player_names: { 4429795: "Bijan Robinson", 4685720: "Jack Bech" },
+        proposed_date: Date.UTC(2026, 9, round, 12),
+        our_counter: {
+          espn_transaction_id: `ours-${round}`,
+          status: STATUS.COUNTERED,
+          send_espn_ids: ["3139477"],
+          receive_espn_ids: ["4685720"],
+          player_names: { 3139477: "Some Receiver", 4685720: "Jack Bech" },
+          proposed_date: Date.UTC(2026, 9, round, 14),
+        },
+      });
+    }
+    entries.push({
+      espn_transaction_id: `reply-${rounds}`,
+      thread_root_id: "root",
+      proposing_team_id: "3",
+      status: STATUS.OPEN,
+      send_espn_ids: ["4429795"],
+      receive_espn_ids: ["4685720"],
+      player_names: { 4429795: "Bijan Robinson", 4685720: "Jack Bech" },
+      proposed_date: Date.UTC(2026, 9, rounds, 16),
+      our_counter: null,
+    });
+    return entries;
+  }
+
+  beforeEach(() => {
+    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
+  });
+
+  it("gives the model earlier turns by player name, never by ESPN id", async () => {
+    loadInbox.mockResolvedValue(threadEntries(1));
+
+    await negotiateTradeProposal(linked);
+
+    expect(loadInbox).toHaveBeenCalledWith({ leagueId: "1234567890" });
+    const { systemPrompt } = completeWithFallback.mock.calls[0][1];
+    expect(systemPrompt).toContain(
+      "Negotiation history: 1. team 3 offered: we get Jack Bech; we give Bijan Robinson (countered) | " +
+        "2. we countered: we get Jack Bech; we give Some Receiver (countered) | " +
+        "3. team 3 offered: we get Jack Bech; we give Bijan Robinson (open)",
+    );
+    expect(systemPrompt).not.toContain("3139477");
+    expect(systemPrompt).toMatch(/Do not repeat a counter/);
+  });
+
+  it("refuses another counter once the thread reached the counter limit, before any browser or LLM call", async () => {
+    loadInbox.mockResolvedValue(threadEntries(3));
+
+    await expect(negotiateTradeProposal(linked)).rejects.toMatchObject({
+      permanent: true,
+      message: expect.stringMatching(/already has 3 counters/),
+    });
+    expect(createSessionFromStoredState).not.toHaveBeenCalled();
+    expect(completeWithFallback).not.toHaveBeenCalled();
+    expect(recordTradeNegotiation).toHaveBeenCalledWith(expect.objectContaining({ status: "failure" }));
+  });
+
+  it("still counters below the limit", async () => {
+    loadInbox.mockResolvedValue(threadEntries(2));
+    await expect(negotiateTradeProposal(linked)).resolves.toMatchObject({ submission: { status: "awaiting_approval" } });
+  });
+
+  it("fails with a retry delay when the inbox can't be read", async () => {
+    loadInbox.mockRejectedValue(new Error("connection refused"));
+
+    await expect(negotiateTradeProposal(linked)).rejects.toMatchObject({ retryDelayMs: expect.any(Number) });
+    expect(completeWithFallback).not.toHaveBeenCalled();
+  });
+
+  it("tells the model there are no earlier turns for an offer the inbox doesn't hold", async () => {
+    await negotiateTradeProposal(linked);
+    expect(completeWithFallback.mock.calls[0][1].systemPrompt).toContain("Negotiation history: NO_PRIOR_TURNS");
+  });
+
+  it("does not read the inbox for an unlinked payload", async () => {
+    await negotiateTradeProposal(payload);
+    expect(loadInbox).not.toHaveBeenCalled();
+    expect(completeWithFallback.mock.calls[0][1].systemPrompt).toContain("Negotiation history: NO_PRIOR_TURNS");
   });
 });

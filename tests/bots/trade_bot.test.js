@@ -367,6 +367,13 @@ describe("buildNegotiationSystemPrompt", () => {
     expect(prompt).not.toContain('"message"');
   });
 
+  it("says there are no earlier turns unless a history is given", () => {
+    expect(buildNegotiationSystemPrompt(context)).toContain("Negotiation history: NO_PRIOR_TURNS");
+    expect(buildNegotiationSystemPrompt({ ...context, history: "1. team 3 offered: ..." })).toContain(
+      "Negotiation history: 1. team 3 offered: ...",
+    );
+  });
+
   it("includes the grounding data so the model has leverage context", () => {
     const prompt = buildNegotiationSystemPrompt(context);
     expect(prompt).toContain("RB");
