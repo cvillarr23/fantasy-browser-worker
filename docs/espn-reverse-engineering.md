@@ -571,6 +571,15 @@ agent. Do not send the proposed FREEAGENT write unless a fresh read shows FREEAG
 Team 8 has one kicker against a position limit of three, so the chosen position
 does not already exceed its limit.
 
+A read-only pre-check on 2026-10-10 (scoring period 5) found Prater `onTeamId: 0`,
+`status: FREEAGENT`, but Team 8 **no longer full**: Etienne (INJURY_RESERVE) now
+occupies IR slot 21, leaving 15 players in 16 non-IR slots. An add-only request would
+likely succeed as an ordinary pickup rather than hit the roster limit, so none was
+sent. The roster was unlocked and the team had no pending transactions. Etienne's
+INJURY_RESERVE status makes him an eligible IR occupant, so this is not the
+IR-blocking state either. The capture needs a 16th non-IR player again, e.g. after
+Etienne is activated.
+
 For an approved capture:
 
 1. Re-read Prater's availability, Team 8's roster/settings and pending transactions.
