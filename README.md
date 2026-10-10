@@ -11,6 +11,8 @@ This project is unofficial and not affiliated with ESPN or Disney. It is for per
 *   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
 
 ## Documentation
+[`docs/`](docs/index.md) documents how the bots run, each bot, the queue message contracts and telemetry. It is published on the project docs site.
+
 [`docs/espn-reverse-engineering.md`](docs/espn-reverse-engineering.md) documents everything this project has confirmed about ESPN's actual draft-room WebSocket protocol, which REST endpoints are reliable, verified draft-room DOM selectors, and the cookie-auth-vs-real-login split (including why scripting the login form is a dead end).
 
 ## Local Configuration
