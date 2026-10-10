@@ -666,11 +666,10 @@ The names below are the minified bundle's, so they will change between builds.
   - Optional extra items: draft-pick trades (`{overallPickNumber, type: "DRAFT_TRADE", fromTeamId,
     toTeamId}`), FAAB (`{acquisitionBudget, type: "ACQUISITION_BUDGET_TRADE", fromTeamId, toTeamId}`),
     and roster-fix drops (`{playerId, type: "DROP", fromTeamId}`, when ESPN answers that a drop is
-    required). `relatedTransactionId` is sent only on a counter (`TRADE_PROPOSAL` with a related id).
-    No counter has been captured. `trade_builder.js` fills the plain "Propose Trade" page, which
-    sends an unlinked proposal. So an offer carrying a `relatedTransactionId` is never live-submitted
-    until `espn_api.js`'s `COUNTER_LINKAGE_VERIFIED` is set. A pending match for a counter must
-    also carry ESPN's `relatedTransactionId` for the offer it answers.
+    required). The client never sends a live proposal with `relatedTransactionId`. Its counter
+    is a decline followed by an unlinked proposal; see "Countering: Decline & Counter" below. An
+    offer carrying a `relatedTransactionId` is never live-submitted until `espn_api.js`'s
+    `COUNTER_LINKAGE_VERIFIED` is set.
   - `isActingAsTeamOwner` / `skipTransactionCounters` are sent only when `isLeagueManager` is true.
 
   `submitLineup`'s verified body is the same envelope (`isLeagueManager, teamId, type, memberId,
@@ -721,13 +720,12 @@ code assumes and how to confirm it. `trade_response.js` will not send either
 action until the action is listed in `espn_api.js`'s
 `VERIFIED_TRADE_RESPONSE_ACTIONS` and `PENDING_TRADE_SHAPE_VERIFIED` is set.
 
-- **Request (hypothesis).** `buildTradeResponseBody` POSTs to the same
+- **Request (from the bundle).** `buildTradeResponseBody` POSTs to the same
   `transactions/` endpoint with the `submitLineup` envelope. It sends
   `type: "TRADE_ACCEPT"` or `"TRADE_DECLINE"`, `relatedTransactionId` set to the
-  offer's id, `items: []`, and `comment` on a decline only. The types appear in
-  the frontend bundle, and `comment` is sent with `TRADE_DECLINE` (see "Trade
-  proposals" above). The field that points at the offer, and whether the
-  offer's items must be repeated, are guesses.
+  offer's id, no `items`, and `comment` on a decline only. This matches
+  `acceptTrade` / `declineTrade` in the build `d77c8eabc3df` bundle (see
+  "Countering" below), but no request has been seen on the wire.
 - **Pending shape.** `readPendingTrades` passes `expirationDate`,
   `relatedTransactionId` and `isPending` through when present. It keeps
   draft-pick (`DRAFT_TRADE`, `overallPickNumber`) and FAAB
@@ -739,15 +737,17 @@ action until the action is listed in `espn_api.js`'s
   - an unknown item type.
 - **History.** `readTradeHistory` reads `view=mTransactions2` with a TRADE_*
   `x-fantasy-filter`. The inbox uses it to learn why an offer left the pending
-  list: a `TRADE_ACCEPT`, `TRADE_DECLINE`, `TRADE_VETO` or counter
-  `TRADE_PROPOSAL` whose `relatedTransactionId` names the offer, or a
-  `CANCELED` status on the offer itself. None of these rows has been seen yet.
+  list: a `TRADE_ACCEPT`, `TRADE_DECLINE`, `TRADE_VETO` or `TRADE_PROPOSAL` whose
+  `relatedTransactionId` names the offer, or a `CANCELED` status on the offer
+  itself. A related `TRADE_PROPOSAL` with `executionType: "CANCEL"` is the
+  proposer withdrawing it, so it reads as withdrawn. Any other related proposal
+  still reads as a counter. None of these rows has been seen yet.
 - **Counter threads.** The inbox treats our pending `TRADE_PROPOSAL` whose
   `relatedTransactionId` names an incoming offer as our counter to it. It treats
   their incoming proposal whose `relatedTransactionId` names our counter as their
   reply. Our counter is settled from the same history rows, matched against its
-  own id. This linkage is presumed, not observed: no counter or counter-back has
-  been captured.
+  own id. ESPN's own client never creates that link (see "Countering" below),
+  so the inbox only sees it once our counter flow records the link itself.
 
 How to confirm, read-only first:
 
@@ -763,3 +763,76 @@ How to confirm, read-only first:
    Accept or Decline themselves in a headed session while the request is
    recorded, the same pattern as `lineup_recon.js --watch-save`. The bot never
    clicks, and doing this needs explicit approval each time.
+
+## Countering: Decline & Counter (bundle `d77c8eabc3df`)
+
+Read on 2026-10-09 from ESPN's public frontend bundle, build `d77c8eabc3df-1.513`, fetched from
+`cdn1.espn.net/kona/d77c8eabc3df-1.513/_next/...` with plain unauthenticated GETs. No browser
+session ran and nothing was sent. These files were read:
+- `page/football/tradereview.js`: the review page, with Accept, Decline and Decline & Counter.
+- `page/football/team/trade.js`: the builder and `sendTrade`.
+- `static/commons/main-a700d81b1bb22a22bfdc.js`: `TransactionService` and the transaction model.
+
+The minified names below change between builds.
+
+**There is no linked counter.** The incoming-offer review page is
+`/football/tradereview?leagueId={id}&transactionId={offer}`. Besides Accept and Decline, it has a
+**"Decline & Counter"** button: `button.action-buttons[data-trade-type="TRADE_AND_COUNTER"]`, with the
+label `DeclineAndCounterTrade_Label`. Both Decline buttons call the same `onClick_DeclineTrade`:
+
+1. `TransactionService.declineTrade` POSTs a `TRADE_DECLINE` to the usual `transactions/` endpoint:
+
+   ```json
+   {
+     "isLeagueManager": false,
+     "teamId": 8,
+     "type": "TRADE_DECLINE",
+     "memberId": "{SWID-WITH-BRACES}",
+     "scoringPeriodId": 5,
+     "executionType": "EXECUTE",
+     "comment": "",
+     "relatedTransactionId": "<the incoming offer's id>"
+   }
+   ```
+
+   `teamId` is ours. `items` is added only when the decline form marks "dealbreakers": `{playerId}`
+   for a player (no `type`) and `{overallPickNumber, type: "DRAFT_TRADE"}` for a pick.
+2. On success, the Decline & Counter path pushes
+   `/football/team/trade/?leagueId={id}&seasonId={season}&teamId={proposer}&fromTeamId={us}&step=1`.
+   That is the ordinary trade builder. Its `sendTrade` calls `proposeTrade` with no
+   `relatedTransactionId`, so the counter is a plain, **unlinked** `TRADE_PROPOSAL` ("Trade
+   proposals" above). Nothing carries the declined offer's id into the builder.
+
+The decline goes out first and can't be undone, so if the counter proposal then fails, the original
+offer is already declined.
+
+**Other bodies, from the model's `get()`:**
+- `items` is omitted when empty.
+- `comment` is sent for `TRADE_PROPOSAL`, `TRADE_DECLINE` and `TRADE_VETO`.
+- `relatedTransactionId` is sent for `TRADE_ACCEPT`, `TRADE_DECLINE`, `TRADE_UPHOLD` and `TRADE_VETO`,
+  and for `TRADE_PROPOSAL` only when one is set.
+- `acceptTrade`: `TRADE_ACCEPT` + `relatedTransactionId`. Its only items are roster-fix
+  `{playerId, type: "DROP", fromTeamId}` entries, when ESPN answered that a drop is required.
+- `cancelTrade` (the proposer withdrawing): a `TRADE_PROPOSAL` with `relatedTransactionId` = the offer
+  and `executionType: "CANCEL"`. It is the only proposal the client sends with a related id. The
+  inbox therefore reads a related `TRADE_PROPOSAL` with `executionType: "CANCEL"` as withdrawn, not
+  countered.
+
+**What this means for us.** Countering has to mirror the client:
+1. Decline the offer through the review page's Decline & Counter, or with the same body.
+2. Propose the counter as an ordinary offer.
+3. Link the two from our own records (execution_log's `related_transaction_id` /
+   `thread_root_id`), not from ESPN.
+
+The inbox then has to read our own decline as `countered` when we hold the counter for it.
+`COUNTER_LINKAGE_VERIFIED` stays `false` until that flow exists.
+
+**Still to capture live**, read-only first. With a real incoming offer, the user clicks Decline &
+Counter and sends a counter themselves in a headed session while the requests are recorded (the
+`lineup_recon.js --watch-save` pattern). Confirm:
+- the decline body and response;
+- the new proposal's body, and whether ESPN adds any link to it;
+- the decline row in `mTransactions2` and the offer leaving `mPendingTransactions`;
+- the counter's pending row.
+
+Turn the capture into a test fixture with SWIDs redacted.

@@ -552,7 +552,16 @@ function isPendingRow(row) {
   return row.isPending === true || row.status === "PENDING";
 }
 
+// ESPN's web client sends a TRADE_PROPOSAL naming another transaction only to cancel it: the
+// proposer withdrawing their own offer, with executionType CANCEL (frontend bundle d77c8eabc3df,
+// TransactionService.cancelTrade). Its "Decline & Counter" sends a TRADE_DECLINE and then an
+// unlinked proposal, so a cancel row is never a counter.
+function isCancelRow(row) {
+  return row.type === "TRADE_PROPOSAL" && row.executionType === "CANCEL";
+}
+
 function statusFromRelated(row) {
+  if (isCancelRow(row)) return STATUS.WITHDRAWN;
   switch (row.type) {
     case "TRADE_ACCEPT":
       if (isPendingRow(row)) return STATUS.ACCEPTED_PENDING_PROCESSING;
@@ -637,7 +646,8 @@ function toCounterRecord(trade, ourTeamId, now) {
  * their pending reply (an incoming proposal related to our counter) as the counter evidence. A
  * counter sent and answered between two refreshes is only in the history, as our TRADE_PROPOSAL
  * related to the entry. `history` is null when its read failed, and then only the pending read
- * counts. How ESPN links a counter is UNVERIFIED until a real one is captured.
+ * counts. ESPN's own client never puts this link on a counter (it declines the offer, then sends
+ * an unlinked proposal), so it only appears once our counter flow records it.
  */
 function resolveCounter(entry, { now, history, accepts, incoming, outgoing, ourTeamId }) {
   const id = entry.espn_transaction_id;
@@ -656,6 +666,7 @@ function resolveCounter(entry, { now, history, accepts, incoming, outgoing, ourT
   const sent = history.find(
     (row) =>
       row.type === "TRADE_PROPOSAL" &&
+      !isCancelRow(row) &&
       String(row.relatedTransactionId) === id &&
       (row.proposingTeamId === undefined || String(row.proposingTeamId) === ours),
   );

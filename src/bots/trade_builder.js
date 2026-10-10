@@ -43,6 +43,8 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *                                   espn_selectors.json's `_verified`. They start out unverified.
  *   5. verified counter linkage   — only for an offer that counters an incoming one
  *                                   (relatedTransactionId): espn_api.js's COUNTER_LINKAGE_VERIFIED.
+ *                                   ESPN counters by declining the offer and then proposing, and
+ *                                   this module doesn't send that decline, so it stays closed.
  * With any lock closed the run is a dry fill: tick the boxes, verify them, screenshot, and stop on
  * the first screen without clicking Continue. A BrowserContext-wide write guard (covering popups
  * too) aborts every non-GET ESPN request until the instant before the final click, so a

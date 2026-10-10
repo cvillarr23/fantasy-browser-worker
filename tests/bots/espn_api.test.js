@@ -854,7 +854,6 @@ describe("trade responses", () => {
       scoringPeriodId: 5,
       executionType: "EXECUTE",
       relatedTransactionId: "trade-1",
-      items: [],
     });
   });
 

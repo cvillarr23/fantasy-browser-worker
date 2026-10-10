@@ -375,6 +375,7 @@ describe("resolveExit", () => {
     [{ type: "TRADE_ACCEPT", status: "PENDING", isPending: true }, STATUS.ACCEPTED_PENDING_PROCESSING],
     [{ type: "TRADE_VETO", status: "EXECUTED" }, STATUS.VETOED],
     [{ type: "TRADE_PROPOSAL", status: "PENDING" }, STATUS.COUNTERED],
+    [{ type: "TRADE_PROPOSAL", status: "EXECUTED", executionType: "CANCEL" }, STATUS.WITHDRAWN],
   ])("reads %j in the history as %s", (row, status) => {
     const history = [{ id: "later", relatedTransactionId: "tx-1", ...row }];
     expect(resolveExit(entry(), { ...base, history })).toMatchObject({ status });
@@ -577,6 +578,7 @@ describe("resolveCounter", () => {
     [{ type: "TRADE_DECLINE", status: "EXECUTED" }, STATUS.DECLINED],
     [{ type: "TRADE_VETO", status: "EXECUTED" }, STATUS.VETOED],
     [{ type: "TRADE_PROPOSAL", status: "PENDING" }, STATUS.COUNTERED],
+    [{ type: "TRADE_PROPOSAL", status: "EXECUTED", executionType: "CANCEL" }, STATUS.WITHDRAWN],
   ])("settles a vanished counter from history row %j as %s", (row, status) => {
     const history = [{ id: "later", relatedTransactionId: "ours-1", ...row }];
     expect(resolveCounter(countered(recorded()), { ...base, history })).toMatchObject({
@@ -641,6 +643,11 @@ describe("resolveCounter", () => {
 
   it("does not take another team's proposal in the history for our counter", () => {
     const history = [{ ...ourCounterTrade(), proposingTeamId: "5" }];
+    expect(resolveCounter(countered(), { ...base, history })).toBeNull();
+  });
+
+  it("does not take a cancel of the offer in the history for our counter", () => {
+    const history = [{ ...ourCounterTrade(), status: "EXECUTED", executionType: "CANCEL" }];
     expect(resolveCounter(countered(), { ...base, history })).toBeNull();
   });
 });

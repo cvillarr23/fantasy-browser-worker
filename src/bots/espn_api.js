@@ -599,8 +599,10 @@ async function submitDraftPick(
  * body the click path actually sends, so the first live submit verifies it before any REST
  * submit relies on it.
  *
- * A counter adds `relatedTransactionId`, the incoming offer it answers. The bundle sends it only
- * then, so it is left out of any other proposal.
+ * `relatedTransactionId` is added only when given. ESPN's own web client never sends it on a live
+ * proposal: its counter ("Decline & Counter") declines the offer and then sends an ordinary,
+ * unlinked proposal, and the only proposal it sends with a related id is a cancel (see
+ * COUNTER_LINKAGE_VERIFIED).
  */
 function buildTradeProposalBody({
   teamId,
@@ -642,10 +644,14 @@ function buildTradeProposalBody({
  * Whether a counter sent from here is known to reach ESPN linked to the offer it answers. Until it
  * is, trade_builder.js will not live-submit an offer carrying a relatedTransactionId.
  *
- * UNVERIFIED. The bundle shows a counter is a TRADE_PROPOSAL with `relatedTransactionId`, but no
- * counter has been captured, and trade_builder.js fills the plain "Propose Trade" page, which
- * builds an unlinked proposal. Such a submit would leave the original offer pending beside a new
- * one. Set this only in a change that cites a captured counter and makes the fill path send it.
+ * Not yet. ESPN's frontend bundle (build d77c8eabc3df, 2026-10-09) has no linked counter. The
+ * trade review page's "Decline & Counter" sends a TRADE_DECLINE whose `relatedTransactionId` names
+ * the offer, then opens the plain trade builder, which sends an unlinked TRADE_PROPOSAL. The only
+ * TRADE_PROPOSAL it sends with a related id is a cancel (`executionType: "CANCEL"`). So a counter
+ * here has to decline the offer first, and the thread link has to come from our own records.
+ * trade_builder.js only fills the plain builder, so a submit now would leave the original offer
+ * pending beside a new one. Set this only in a change that sends the decline, links the thread,
+ * and cites a captured Decline & Counter. See docs/espn-reverse-engineering.md "Countering".
  */
 const COUNTER_LINKAGE_VERIFIED = false;
 
@@ -687,11 +693,12 @@ const VERIFIED_TRADE_RESPONSE_ACTIONS = Object.freeze([]);
 /**
  * The body for accepting or declining an incoming offer. Pure: nothing is sent from here.
  *
- * UNVERIFIED HYPOTHESIS. Nothing has seen this request. The envelope is the one submitLineup
- * verified. The `TRADE_ACCEPT`/`TRADE_DECLINE` types appear in ESPN's frontend bundle, and the
- * proposal builder sends `comment` with a decline. Pointing at the offer through
- * `relatedTransactionId`, the field a counter uses, is a guess. So is sending no items. Only
- * accept and decline are built: veto and league-manager actions are never offered.
+ * UNVERIFIED: read from ESPN's frontend bundle (build d77c8eabc3df, TransactionService.acceptTrade
+ * and declineTrade), never seen on the wire. The envelope is the one submitLineup verified. Both
+ * point at the offer through `relatedTransactionId`. A decline carries `comment`, an accept doesn't.
+ * The client leaves `items` out when it has none: an accept adds only roster-fix drops, and a
+ * decline only the "dealbreaker" players and picks, neither of which is sent from here. Only accept
+ * and decline are built: veto and league-manager actions are never offered.
  */
 function buildTradeResponseBody({ action, teamId, memberId, scoringPeriodId, transactionId, comment }) {
   const type = TRADE_RESPONSE_TYPES[action];
@@ -706,7 +713,6 @@ function buildTradeResponseBody({ action, teamId, memberId, scoringPeriodId, tra
     scoringPeriodId,
     executionType: "EXECUTE",
     relatedTransactionId: transactionId,
-    items: [],
     ...(action === "decline" ? { comment: comment ?? "" } : {}),
   };
 }
