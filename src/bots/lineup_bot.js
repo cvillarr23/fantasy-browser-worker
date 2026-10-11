@@ -57,7 +57,7 @@ const IR_SLOT_ID = slotConfig.slot_ids.IR;
 
 // ESPN injuryStatus values that may sit in IR. Both have been seen in this league's IR, and an
 // ACTIVE player is rejected (HTTP 409 TRAN_ROSTER_INELIGIBLE_IR_NOT_INJURED); see
-// docs/espn-reverse-engineering.md "IR moves". QUESTIONABLE/DOUBTFUL/SUSPENSION are untested.
+// docs/espn/transactions.md "IR moves". QUESTIONABLE/DOUBTFUL/SUSPENSION are untested.
 const IR_ELIGIBLE_INJURY_STATUSES = new Set(["OUT", "INJURY_RESERVE"]);
 
 // `optimized_swaps[].kind`. An entry without one is a bench + promote swap.

@@ -294,7 +294,7 @@ function parseJson(text) {
 
 /**
  * Whether `response` answers our "Send Trade Proposal". ESPN's client POSTs a TRADE_PROPOSAL whose
- * teamId is the proposer (docs/espn-reverse-engineering.md, #124), so the body is checked too, not
+ * teamId is the proposer (docs/espn/trades.md, #124), so the body is checked too, not
  * just the URL: any other transactions/ POST in the window can't be mistaken for the offer.
  */
 function isTradeProposalResponse(response, offer) {

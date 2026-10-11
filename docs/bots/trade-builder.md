@@ -91,4 +91,4 @@ A browser-wide guard aborts every non-GET ESPN request until the instant before 
 
 - [Trade proposal and scan](trade-proposal-and-scan.md)
 - [Trade evaluation and negotiation](trade-evaluation-and-negotiation.md)
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [ESPN trades](../espn/trades.md)

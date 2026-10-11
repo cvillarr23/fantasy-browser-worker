@@ -232,7 +232,7 @@ function parseSelectingFrame(raw) {
 
 /**
  * Parses ESPN's own periodic countdown broadcast — `CLOCK <slot> <msRemaining> <teamId>`,
- * documented in docs/espn-reverse-engineering.md. Confirmed live 2026-08-28 (league
+ * documented in docs/espn/draft-room.md. Confirmed live 2026-08-28 (league
  * 1234567897): this room never sent a single SELECTING frame for its whole session (checked
  * against 287 log lines) - CLOCK ticks roughly once a second and was the ONLY on-the-clock
  * signal this room ever emitted, so relying on SELECTING alone left fantasy-core-pipeline
@@ -258,7 +258,7 @@ function parseClockFrame(raw) {
 
 /**
  * Parses ESPN's own autodraft-toggle broadcast — `AUTODRAFT <teamId> <bool>`, documented in
- * docs/espn-reverse-engineering.md but previously discarded as noise (scripts/practice-draft-test.js's
+ * docs/espn/draft-room.md but previously discarded as noise (scripts/practice-draft-test.js's
  * KNOWN_NOISE regex). This is the only live signal for "this team's autodraft is currently
  * engaged" - draft_pick_ledger.js's classifyPickOrigin only tells you a pick already happened via
  * autodraft, after the fact, which is too late for a UI banner meant to warn a user before their
@@ -1126,7 +1126,7 @@ function attachDraftListeners(page, redisClient, state, hooks = {}) {
 
         // CONFIRMED 2026-08-25 (real practice draft, league 1234567898, 10 teams/160 picks): `STATE`
         // carries 1 at connection start (draft in progress) and 2 exactly once, immediately after
-        // the final SELECTED — the terminal frame docs/espn-reverse-engineering.md flagged as
+        // the final SELECTED — the terminal frame docs/espn/draft-room.md flagged as
         // unconfirmed. The socket did NOT close afterward (plain PING/PONG continued), so this is
         // strictly more useful than WS closure ever was for detecting completion. Treated as the
         // fastest of the three terminal signals — see the isTerminal computation below.

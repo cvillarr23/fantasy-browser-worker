@@ -34,7 +34,7 @@ const {
  *
  * Auth: same priority order and same rationale as draft_recon.js (FORCE_MANUAL_LOGIN=1 -> saved
  * session -> cookie injection -> manual login) — the trade portal is a rendered page, so it's
- * subject to the same auth-surface split documented in docs/espn-reverse-engineering.md.
+ * subject to the same auth-surface split documented in docs/espn/session-and-auth.md.
  * Reuses draft_recon.js's tryLoadStoredSession/launchWithManualLogin (and its
  * .espn-storage-state.json) directly rather than re-implementing them: that file is a
  * site-wide ESPN login, not draft-specific, so one real manual login serves both recon tools.

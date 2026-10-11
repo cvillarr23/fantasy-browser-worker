@@ -85,7 +85,7 @@ async function tryClick(locator, logger, label) {
  *      behavioral/fingerprint signals than `navigator.webdriver` and simply never completes its
  *      challenge or releases whatever callback would trigger navigation. This is the SAME
  *      mechanism already confirmed blocking automated login (see this repo's
- *      docs/espn-reverse-engineering.md) — just discovered here via a different symptom (a
+ *      docs/espn/draft-room.md) — just discovered here via a different symptom (a
  *      storage-access crash) before the underlying reCAPTCHA block became visible.
  * This is NOT a selector problem and no further retry/selector/permission-grant hardening in this
  * file is expected to fix it — reCAPTCHA Enterprise is specifically designed to resist exactly

@@ -74,4 +74,4 @@ REST also reconciles every 15 s. SIGTERM exits immediately so the core API can t
 
 - [Draft clicker](draft-clicker.md)
 - [Mock draft helper](mock-draft.md)
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [Draft room protocol](../espn/draft-room.md)

@@ -48,8 +48,8 @@ These files are run by hand and are not part of the production pipeline.
 
 | File | Purpose |
 |---|---|
-| `draft_recon.js`, `lineup_recon.js`, `waiver_recon.js`, `trade_recon.js` | Capture what ESPN actually sends so request shapes and selectors can be verified. `trade_recon.js` blocks every ESPN write. |
-| `remote_login.js` | Interactive ESPN login over VNC, run in a Kubernetes Job. See the [auth notes](../espn-reverse-engineering.md). |
+| `draft_recon.js`, `lineup_recon.js`, `waiver_recon.js`, `trade_recon.js` | Capture what ESPN actually sends so request shapes and selectors can be verified. `trade_recon.js` blocks every ESPN write. See [Recon tools](../espn/recon-tools.md). |
+| `remote_login.js` | Interactive ESPN login over VNC, run in a Kubernetes Job. See [Session and auth](../espn/session-and-auth.md#refreshing-the-login-remotely). |
 | `debug_capture.js` | Saves the latest page HTML and screenshot for any bot that holds a page. |
 
 ## Related

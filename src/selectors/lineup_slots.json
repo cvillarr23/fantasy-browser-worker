@@ -13,7 +13,7 @@
     "the copy here is a documented reference/fallback, not the source of truth.",
     "",
     "IR (21) was confirmed as a write target on 2026-10-06: a ROSTER LINEUP move 20 -> 21 and",
-    "back executed live. See docs/espn-reverse-engineering.md 'IR moves'."
+    "back executed live. See docs/espn/transactions.md 'IR moves'."
   ],
 
   "slot_ids": {

@@ -309,7 +309,7 @@ async function readLeagueChat(context, { leagueId, seasonId, limit = 25 }) {
  * here; the capture succeeded without evidence the server requires it from a non-browser client.
  *
  * IR moves use the same body with one item into or out of lineupSlotId 21, verified live on
- * 2026-10-06 (moved and reverted). See docs/espn-reverse-engineering.md "IR moves".
+ * 2026-10-06 (moved and reverted). See docs/espn/transactions.md "IR moves".
  *
  * A 4xx rejection (except 429) is a PermanentError, same heuristic as submitWaiverClaim below: an
  * ineligible IR move or an illegal slot keeps failing identically, and requeuing it would starve
@@ -595,7 +595,7 @@ async function submitDraftPick(
  * trade sent. The envelope is the one submitLineup verified live; a trade adds a TRADE item per
  * player, directed by its current owner, plus `expirationDate` (now + "Keep trade open for" days,
  * default 2, sent as an ISO UTC string) and `comment` (the note, "" when there is none). See
- * docs/espn-reverse-engineering.md "Trade proposals". trade_builder.js compares this against the
+ * docs/espn/trades.md "Proposing a trade". trade_builder.js compares this against the
  * body the click path actually sends, so the first live submit verifies it before any REST
  * submit relies on it.
  *
@@ -651,7 +651,7 @@ function buildTradeProposalBody({
  * here has to decline the offer first, and the thread link has to come from our own records.
  * trade_builder.js only fills the plain builder, so a submit now would leave the original offer
  * pending beside a new one. Set this only in a change that sends the decline, links the thread,
- * and cites a captured Decline & Counter. See docs/espn-reverse-engineering.md "Countering".
+ * and cites a captured Decline & Counter. See docs/espn/trades.md "Countering: Decline & Counter".
  */
 const COUNTER_LINKAGE_VERIFIED = false;
 

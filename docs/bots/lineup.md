@@ -66,7 +66,7 @@ The bot plans before it checks the lineup lock. A redelivery after a successful 
 | A player appears in two swaps, or a swap overfills a slot | `PermanentError` |
 | Empty roster (draft not held yet) | `PermanentError` |
 | Lineup or roster locked by ESPN | `PermanentError`, because the week's optimization is moot |
-| An IR move for a player ESPN won't accept (for example an active player) | ESPN rejects the request. See the [IR notes](../espn-reverse-engineering.md). |
+| An IR move for a player ESPN won't accept (for example an active player) | ESPN rejects the request. See the [IR notes](../espn/transactions.md#ir-moves). |
 | Verification fails after four reads | Plain `Error`, requeued |
 | Session cookies rejected | `SessionExpiredError`, requeued after 30 s |
 

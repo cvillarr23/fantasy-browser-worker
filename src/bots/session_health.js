@@ -8,7 +8,7 @@ const { PermanentError, SessionExpiredError } = require("../errors");
  * rendered "Log in Required" page). For a full unattended draft (15-20+ minutes), that's too late
  * to "abort cleanly" on — by the time a pick attempt itself fails, a turn may already be missed.
  *
- * Two tiers, matching the two auth surfaces documented in docs/espn-reverse-engineering.md:
+ * Two tiers, matching the two auth surfaces documented in docs/espn/session-and-auth.md:
  *   1. Cookie/WS-layer (cheap, REST-only, no page navigation) — what matters for
  *      draft_clicker.js's WS-only primary path, which never renders a page at all.
  *   2. Rendered-page/BAM-SDK-layer (needs an existing page) — what matters for

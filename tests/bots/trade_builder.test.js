@@ -86,7 +86,7 @@ function rosterFor(rows) {
  * `state.clicks` records every check() and button click in order. The dry-run/approval tests assert
  * on it, so "never clicked submit" is checked directly rather than inferred from return values.
  */
-// What ESPN's client would POST for offerFixture() (docs/espn-reverse-engineering.md, #124).
+// What ESPN's client would POST for offerFixture() (docs/espn/trades.md, #124).
 function proposalPostData(offer = offerFixture(), overrides = {}) {
   return JSON.stringify({
     ...jest.requireActual("../../src/bots/espn_api").buildTradeProposalBody({
