@@ -4,10 +4,10 @@ description: Every RabbitMQ queue the worker consumes, who publishes to it, and 
 sidebar_position: 4
 ---
 
-This page lists each queue and its message fields. The producer's models are the source of truth: the core API's Pydantic models in `src/api/routes.py` and the trade services. The worker's validation is in the bot named in each section.
+Use the [queue contract explorer](/reference/queues) for the six queues published by core: schemas, required fields and placeholder examples. The maintained source is core's [AsyncAPI spec](https://github.com/cvillarr23/fantasy-core-pipeline/blob/main/docs/asyncapi.yaml); this page describes consumers, queue ownership and worker-only messages.
 
-:::note
-Every message is a JSON object. The core API adds `tracking_id`, `league_id` and `traceparent` to the queue body, and removes `decision_inputs`. Fields marked "Core" are sent by the core API, but the worker may ignore them.
+:::warning[Injury alerts are not claims]
+`waiver_actions` also carries `INJURY_STATUS_CHANGE` alerts from player sync. Those use Sleeper player IDs and have no tracking or trace context. API claims use ESPN player IDs.
 :::
 
 ```mermaid
@@ -46,78 +46,12 @@ flowchart LR
 
 "Broker" queues are declared by the broker's definitions and policy. The worker only checks that they exist. "Worker" queues are declared durable by whoever connects first.
 
-## `lineup_updates`
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `tracking_id` | string | Core | |
-| `team_id` | string | Yes | |
-| `optimized_swaps` | array | Yes | Swaps and IR moves. See below. |
-| `idempotency_key` | string | No | Core only. |
 
-Swap entry (no `kind`, or `kind: "swap"`):
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `drop_player_id` | string | Yes | ESPN id, moved to the bench. |
-| `add_player_id` | string | Yes | ESPN id, moved into `slot`. |
-| `slot` | string | Yes | `QB`, `RB1`, `FLEX` and so on. |
-| `drop_player_name`, `add_player_name`, `matchup_multiplier` | | No | Core only. |
+## How are deliveries handled?
 
-IR entry:
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `kind` | `ir` or `activate_ir` | Yes | |
-| `player_id` | string | Yes | ESPN id. |
-| `slot` | string | Yes | `IR` for `ir`. Any non-IR slot for `activate_ir`. |
-
-```json title="lineup_updates"
-{
-  "tracking_id": "00000000-0000-4000-8000-000000000001",
-  "team_id": "8",
-  "optimized_swaps": [
-    { "drop_player_id": "1000001", "add_player_id": "1000002", "slot": "FLEX" },
-    { "kind": "ir", "player_id": "1000003", "slot": "IR" }
-  ]
-}
-```
-
-## `waiver_actions`
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `tracking_id` | string | Core | |
-| `team_id` | string | Core | The worker uses `ESPN_TEAM_ID`. |
-| `player_id` | string | Yes | ESPN id of the add. |
-| `name`, `team` | string | Core | Display name and NFL team. |
-| `drop_player_id` | string | No | Omit for an add-only claim. |
-| `dry_run` | boolean | No | Overrides `DRY_RUN`. |
-| `idempotency_key` | string | No | Core only. |
-
-Player sync also publishes an alert shape to this queue:
-
-| Field | Type |
-|---|---|
-| `event_type` | `INJURY_STATUS_CHANGE` |
-| `timestamp` | ISO 8601 string |
-| `player_id`, `name`, `team` | string |
-| `new_injury_status` | string |
-
-## `draft_targets`
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `tracking_id` | string | Core | |
-| `team_id` | string | Yes | Numeric string. |
-| `player_id` | string | Yes | ESPN id. Negative for a D/ST. |
-| `name` | string | Yes | |
-| `position`, `pro_team` | string | Core | |
-| `league_id` | string | No | Overrides `ESPN_LEAGUE_ID`. |
-| `pick_number` | integer | No | |
-| `expires_at` | number | No | Unix seconds. |
-| `mode` | `live` or `practice` | No | |
-| `idempotency_key` | string | No | |
+Worker processing and result reporting are described in [How bots run](how-bots-run.md). Core trigger messages arrive through a durable outbox; trade publications use durable claims and require reconciliation when delivery is uncertain. See [Core delivery, idempotency and retries](/core/queue-publishing).
 
 ## `trade_evaluations`
 
@@ -128,15 +62,6 @@ Player sync also publishes an alert shape to this queue:
 | `season`, `week` | integer | Yes | |
 | `tracking_id` | string | No | |
 
-## `trade_negotiations`
-
-The fields of `trade_evaluations`, plus:
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `offering_team_id` | string | Yes | ESPN team that made the offer. |
-| `related_transaction_id` | string | No | Offer being countered. |
-| `thread_root_id` | string | No | Needs `related_transaction_id`. |
 
 ## `trade_proposals`
 
@@ -151,41 +76,7 @@ The fields of `trade_evaluations`, plus:
 Nothing publishes here and no trigger wakes a worker for it. Use the trade scan CronJob.
 :::
 
-## `trade_submissions`
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `season` | integer | Yes | |
-| `to_team_id` | string | Yes | |
-| `incoming_player_ids`, `outgoing_player_ids` | string[] | Yes | ESPN ids. |
-| `source` | `counter_offer`, `proposal` or `manual` | No | Default `manual`. |
-| `message` | string | No | |
-| `related_transaction_id`, `thread_root_id` | string | No | |
-| `approval` | object | No | `{offer_key, approved_by}`. Without it the run is a dry fill. |
-| `tracking_id` | string | No | |
-
-```json title="trade_submissions"
-{
-  "tracking_id": "00000000-0000-4000-8000-000000000002",
-  "season": 2026,
-  "to_team_id": "3",
-  "incoming_player_ids": ["1000004"],
-  "outgoing_player_ids": ["1000005"],
-  "source": "proposal",
-  "approval": { "offer_key": "<64 hex characters>", "approved_by": "<you>" }
-}
-```
-
-## `trade_responses`
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `espn_transaction_id` | string | Yes | |
-| `action` | `accept` or `decline` | Yes | |
-| `approval` | object | To send | `{decision_key, approved_by, reviewed_note}` |
-| `comment` | string | No | |
-| `retry` | object | No | `{of_claim_id, approved_by, verified_not_answered}` |
-| `tracking_id` | string | Core | New for a retry. |
 
 ## `llm_requests`
 
