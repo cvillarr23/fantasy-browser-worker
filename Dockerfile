@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # OpenBao CLI — needed so remote_login.js can `bao login -method=kubernetes` + `bao kv put` the
-# captured session state in-cluster (see docs/espn-reverse-engineering.md and the WORKER-11
+# captured session state in-cluster (see docs/espn/session-and-auth.md and the WORKER-11
 # companion fantasy-infra issue for the auth-method/role/policy prerequisite this depends on).
 # auth.js's existing OpenBao reads (local dev only, via scripts/openbao-connect.sh) never needed
 # this in the image before, since they run on the developer's own machine, not in-cluster.

@@ -1251,7 +1251,7 @@ describe("connectAndStream", () => {
       },
     });
     const infoCallsBefore = infoSpy.mock.calls.length;
-    // DRAFT_LIST ("add to queue", per docs/espn-reverse-engineering.md) - unlike CLOCK, this
+    // DRAFT_LIST ("add to queue", per docs/espn/draft-room.md) - unlike CLOCK, this
     // one is genuinely never parsed anywhere, so it stays a valid example of the generic
     // unknown-frame path this test covers.
     await wsFrameListeners.framereceived({

@@ -17,7 +17,7 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * prior attempt to script that login (branch `espn-session-refresh`, commit `c3fd986`) filled the
  * form correctly but submit silently never completed — the signature of invisible reCAPTCHA
  * Enterprise blocking it. That's confirmed closed, not untested (see
- * docs/espn-reverse-engineering.md) — do not re-attempt scripting any part of this form here.
+ * docs/espn/session-and-auth.md) — do not re-attempt scripting any part of this form here.
  *
  * Flow:
  *   1. Launch Chromium headed on the Xvfb display, navigate to the ESPN login page.

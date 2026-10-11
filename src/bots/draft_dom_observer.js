@@ -12,7 +12,7 @@ const { logger } = require("../telemetry/logger");
  * WHY THIS EXISTS ALONGSIDE THE WEBSOCKET
  * ---------------------------------------
  * The draft room WebSocket is the fastest and most precise pick signal we have (~250ms, exact
- * numeric player/team ids — see docs/espn-reverse-engineering.md), and it stays the primary
+ * numeric player/team ids — see docs/espn/draft-room.md), and it stays the primary
  * source. But it is NOT continuously reliable in this deployment, for a confirmed reason:
  * ESPN's draft room is SINGLE-SESSION per league/team/member (confirmed 2026-08-17). Any second
  * connection for the same identity — the user opening their own browser tab, draft_clicker.js

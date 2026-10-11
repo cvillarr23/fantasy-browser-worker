@@ -8,7 +8,7 @@
 # level, straight into the X server, indistinguishable to Chromium from a real mouse/keyboard —
 # unlike a CDP relay (Page.mouse/keyboard), which is still programmatic input from the browser's
 # perspective and was already confirmed blocked by reCAPTCHA Enterprise once (see
-# docs/espn-reverse-engineering.md). Do not replace this with anything CDP-based.
+# docs/espn/session-and-auth.md). Do not replace this with anything CDP-based.
 #
 # -nopw (no VNC password) is deliberate, not an oversight: per issue #24, the Tailscale tailnet
 # ingress (homelab-deployment#8) is the intended access boundary, not VNC auth — this port is only

@@ -72,4 +72,4 @@ In a waiver period ESPN queues the claim. The roster won't show the player until
 ## Related
 
 - [Message contracts](../message-contracts.md)
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [Transactions endpoint](../espn/transactions.md)

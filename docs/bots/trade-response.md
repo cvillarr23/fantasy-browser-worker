@@ -88,4 +88,4 @@ If the reads now confirm the earlier response, it is settled instead. The retrie
 ## Related
 
 - [Trade inbox](trade-inbox.md)
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [ESPN trades](../espn/trades.md)

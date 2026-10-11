@@ -41,5 +41,5 @@ Re-extract `espn_s2` and `SWID` from a logged-in browser and update the secret t
 
 ## Related
 
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [Session and auth](../espn/session-and-auth.md)
 - [How bots run](../how-bots-run.md)

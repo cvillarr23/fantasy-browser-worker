@@ -53,7 +53,7 @@ The draft-day optimizer calls the core API's `POST /v1/trigger/draft-pick`. The 
 | Submit | `SELECT <playerId>` frame on the draft-room WebSocket |
 | Fallback | A separate Chromium click on the draft board |
 
-The WebSocket protocol is in the [reverse-engineering notes](../espn-reverse-engineering.md).
+The WebSocket protocol is in the [draft room notes](../espn/draft-room.md).
 
 ## How does it verify?
 

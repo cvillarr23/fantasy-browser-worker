@@ -412,7 +412,7 @@ describe("submitWaiverClaim", () => {
 });
 
 // Inferred 2026-10-03 (#124) from ESPN's own frontend (TransactionService.proposeTrade), not yet
-// seen on the wire: see docs/espn-reverse-engineering.md "Trade proposals".
+// seen on the wire: see docs/espn/trades.md "Proposing a trade".
 describe("buildTradeProposalBody", () => {
   const base = {
     teamId: "8",

@@ -24,7 +24,8 @@ flowchart LR
 | Find which bot handles a queue or job | [Bots](bots/index.md) |
 | Check the JSON a queue expects | [Message contracts](message-contracts.md) |
 | Read or write logs, spans and `execution_log` rows | [Telemetry](telemetry.md) |
-| Look up ESPN's undocumented draft protocol, auth and write requests | [ESPN reverse-engineering notes](espn-reverse-engineering.md) |
+| Look up ESPN's undocumented endpoints, draft protocol, error codes and auth | [ESPN reverse-engineering](./espn/index.md) |
+| Capture ESPN traffic safely | [Recon tools](espn/recon-tools.md) |
 
 ## Related
 

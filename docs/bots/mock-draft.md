@@ -22,4 +22,4 @@ The click is retried 3 times across selector strategies (button, link, text), 2 
 ## Related
 
 - [Draft sync](draft-sync.md)
-- [ESPN reverse-engineering notes](../espn-reverse-engineering.md)
+- [Draft room protocol](../espn/draft-room.md)
