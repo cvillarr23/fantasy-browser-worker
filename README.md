@@ -379,3 +379,9 @@ node src/bots/trade_response.js '{"tracking_id":"<new uuid>","espn_transaction_i
 `computeDecisionKey` in `src/lib/trade_inbox.js` defines the key, which is a
 SHA-256 over league, season, team, transaction id, action, offer fingerprint and
 note.
+
+## License
+
+Code, configuration and documentation are licensed under the [MIT License](LICENSE).
+Third-party dependencies retain their own licenses.
+See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency licenses and image redistribution.
