@@ -55,7 +55,11 @@ ESPN's league-manager posts carry `author: "LM"` and `content: null` for templat
 <details>
 <summary>Why not read the chat iframe?</summary>
 
-The clubhouse chat iframe (`iframe.chat--container--iframe`) exists only after you click the toggle `span.chat--container--header--title`. It loads `https://chat.espn.com/1/{leagueId}/{season}/0/directory`, which is the **room list**, not a message feed, and it renders about 1 s after the click. Reading `body.innerText` straight after the click returns an empty string or the room list. The REST feed avoids all of this, so `trade_bot.js` no longer navigates the clubhouse.
+- The clubhouse chat iframe (`iframe.chat--container--iframe`) exists only after you click the toggle `span.chat--container--header--title`.
+- It loads `https://chat.espn.com/1/{leagueId}/{season}/0/directory`, which is the **room list**, not a message feed. It renders about 1 s after the click.
+- Reading `body.innerText` straight after the click returns an empty string or the room list.
+
+The REST feed avoids all of this, so `trade_bot.js` no longer navigates the clubhouse.
 
 </details>
 
@@ -63,7 +67,13 @@ The clubhouse chat iframe (`iframe.chat--container--iframe`) exists only after y
 
 Confirmed live on 08-16 and 08-17: during a practice draft, `mDraftDetail` returned **zero picks** while the WebSocket confirmed every pick. After the draft, it returned an empty `draftDetail`. The [`cwendt94/espn-api` maintainer](https://github.com/cwendt94/espn-api/issues/558) reports the same thing: live drafts use a separate backend.
 
-Whether it works for a real, persisted league draft is still unverified. `draftInit` and `mSettings` + `mTeam` kept working in the same rooms, because they read season data, not draft-instance state. Once a practice draft ends, these reads return `LEAGUE_NOT_FOUND_DELETED`. See [Draft room](draft-room.md) for how the worker copes.
+:::warning[Unverified for real league drafts]
+Whether `mDraftDetail` works for a real, persisted league draft is still unverified.
+:::
+
+- `draftInit` and `mSettings` + `mTeam` kept working in the same rooms, because they read season data, not draft-instance state.
+- Once a practice draft ends, these reads return `LEAGUE_NOT_FOUND_DELETED`.
+- See [Draft room](draft-room.md) for how the worker copes.
 
 ## Other endpoints
 
