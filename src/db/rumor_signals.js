@@ -46,20 +46,23 @@ async function fetchNewRawSignals(sinceId) {
   return rows;
 }
 
-/** Persists one digest run's verdicts as a single all-or-nothing transaction -- either every
+/** Persists one digest run's verdicts as a single all-or-nothing transaction, returning the new
+ * rumor_signals ids (for the run audit log) -- either every
  * player this run produced a valid verdict for lands, or none do, so a partial-insert failure
  * never leaves the watermark in a state that's inconsistent with what's actually in the table. */
 async function persistRumorSignals(rows) {
-  if (!rows || rows.length === 0) return;
+  if (!rows || rows.length === 0) return [];
 
   const client = await pool.connect();
+  const ids = [];
   try {
     await client.query("BEGIN");
     for (const row of rows) {
-      await client.query(
+      const { rows: inserted } = await client.query(
         `INSERT INTO rumor_signals
            (player_id, sentiment, confidence, suggested_action, source_raw_signal_ids, max_raw_signal_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING id`,
         [
           row.playerId,
           row.sentiment,
@@ -69,8 +72,10 @@ async function persistRumorSignals(rows) {
           row.maxRawSignalId,
         ],
       );
+      if (inserted && inserted[0]) ids.push(inserted[0].id);
     }
     await client.query("COMMIT");
+    return ids;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;

@@ -1,5 +1,6 @@
 jest.mock("../../src/db/rumor_signals");
 jest.mock("../../src/lib/llm_client");
+jest.mock("../../src/db/run_log");
 
 const {
   fetchWatermark,
@@ -7,6 +8,7 @@ const {
   persistRumorSignals,
 } = require("../../src/db/rumor_signals");
 const { completeWithFallback } = require("../../src/lib/llm_client");
+const runLog = require("../../src/db/run_log");
 const {
   runRumorDigest,
   buildDigestSystemPrompt,
@@ -262,7 +264,31 @@ describe("runRumorDigest", () => {
     completeWithFallback.mockResolvedValue({ text: "not json at all" });
 
     await expect(runRumorDigest()).rejects.toThrow(/JSON/);
+    // The first call plus two strict-JSON retries, then the run fails.
+    expect(completeWithFallback).toHaveBeenCalledTimes(3);
     expect(persistRumorSignals).not.toHaveBeenCalled();
+  });
+
+  it("re-asks once for a malformed response and persists the retry's verdicts", async () => {
+    fetchWatermark.mockResolvedValue(null);
+    fetchNewRawSignals.mockResolvedValue([rawSignal({ id: 10, player_id: "500" })]);
+    completeWithFallback
+      .mockResolvedValueOnce({ text: '[{"player_id": "500" "sentiment": "negative"}]' })
+      .mockResolvedValueOnce({
+        text: JSON.stringify([
+          { player_id: "500", sentiment: "negative", confidence: 0.9, suggested_action: "bench_watch" },
+        ]),
+      });
+    persistRumorSignals.mockResolvedValue([77]);
+
+    const result = await runRumorDigest();
+
+    expect(completeWithFallback).toHaveBeenCalledTimes(2);
+    expect(completeWithFallback.mock.calls[1][0]).toMatch(/not a valid JSON array/);
+    expect(result).toEqual({ processed: 1, written: 1 });
+    expect(runLog.link).toHaveBeenCalledWith("raw_signal", [10], "input");
+    expect(runLog.link).toHaveBeenCalledWith("rumor_signal", [77], "output");
+    expect(runLog.addSummary).toHaveBeenCalledWith(expect.objectContaining({ parse_retries: 1 }));
   });
 
   it("makes one completeWithFallback call per chunk and stamps every row with the run's overall maxRawSignalId, not the chunk's own max", async () => {

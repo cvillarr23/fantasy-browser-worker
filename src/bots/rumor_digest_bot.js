@@ -5,6 +5,7 @@ const {
 } = require("../db/rumor_signals");
 const { completeWithFallback } = require("../lib/llm_client");
 const { logger } = require("../telemetry/logger");
+const runLog = require("../db/run_log");
 
 /**
  * Rumor/news-driven waiver & lineup signal bot -- advisory only, no waiver/lineup execution.
@@ -46,6 +47,16 @@ function estimateTokens(rawSignals) {
 // real run hit 429 on chunk 2 despite each chunk individually fitting. 60s clears any per-minute
 // budget without needing to track token usage against an unknown, provider-specific window.
 const DEFAULT_CHUNK_DELAY_MS = 60_000;
+
+// Extra calls per chunk when the model's response isn't a usable JSON array. A malformed
+// response is usually a one-off (a stray comma, a truncated array), so re-asking is far cheaper
+// than failing the whole run and waiting for the Job's pod retry to redo every chunk.
+const MAX_DIGEST_PARSE_RETRIES = 2;
+const DIGEST_USER_PROMPT =
+  "Analyze the batch of rumor/news items described above and produce the structured verdict array.";
+const DIGEST_STRICT_JSON_REMINDER =
+  "Your previous answer was not a valid JSON array. Respond with only the JSON array: no prose, " +
+  "no code fences, double-quoted keys and strings, and commas between every element.";
 
 function chunkDelayMs() {
   // Unlike digestChunkSize's `||` fallback, this must accept an explicit 0 (disabling the delay,
@@ -229,6 +240,26 @@ function parseDigestResponse(text, validPlayerIds) {
   return results;
 }
 
+/** One LLM call per attempt for one chunk, re-asking (with a strict-JSON reminder) when the
+ * response as a whole is unusable. Entry-level problems are already dropped by
+ * parseDigestResponse and never retried. Returns the verdicts and how many retries it took. */
+async function digestChunk(chunk, chunkPlayerIds) {
+  const systemPrompt = buildDigestSystemPrompt(chunk);
+  let prompt = DIGEST_USER_PROMPT;
+  for (let retries = 0; ; retries++) {
+    const { text } = await completeWithFallback(prompt, { systemPrompt, callSite: "rumor_digest" });
+    try {
+      return { verdicts: parseDigestResponse(text, chunkPlayerIds), retries };
+    } catch (error) {
+      if (retries >= MAX_DIGEST_PARSE_RETRIES) throw error;
+      logger.warn(
+        `${error.message} Re-asking (retry ${retries + 1} of ${MAX_DIGEST_PARSE_RETRIES}).`,
+      );
+      prompt = `${DIGEST_USER_PROMPT}\n\n${DIGEST_STRICT_JSON_REMINDER}`;
+    }
+  }
+}
+
 /** One digest run: read new raw_signals since the last watermark, split them into per-player
  * chunks (see chunkRawSignalsByPlayer), and make one completeWithFallback call per chunk rather
  * than one call for the whole run -- persist the combined verdicts. Advisory only -- writes to
@@ -262,16 +293,15 @@ async function runRumorDigest() {
       `est. token(s) each.`,
   );
 
+  await runLog.link("raw_signal", rawSignals.map((row) => row.id), "input");
   const verdicts = [];
+  let parseRetries = 0;
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const chunkPlayerIds = new Set(chunk.map((row) => String(row.player_id)));
-    const systemPrompt = buildDigestSystemPrompt(chunk);
-    const { text } = await completeWithFallback(
-      "Analyze the batch of rumor/news items described above and produce the structured verdict array.",
-      { systemPrompt, callSite: "rumor_digest" },
-    );
-    verdicts.push(...parseDigestResponse(text, chunkPlayerIds));
+    const result = await digestChunk(chunk, chunkPlayerIds);
+    verdicts.push(...result.verdicts);
+    parseRetries += result.retries;
     if (i < chunks.length - 1) await sleep(chunkDelayMs());
   }
 
@@ -290,7 +320,8 @@ async function runRumorDigest() {
     maxRawSignalId,
   }));
 
-  await persistRumorSignals(rows);
+  const rumorSignalIds = await persistRumorSignals(rows);
+  await runLog.link("rumor_signal", rumorSignalIds, "output");
 
   const counts = rows.reduce((acc, row) => {
     acc[row.suggestedAction] = (acc[row.suggestedAction] || 0) + 1;
@@ -301,6 +332,12 @@ async function runRumorDigest() {
       `dropped ${validPlayerIds.size - rows.length} invalid/duplicate entr(ies).`,
   );
 
+  runLog.addSummary({
+    raw_signals: rawSignals.length,
+    chunks: chunks.length,
+    written: rows.length,
+    parse_retries: parseRetries,
+  });
   return { processed: rawSignals.length, written: rows.length };
 }
 

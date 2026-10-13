@@ -1,7 +1,8 @@
 const activity = require("../db/activity");
 const { trace, SpanStatusCode } = require("@opentelemetry/api");
-const { runWithContext } = require("./context");
+const { runWithContext, updateContext } = require("./context");
 const { recordExecution } = require("../db/execution_log");
+const runLog = require("../db/run_log");
 
 const tracer = trace.getTracer("fantasy-browser-worker");
 
@@ -14,9 +15,29 @@ async function withInstrumentation(botName, contextFields, handler) {
     const trackingId = await activity.observe(botName, contextFields.trackingId);
     contextFields = { ...contextFields, trackingId: trackingId || contextFields.trackingId };
   }
-  return runWithContext({ botName, ...contextFields }, () =>
+  // A queue message's run is a child of the run that queued its action; a standalone job's
+  // trigger (scheduled vs manual) comes from its CronJob env.
+  const { triggerType, trigger } = contextFields.queueName
+    ? {
+        triggerType: "queue",
+        trigger: { queue: contextFields.queueName, tracking_id: contextFields.trackingId },
+      }
+    : runLog.triggerFromEnv();
+  const parentRunId = contextFields.queueName
+    ? await runLog.parentForAction(contextFields.trackingId)
+    : process.env.RUN_PARENT_ID || null;
+  const runSummary = {};
+  return runWithContext({ botName, ...contextFields, runSummary }, () =>
     tracer.startActiveSpan(`bot.${botName}`, async (span) => {
       const startedAt = Date.now();
+      const runId = await runLog.startRun({
+        jobName: botName,
+        triggerType,
+        trigger,
+        parentRunId,
+        traceId: span.spanContext().traceId,
+      });
+      updateContext({ runId });
       span.setAttributes({
         "worker.bot_name": botName,
         ...(contextFields.trackingId && {
@@ -37,6 +58,7 @@ async function withInstrumentation(botName, contextFields, handler) {
           traceId: span.spanContext().traceId,
         });
         await activity.event("worker_finished", { result: result || null }, "finished");
+        await runLog.finishRun(runId, "success", { summary: runSummary });
         return result;
       } catch (error) {
         span.recordException(error);
@@ -55,6 +77,7 @@ async function withInstrumentation(botName, contextFields, handler) {
           { message: error.message, permanent: Boolean(error.permanent) },
           "failed",
         );
+        await runLog.finishRun(runId, "failure", { error: error.message, summary: runSummary });
         throw error;
       } finally {
         span.end();
