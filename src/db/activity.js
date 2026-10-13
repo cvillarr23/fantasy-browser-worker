@@ -5,6 +5,7 @@ const { randomUUID, createHash } = require("crypto");
 const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { getContext } = require("../telemetry/context");
 const { logger } = require("../telemetry/logger");
+const runLog = require("./run_log");
 const ACTIVITY_POOL_LIMIT = 2;
 const DATABASE_CONNECT_TIMEOUT_MS = 5000;
 const MIN_REDACTED_SECRET_LENGTH = 8;
@@ -153,6 +154,7 @@ async function startSession(title) {
       "INSERT INTO activity_sessions(id,league_id,action_id,title) VALUES($1,$2,$3,$4)",
       [id, process.env.ESPN_LEAGUE_ID || "", getContext().trackingId || null, title],
     );
+    await runLog.link("llm_session", [id], "output");
     return id;
   } catch (err) {
     logger.error("Could not record LLM session", { err });
