@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   promote-next:
-    runs-on: ubuntu-latest
+    runs-on: fantasy-runners
     # Repo default workflow permissions are read-only, which 403s every issues call below (#118,
     # same as #111). issues:write covers the reads plus the addLabels/createComment writes.
     permissions:

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   check-linked-issue:
-    runs-on: ubuntu-latest
+    runs-on: fantasy-runners
     # Repo default workflow permissions are read-only, which 403s the closingIssuesReferences
     # query below. issues:write is also needed for the addLabels/createComment calls.
     permissions:
