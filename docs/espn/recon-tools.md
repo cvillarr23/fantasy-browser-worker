@@ -112,7 +112,7 @@ Any bot can call `captureDebugSnapshot(page, label)` to overwrite `debug-<label>
 | Capture | Blocked on |
 |---|---|
 | Successful free-agent add and in-window waiver claim | Approval and a free agent worth adding. Use `waiver_recon.js --watch-save`. |
-| Full-roster add-only rejection | The roster must be full again (16 non-IR players) and the target a confirmed free agent. A pre-check on 10-10 found one IR slot filled, so an add would just succeed. |
+| Full-roster add-only rejection | The roster must be full (16 non-IR players) and the target a confirmed free agent. A pre-check on 10-10 found one IR slot filled, so an add would just succeed. One on 10-13 found the roster full again, but the target back on waivers until 10-14 07:00 UTC. Nothing was sent either time. |
 | Healthy player blocking IR | The state must occur naturally. |
 | Trade accept, decline and Decline & Counter | A real incoming offer. See [Trades](trades.md#whats-still-to-capture). |
 | Draft board with picks on it | A real draft. Read the `draft_dom_observer` miss logs. |
