@@ -23,6 +23,8 @@ const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require(".
 const { requirePlayerId } = require("../lib/espn_ids");
 const SELECTORS = require("../selectors/espn_selectors.json");
 const { resolveDryRun } = require("../lib/env");
+const { notify } = require("../lib/notify");
+const { tradeAwaitingApproval } = require("../lib/notifications");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -689,6 +691,7 @@ async function submitTradeOffer(
         screenshotPath,
         reasons: closedLocks,
       });
+      if (status === "awaiting_approval") await notify(tradeAwaitingApproval({ offerKey, offer, source }));
       return {
         status,
         offerKey,

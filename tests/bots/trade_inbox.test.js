@@ -80,7 +80,30 @@ beforeEach(() => {
     readHistory: jest.fn().mockResolvedValue([]),
     score: jest.fn().mockResolvedValue({ ok: true, body: scoreBody() }),
     store: memoryStore(),
+    notify: jest.fn(async () => "sent"),
   };
+});
+
+describe("refreshTradeInbox: notifications", () => {
+  it("announces an offer the first time it is stored", async () => {
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.notify).toHaveBeenCalledTimes(1);
+    expect(deps.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "New trade offer from team 3", path: "/inbox?offer=tx-1" }),
+    );
+  });
+
+  it("stays quiet on later refreshes of the same offer", async () => {
+    await refreshTradeInbox({ persist: true }, deps);
+    deps.notify.mockClear();
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.notify).not.toHaveBeenCalled();
+  });
+
+  it("never notifies from a read-only check", async () => {
+    await refreshTradeInbox({ persist: false }, deps);
+    expect(deps.notify).not.toHaveBeenCalled();
+  });
 });
 
 describe("refreshTradeInbox", () => {
