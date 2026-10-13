@@ -5,6 +5,16 @@ const { recordExecution } = require("../db/execution_log");
 const runLog = require("../db/run_log");
 
 const tracer = trace.getTracer("fantasy-browser-worker");
+// A bot's return value is its outcome on the run's page; keep it small enough for a summary.
+const MAX_RUN_RESULT_CHARS = 4000;
+
+function boundedResult(result) {
+  if (result === undefined || result === null) return null;
+  const encoded = JSON.stringify(activity.redact(result));
+  return encoded.length > MAX_RUN_RESULT_CHARS
+    ? { preview: encoded.slice(0, MAX_RUN_RESULT_CHARS), truncated: true }
+    : JSON.parse(encoded);
+}
 
 // The one wrapper every bot/entrypoint needs: seeds the MDC context, opens a span, times
 // execution, classifies success/failure (respecting PermanentError via error.permanent), and
@@ -58,7 +68,9 @@ async function withInstrumentation(botName, contextFields, handler) {
           traceId: span.spanContext().traceId,
         });
         await activity.event("worker_finished", { result: result || null }, "finished");
-        await runLog.finishRun(runId, "success", { summary: runSummary });
+        await runLog.finishRun(runId, "success", {
+          summary: { result: boundedResult(result), ...runSummary },
+        });
         return result;
       } catch (error) {
         span.recordException(error);

@@ -288,7 +288,12 @@ describe("runRumorDigest", () => {
     expect(result).toEqual({ processed: 1, written: 1 });
     expect(runLog.link).toHaveBeenCalledWith("raw_signal", [10], "input");
     expect(runLog.link).toHaveBeenCalledWith("rumor_signal", [77], "output");
-    expect(runLog.addSummary).toHaveBeenCalledWith(expect.objectContaining({ parse_retries: 1 }));
+    expect(runLog.addSummary).toHaveBeenCalledWith(
+      expect.objectContaining({
+        parse_retries: 1,
+        headline: "1 articles → 1 evaluations (1 malformed LLM response(s) retried)",
+      }),
+    );
   });
 
   it("makes one completeWithFallback call per chunk and stamps every row with the run's overall maxRawSignalId, not the chunk's own max", async () => {
