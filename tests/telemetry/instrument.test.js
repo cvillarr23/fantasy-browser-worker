@@ -1,4 +1,8 @@
-jest.mock("../../src/db/activity", () => ({ observe: jest.fn(async (bot, id) => id), event: jest.fn() }));
+jest.mock("../../src/db/activity", () => ({
+  observe: jest.fn(async (bot, id) => id),
+  event: jest.fn(),
+  redact: (value) => value,
+}));
 jest.mock("../../src/db/execution_log", () => ({ recordExecution: jest.fn() }));
 jest.mock("../../src/db/run_log", () => ({
   triggerFromEnv: jest.fn(() => ({ triggerType: "schedule", trigger: { cronjob: "rumor-digest-bot" } })),
@@ -15,6 +19,7 @@ it("records a queue run as a child of the run that queued the action", async () 
   await withInstrumentation("lineup_bot", { queueName: "lineup_updates", trackingId: "action-1" }, async () => {
     expect(getContext().runId).toBe("run-1");
     runLog.addSummary({ swaps: 2 });
+    return { submitted: true };
   });
   expect(runLog.parentForAction).toHaveBeenCalledWith("action-1");
   expect(runLog.startRun).toHaveBeenCalledWith(
@@ -25,7 +30,9 @@ it("records a queue run as a child of the run that queued the action", async () 
       parentRunId: "queueing-run",
     }),
   );
-  expect(runLog.finishRun).toHaveBeenCalledWith("run-1", "success", { summary: { swaps: 2 } });
+  expect(runLog.finishRun).toHaveBeenCalledWith("run-1", "success", {
+    summary: { result: { submitted: true }, swaps: 2 },
+  });
 });
 
 it("records a scheduled job's failure and still rethrows", async () => {

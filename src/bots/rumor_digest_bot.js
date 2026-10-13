@@ -276,6 +276,7 @@ async function runRumorDigest() {
     logger.info(
       `[Rumor Digest] No new raw signals since watermark ${watermark ?? "<none>"} — skipping LLM call.`,
     );
+    runLog.addSummary({ headline: "No new articles since the last digest", raw_signals: 0 });
     return { processed: 0, written: 0 };
   }
 
@@ -333,6 +334,9 @@ async function runRumorDigest() {
   );
 
   runLog.addSummary({
+    headline:
+      `${rawSignals.length} articles → ${rows.length} evaluations` +
+      (parseRetries ? ` (${parseRetries} malformed LLM response(s) retried)` : ""),
     raw_signals: rawSignals.length,
     chunks: chunks.length,
     written: rows.length,
