@@ -22,6 +22,8 @@ const { createAuthenticatedSession, createSessionFromStoredState } = require("./
 const { readPendingTrades, readTradeHistory } = require("./espn_api");
 const { readSeason, resolvePeriod } = require("./trade_scan");
 const { loadInbox, updateEntry, setTriage } = require("../db/trade_inbox");
+const { notify } = require("../lib/notify");
+const { incomingTradeOffer } = require("../lib/notifications");
 const {
   STATUS,
   LIVE_STATUSES,
@@ -121,6 +123,7 @@ const defaultDeps = () => ({
   readHistory: readTradeHistory,
   score: postTradeScore,
   store: { load: loadInbox, update: updateEntry },
+  notify,
 });
 
 function requireLeagueAndTeam() {
@@ -275,11 +278,16 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
     const entries = [];
     for (const freshEntry of fresh) {
       const apply = applyRead(freshEntry);
-      entries.push(
-        persist
-          ? await deps.store.update(freshEntry.espn_transaction_id, scope, apply)
-          : apply(null),
-      );
+      if (!persist) {
+        entries.push(apply(null));
+        continue;
+      }
+      const saved = await deps.store.update(freshEntry.espn_transaction_id, scope, apply);
+      entries.push(saved);
+      // First sighting of an offer: the stored snapshot didn't have it.
+      if (!storedById.has(freshEntry.espn_transaction_id)) {
+        await deps.notify(incomingTradeOffer(saved ?? freshEntry));
+      }
     }
 
     const exits = [];

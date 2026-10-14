@@ -63,6 +63,36 @@ the Grafana dashboard.
 a single `completeWithFallback` call and persists structured per-player verdicts to
 `rumor_signals` — advisory only, no waiver/lineup execution.
 
+### Phone notifications (ntfy)
+
+`src/lib/notify.js` pushes to a self-hosted [ntfy](https://ntfy.sh) server, and you receive the
+pushes in the ntfy Android app. Each push is a short summary with one button. Tapping the push or
+the button opens the matching page of the web UI, and anything that needs approving is approved
+there. Pushes never call back into core.
+
+| Event | Sent from | Opens |
+| --- | --- | --- |
+| A bot run failed | `withInstrumentation` (every bot) | `/activity/runs/<run id>` |
+| ESPN session expired (urgent) | `check_espn_session` failing | `/settings` |
+| A staged trade or counter-offer needs approval | `submitTradeOffer` (`awaiting_approval`) | `/trades?offer=<offer key>` |
+| A new incoming trade offer | `trade_inbox.js --refresh` | `/inbox?offer=<ESPN transaction id>` |
+
+Configuration (all optional; with `NTFY_URL` or `NTFY_TOKEN` unset, nothing is sent):
+
+- `NTFY_URL`: the ntfy server root, e.g. `https://ntfy.roo-net.cc`.
+- `NTFY_TOKEN`: an ntfy access token with write access to the topic.
+- `NTFY_TOPIC`: defaults to `fantasy`.
+- `WEB_UI_BASE_URL`: the base for links, e.g. `https://fantasy.roo-net.cc`.
+
+Sending is best-effort and never fails a bot. Repeats are suppressed through Redis
+(`notify:<key>`):
+
+- the same bot failing with the same error, for 1 hour;
+- the same offer, for 24 hours.
+
+If Redis is unreachable, the push is sent anyway. With `DRY_RUN=true`, titles are prefixed with
+`[dry run]`.
+
 ### Trade negotiation test job (`k8s/test-trade-bot-job.yaml`)
 
 Rehearses `trade_bot.js`'s `negotiateTradeProposal` against a real pending trade. Advisory only —

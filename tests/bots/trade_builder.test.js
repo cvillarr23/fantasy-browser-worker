@@ -2,6 +2,11 @@ jest.mock("../../src/bots/auth");
 jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/debug_capture");
 jest.mock("../../src/db/execution_log");
+jest.mock("../../src/lib/notify", () => ({
+  ...jest.requireActual("../../src/lib/notify"),
+  notify: jest.fn(async () => "sent"),
+}));
+const { notify } = require("../../src/lib/notify");
 
 const {
   createAuthenticatedSession,
@@ -593,6 +598,8 @@ describe("submitTradeOffer: dry run", () => {
     expect(recordTradeOfferFill).toHaveBeenCalledWith(
       expect.objectContaining({ status: "submit_blocked", dryRun: true }),
     );
+    // Already approved: nothing for the phone to ask about.
+    expect(notify).not.toHaveBeenCalled();
     expect(browser.close).toHaveBeenCalled();
   });
 
@@ -607,6 +614,12 @@ describe("submitTradeOffer: dry run", () => {
     expect(state.clicks).not.toContain("submit");
     expect(recordTradeOfferFill).toHaveBeenCalledWith(
       expect.objectContaining({ status: "awaiting_approval", offerKey: computeOfferKey(offerFixture()) }),
+    );
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Counter-offer ready for approval",
+        path: `/trades?offer=${computeOfferKey(offerFixture())}`,
+      }),
     );
   });
 

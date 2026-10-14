@@ -3,6 +3,8 @@ const { trace, SpanStatusCode } = require("@opentelemetry/api");
 const { runWithContext, updateContext } = require("./context");
 const { recordExecution } = require("../db/execution_log");
 const runLog = require("../db/run_log");
+const { notify } = require("../lib/notify");
+const { runFailed } = require("../lib/notifications");
 
 const tracer = trace.getTracer("fantasy-browser-worker");
 // A bot's return value is its outcome on the run's page; keep it small enough for a summary.
@@ -90,6 +92,7 @@ async function withInstrumentation(botName, contextFields, handler) {
           "failed",
         );
         await runLog.finishRun(runId, "failure", { error: error.message, summary: runSummary });
+        await notify(runFailed({ botName, runId, error }));
         throw error;
       } finally {
         span.end();

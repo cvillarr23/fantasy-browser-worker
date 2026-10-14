@@ -11,7 +11,12 @@ jest.mock("../../src/db/run_log", () => ({
   finishRun: jest.fn(),
   addSummary: jest.requireActual("../../src/db/run_log").addSummary,
 }));
+jest.mock("../../src/lib/notify", () => ({
+  ...jest.requireActual("../../src/lib/notify"),
+  notify: jest.fn(async () => "sent"),
+}));
 const runLog = require("../../src/db/run_log");
+const { notify } = require("../../src/lib/notify");
 const { getContext } = require("../../src/telemetry/context");
 const { withInstrumentation } = require("../../src/telemetry/instrument");
 
@@ -44,4 +49,31 @@ it("records a scheduled job's failure and still rethrows", async () => {
   expect(runLog.parentForAction).not.toHaveBeenCalled();
   expect(runLog.startRun).toHaveBeenCalledWith(expect.objectContaining({ triggerType: "schedule" }));
   expect(runLog.finishRun).toHaveBeenCalledWith("run-1", "failure", { error: "LLM down", summary: {} });
+});
+
+it("sends one run-failed notification linked to the failed run", async () => {
+  await expect(
+    withInstrumentation("lineup_bot", { trackingId: "t" }, async () => {
+      throw new Error("roster table missing");
+    }),
+  ).rejects.toThrow("roster table missing");
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify).toHaveBeenCalledWith(
+    expect.objectContaining({ title: "lineup_bot failed", path: "/activity/runs/run-1" }),
+  );
+});
+
+it("sends the ESPN session alert instead of a generic failure", async () => {
+  await expect(
+    withInstrumentation("check_espn_session", { trackingId: "t" }, async () => {
+      throw new Error("not logged in");
+    }),
+  ).rejects.toThrow("not logged in");
+  expect(notify).toHaveBeenCalledTimes(1);
+  expect(notify).toHaveBeenCalledWith(expect.objectContaining({ title: "ESPN session expired" }));
+});
+
+it("sends nothing when the run succeeds", async () => {
+  await withInstrumentation("lineup_bot", { trackingId: "t" }, async () => ({ ok: true }));
+  expect(notify).not.toHaveBeenCalled();
 });
