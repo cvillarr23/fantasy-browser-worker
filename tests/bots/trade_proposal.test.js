@@ -300,3 +300,24 @@ test.each([null, [], {}, { season: 2026, week: 0 }])("invalid payload fails perm
   await expect(generateTradeProposal(value)).rejects.toMatchObject({ permanent: true });
   expect(fetchRosterDeficits).not.toHaveBeenCalled();
 });
+
+test("package prompt carries each player's bye week and both teams' bye crunch weeks", async () => {
+  const context = await fetchTradeContext();
+  context.teams[1].roster[0].nfl_bye_week = 8;
+  context.teams[1].bye_outlook = {
+    crunch_weeks: [8],
+    weeks: [{ week: 8, on_bye: ["100", "101"], unfilled_slots: ["RB"], crunch: true }],
+  };
+  context.teams[3].bye_outlook = { crunch_weeks: [], weeks: [] };
+  fetchTradeContext.mockResolvedValue(context);
+
+  await generateTradeProposal(payload);
+
+  const prompt = systemPrompt("trade_proposal_packages");
+  expect(prompt).toMatch(/"espn_id":"100"[^}]*"nfl_bye_week":8/);
+  expect(prompt).toContain(
+    'Our bye outlook: {"crunch_weeks":[8],"weeks_with_byes":[{"week":8,"on_bye":["Player 100","Player 101"],"empty_starter_slots":["RB"],"crunch":true}]}',
+  );
+  expect(prompt).toContain('bye outlook: {"crunch_weeks":[],"weeks_with_byes":[]}');
+  expect(prompt).toMatch(/never propose sending a player away just because he has a bye/i);
+});

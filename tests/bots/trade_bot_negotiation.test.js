@@ -394,3 +394,63 @@ describe("negotiateTradeProposal -> negotiation thread", () => {
     expect(completeWithFallback.mock.calls[0][1].systemPrompt).toContain("Negotiation history: NO_PRIOR_TURNS");
   });
 });
+
+describe("negotiateTradeProposal bye awareness", () => {
+  const OUR_OUTLOOK = {
+    crunch_weeks: [9],
+    weeks: [{ week: 9, on_bye: ["4685720"], unfilled_slots: ["WR"], crunch: true }],
+    players: [{ espn_id: "4685720", name: "Jack Bech" }],
+  };
+
+  function routeWith({ score }) {
+    global.fetch = jest.fn(async (url, init) => {
+      if (url.includes("/v1/roster/bye-outlook")) {
+        return jsonResponse(url.includes("team_id=8") ? OUR_OUTLOOK : { crunch_weeks: [], weeks: [], players: [] });
+      }
+      if (url.endsWith("/v1/trade/score")) return jsonResponse({ score });
+      return routeFetch(url, init);
+    });
+  }
+
+  it("grounds the counter prompt in both teams' bye outlooks", async () => {
+    routeWith({ score: { final_score: 2, our_lineup_gain: 2 } });
+    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
+
+    await negotiateTradeProposal(payload);
+
+    const { systemPrompt } = completeWithFallback.mock.calls[0][1];
+    expect(systemPrompt).toContain(
+      'Our bye outlook: {"crunch_weeks":[9],"weeks_with_byes":[{"week":9,"on_bye":["Jack Bech"],"empty_starter_slots":["WR"],"crunch":true}]}',
+    );
+    expect(systemPrompt).toContain('Offering team\'s bye outlook: {"crunch_weeks":[],"weeks_with_byes":[]}');
+    expect(systemPrompt).toMatch(/just because of a\s+single bye week/);
+  });
+
+  it("scores the counter in ESPN ids and never stages one that hurts us over the horizon", async () => {
+    routeWith({ score: { final_score: -3.5, our_lineup_gain: -1 } });
+
+    const result = await negotiateTradeProposal(payload);
+
+    const scoreCall = global.fetch.mock.calls.find(([url]) => url.endsWith("/v1/trade/score"));
+    expect(JSON.parse(scoreCall[1].body)).toMatchObject({
+      counterparty_team_id: "3",
+      receive_espn_ids: ["4685720"],
+      send_espn_ids: ["3139477"],
+      horizon: 4,
+    });
+    expect(submitTradeOffer).not.toHaveBeenCalled();
+    expect(result.submission).toEqual({ status: "rejected_by_score", score: -3.5 });
+  });
+
+  it("still stages a counter core can't score, for human review", async () => {
+    global.fetch = jest.fn(async (url, init) =>
+      url.endsWith("/v1/trade/score") ? jsonResponse({ detail: "down" }, 503) : routeFetch(url, init),
+    );
+    submitTradeOffer.mockResolvedValue({ status: "awaiting_approval", offerKey: "k", dryRun: true });
+
+    const result = await negotiateTradeProposal(payload);
+
+    expect(submitTradeOffer).toHaveBeenCalledTimes(1);
+    expect(result.submission.status).toBe("awaiting_approval");
+  });
+});

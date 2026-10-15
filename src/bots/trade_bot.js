@@ -14,6 +14,13 @@ const { submitTradeOffer } = require("./trade_builder");
 const { recordTradeNegotiation } = require("../db/execution_log");
 const { loadInbox } = require("../db/trade_inbox");
 const { buildThread } = require("../lib/trade_inbox");
+const {
+  SCORE_HORIZON_WEEKS,
+  fetchByeOutlook,
+  summarizeByeOutlook,
+  scoreTradePackage,
+  counterVerdict,
+} = require("../lib/trade_scoring");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -408,7 +415,14 @@ function requireEspnId(internalId, name, espnId) {
  * completeWithFallback (src/lib/llm_client.js) has no native JSON-mode opts field, so strict-JSON
  * output can only be enforced by instruction — parseNegotiationResponse below is the other half
  * of that contract, defensively handling a model that ignores it anyway. */
-function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog, history = "NO_PRIOR_TURNS" }) {
+function buildNegotiationSystemPrompt({
+  deficits,
+  evaluation,
+  proposals,
+  chatLog,
+  history = "NO_PRIOR_TURNS",
+  byeOutlooks = { ours: null, theirs: null },
+}) {
   return [
     "You are a fantasy football trade negotiation assistant. You will be given a pending trade",
     "proposal, recent league chat, this league's roster deficits by team, and a VORP-based",
@@ -429,7 +443,15 @@ function buildNegotiationSystemPrompt({ deficits, evaluation, proposals, chatLog
     "first, each with how it ended. Do not repeat a counter the other manager already declined or",
     "countered; move toward a deal both sides could accept.",
     "",
+    "The bye outlooks list, by player name, who is on an NFL bye in the coming weeks and each",
+    "team's crunch_weeks (byes leave a starter seat empty or force a below-replacement starter).",
+    "Prefer a counter that covers our crunch weeks with a player whose team plays then, and use",
+    "their crunch weeks as leverage. Never give up a player, or ask for one, just because of a",
+    "single bye week: the counter is scored over the whole horizon before it is staged.",
+    "",
     `Roster deficits: ${JSON.stringify(deficits)}`,
+    `Our bye outlook: ${JSON.stringify(byeOutlooks.ours)}`,
+    `Offering team's bye outlook: ${JSON.stringify(byeOutlooks.theirs)}`,
     `Trade evaluation: ${JSON.stringify(evaluation)}`,
     `Pending trade proposal(s): ${proposals}`,
     `Recent league chat: ${chatLog}`,
@@ -573,17 +595,26 @@ async function negotiateTradeProposal(payload) {
       offeringTeamId,
     });
 
-    const [deficits, evaluation] = await Promise.all([
+    const period = { leagueId, season, week, horizon: SCORE_HORIZON_WEEKS };
+    const [deficits, evaluation, ourOutlook, theirOutlook] = await Promise.all([
       fetchRosterDeficits({ season, week }),
       postTradeEvaluation({ incoming, outgoing, season, week }, "[Trade Negotiator]"),
+      fetchByeOutlook({ ...period, teamId: process.env.ESPN_TEAM_ID }),
+      fetchByeOutlook({ ...period, teamId: offeringTeamId }),
     ]);
 
+    const outlookNames = (outlook) =>
+      Object.fromEntries((outlook?.players || []).map((player) => [player.espn_id, player.name]));
     const systemPrompt = buildNegotiationSystemPrompt({
       deficits,
       evaluation,
       proposals,
       chatLog,
       history: formatNegotiationHistory(thread),
+      byeOutlooks: {
+        ours: summarizeByeOutlook(ourOutlook, outlookNames(ourOutlook)),
+        theirs: summarizeByeOutlook(theirOutlook, outlookNames(theirOutlook)),
+      },
     });
     const { text } = await completeWithFallback(
       "Propose a counter-offer for the pending trade described above.",
@@ -607,6 +638,26 @@ async function negotiateTradeProposal(payload) {
         await resolveEspnPlayerIds(counterOffer.incomingPlayerIds),
         await resolveEspnPlayerIds(counterOffer.outgoingPlayerIds),
       ];
+      // Same deterministic, bye-aware horizon score as generated proposals: a counter that
+      // leaves us worse off over the horizon is never staged.
+      const verdict = counterVerdict(
+        await scoreTradePackage({
+          ...period,
+          ourTeamId: process.env.ESPN_TEAM_ID,
+          tradePackage: {
+            to_team_id: offeringTeamId,
+            incoming_player_ids: incomingEspnIds,
+            outgoing_player_ids: outgoingEspnIds,
+          },
+        }),
+      );
+      if (!verdict.stage) {
+        logger.warn(
+          `[Trade Negotiator][${tracking}] Counter scores ${verdict.value} for us over the horizon; ` +
+            "not staging it.",
+        );
+        return { ...negotiation, submission: { status: "rejected_by_score", score: verdict.value } };
+      }
       submission = await submitTradeOffer(
         {
           leagueId,

@@ -72,6 +72,52 @@ async function fetchTradeContext({ leagueId, season, week, horizon }) {
   }
 }
 
+/**
+ * One team's NFL bye outlook (GET /v1/roster/bye-outlook): crunch weeks where byes leave a starter
+ * seat empty or force a below-replacement starter. Prompt grounding only, so it is best-effort: a
+ * failure returns null and the caller carries on without it.
+ */
+async function fetchByeOutlook({ leagueId, season, week, horizon, teamId }) {
+  const query = new URLSearchParams({
+    league_id: leagueId,
+    team_id: String(teamId),
+    season: String(season),
+    week: String(week),
+    horizon: String(horizon),
+  });
+  try {
+    const response = await fetch(`${CORE_PIPELINE_URL}/v1/roster/bye-outlook?${query}`, {
+      signal: AbortSignal.timeout(
+        timeoutMs("TRADE_CONTEXT_TIMEOUT_MS", DEFAULT_TRADE_CONTEXT_TIMEOUT_MS),
+      ),
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Prompt-sized view of a bye outlook (core's TeamByeOutlook, or a trade-context team's
+ * bye_outlook): the crunch weeks plus every week someone is on bye, by player name. Returns null
+ * for anything that isn't an outlook, so callers never ground a prompt in a malformed one.
+ */
+function summarizeByeOutlook(outlook, nameByEspnId = {}) {
+  if (!outlook || !Array.isArray(outlook.weeks) || !Array.isArray(outlook.crunch_weeks)) return null;
+  return {
+    crunch_weeks: outlook.crunch_weeks,
+    weeks_with_byes: outlook.weeks
+      .filter((week) => Array.isArray(week.on_bye) && week.on_bye.length)
+      .map((week) => ({
+        week: week.week,
+        on_bye: week.on_bye.map((id) => nameByEspnId[id] || `ESPN player ${id}`),
+        empty_starter_slots: week.unfilled_slots || [],
+        crunch: Boolean(week.crunch),
+      })),
+  };
+}
+
 function rejectionForStatus(status) {
   if (status === HTTP_CONFLICT) return "ownership_changed";
   if (status >= HTTP_CLIENT_ERROR_MIN && status < HTTP_SERVER_ERROR_MIN && status !== HTTP_TOO_MANY_REQUESTS)
@@ -221,6 +267,10 @@ function buildPitchEvidence(score) {
       "/roster_impact/counterparty/total_delta",
       `Across the evaluated weeks your starting lineup changes by ${signed(theirs.total_delta)}`,
     );
+  // Weeks where the counterparty's byes would leave a hole that this trade fills.
+  (score.bye_coverage?.counterparty?.fixed || []).forEach((week, index) =>
+    add(`/bye_coverage/counterparty/fixed/${index}`, `This trade covers your week ${week} bye crunch`),
+  );
   score.horizon.unscored_weeks.forEach((week, index) =>
     add(`/horizon/unscored_weeks/${index}`, `Week ${week.week} could not be evaluated (${week.reasons.join(", ")})`),
   );
@@ -248,6 +298,18 @@ function validatePitch(pitch, evidence) {
   if (invented.length)
     throw new Error(`[Trade Scoring] Pitch states numbers not in its evidence: ${invented.join(", ")}`);
   return { message, cited_evidence_ids: cited };
+}
+
+/**
+ * Whether a negotiated counter is worth staging, from its scoreTradePackage result. A counter that
+ * scores below zero for us over the horizon (byes included) is never staged. One that can't be
+ * scored is staged as before, since a human still reviews every counter.
+ */
+function counterVerdict(result) {
+  const terms = result?.status === "scored" ? result.score?.score : null;
+  const value = terms ? (terms.final_score ?? terms.our_lineup_gain) : null;
+  if (typeof value !== "number") return { stage: true, scored: false };
+  return { stage: value >= 0, scored: true, value };
 }
 
 function buildEvaluation({ request, score, target, ranking, pitch, evidence, evaluatedAt }) {
@@ -281,8 +343,11 @@ module.exports = {
   EVALUATION_VERSION,
   packageKey,
   fetchTradeContext,
+  fetchByeOutlook,
+  summarizeByeOutlook,
   scoreTradePackage,
   rankScoredPackages,
+  counterVerdict,
   buildPitchEvidence,
   validatePitch,
   buildEvaluation,

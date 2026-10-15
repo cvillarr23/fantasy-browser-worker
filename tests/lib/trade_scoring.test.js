@@ -3,8 +3,11 @@ const {
   MAX_EVALUATION_BYTES,
   packageKey,
   fetchTradeContext,
+  fetchByeOutlook,
+  summarizeByeOutlook,
   scoreTradePackage,
   rankScoredPackages,
+  counterVerdict,
   buildPitchEvidence,
   validatePitch,
   buildEvaluation,
@@ -239,5 +242,77 @@ describe("buildEvaluation", () => {
   test("fails closed when it would exceed the size budget", () => {
     expect(evaluationFits(evaluation)).toBe(true);
     expect(evaluationFits({ ...evaluation, padding: "x".repeat(MAX_EVALUATION_BYTES) })).toBe(false);
+  });
+});
+
+
+const OUTLOOK = {
+  crunch_weeks: [8],
+  weeks: [
+    { week: 7, on_bye: [], unfilled_slots: [], crunch: false },
+    { week: 8, on_bye: ["101", "102"], unfilled_slots: ["RB"], crunch: true },
+  ],
+};
+
+describe("bye outlooks", () => {
+  test("summarizeByeOutlook keeps crunch weeks and names who is on bye", () => {
+    expect(summarizeByeOutlook(OUTLOOK, { 101: "Back One" })).toEqual({
+      crunch_weeks: [8],
+      weeks_with_byes: [
+        { week: 8, on_bye: ["Back One", "ESPN player 102"], empty_starter_slots: ["RB"], crunch: true },
+      ],
+    });
+  });
+
+  test("summarizeByeOutlook refuses anything that isn't an outlook", () => {
+    expect(summarizeByeOutlook(null)).toBeNull();
+    expect(summarizeByeOutlook({ delta_vorp: 1 })).toBeNull();
+  });
+
+  test("fetchByeOutlook asks core for one team's horizon and is best-effort", async () => {
+    global.fetch = jest.fn(async () => ({ ok: true, json: async () => OUTLOOK }));
+    const outlook = await fetchByeOutlook({ leagueId: "123", season: 2026, week: 7, horizon: 4, teamId: "3" });
+    expect(outlook).toBe(OUTLOOK);
+    const url = global.fetch.mock.calls[0][0];
+    expect(url).toContain("/v1/roster/bye-outlook?");
+    expect(url).toContain("team_id=3");
+    expect(url).toContain("horizon=4");
+
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503 }));
+    expect(await fetchByeOutlook({ leagueId: "123", season: 2026, week: 7, horizon: 4, teamId: "3" })).toBeNull();
+    global.fetch = jest.fn(async () => {
+      throw new Error("down");
+    });
+    expect(await fetchByeOutlook({ leagueId: "123", season: 2026, week: 7, horizon: 4, teamId: "3" })).toBeNull();
+    delete global.fetch;
+  });
+
+  test("pitch evidence says which of their bye crunch weeks the trade covers", () => {
+    const score = {
+      ...makeScore(),
+      bye_coverage: {
+        us: { crunch_weeks_before: [], crunch_weeks_after: [], fixed: [], created: [] },
+        counterparty: { crunch_weeks_before: [9], crunch_weeks_after: [], fixed: [9], created: [] },
+      },
+    };
+    const item = buildPitchEvidence(score).find((e) => e.text.includes("bye crunch"));
+    expect(item.text).toBe("This trade covers your week 9 bye crunch");
+    expect(resolvePointer(score, item.path)).toBe(9);
+  });
+});
+
+describe("counterVerdict", () => {
+  const scored = (score) => ({ status: "scored", score: makeScore({ score }) });
+
+  test("never stages a counter that scores below zero for us", () => {
+    expect(counterVerdict(scored({ final_score: -2 }))).toEqual({ stage: false, scored: true, value: -2 });
+  });
+
+  test("falls back to our lineup gain when the weighted score is unavailable", () => {
+    expect(counterVerdict(scored({ final_score: null, our_lineup_gain: 1.5 }))).toMatchObject({ stage: true, value: 1.5 });
+  });
+
+  test("stages an unscorable counter for human review as before", () => {
+    expect(counterVerdict({ status: "rejected", reason: "score_unavailable" })).toEqual({ stage: true, scored: false });
   });
 });
