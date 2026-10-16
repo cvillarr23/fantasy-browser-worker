@@ -286,7 +286,8 @@ test("staging failure returns the computed offer without regenerating", async ()
     offer: { toTeamId: "3" },
     submission: { status: "fill_failed" },
   });
-  expect(completeWithFallback).toHaveBeenCalledTimes(2);
+  // One package call, then a pitch for each of the two staged alternatives.
+  expect(completeWithFallback).toHaveBeenCalledTimes(3);
   expect(close).toHaveBeenCalled();
 });
 
@@ -320,4 +321,54 @@ test("package prompt carries each player's bye week and both teams' bye crunch w
   );
   expect(prompt).toContain('bye outlook: {"crunch_weeks":[],"weeks_with_byes":[]}');
   expect(prompt).toMatch(/never propose sending a player away just because he has a bye/i);
+});
+
+test("stages the best package for each counterparty as alternatives, best first", async () => {
+  packages = [pkg("2", ["200"], ["100"]), pkg("3", ["300"], ["101"]), pkg("3", ["300"], ["100"])];
+  pitch = () => ({ message: "This deal helps your lineup.", cited_evidence_ids: ["e1"] });
+
+  const result = await generateTradeProposal(payload);
+
+  expect(submitTradeOffer.mock.calls.map(([offer]) => offer.toTeamId)).toEqual(["3", "2"]);
+  expect(result.offers.map((offer) => offer.evaluation.ranking.rank)).toEqual([1, 2]);
+  expect(result.offer.toTeamId).toBe("3");
+  expect(close).toHaveBeenCalledTimes(1);
+});
+
+test("a rejected pitch skips that alternative and still stages the rest", async () => {
+  let calls = 0;
+  pitch = () => (++calls === 1
+    ? { message: "Trust me, 99 points.", cited_evidence_ids: ["e1"] }
+    : { message: "This deal helps your lineup.", cited_evidence_ids: ["e1"] });
+
+  const result = await generateTradeProposal(payload);
+
+  expect(result.offers).toHaveLength(1);
+  expect(submitTradeOffer).toHaveBeenCalledTimes(1);
+});
+
+test("with bye crunch weeks, teams whose byes miss ours are added as bye partners", async () => {
+  fetchRosterDeficits.mockResolvedValue({
+    teams: {
+      1: {},
+      // Least severe last: 5 and 6 miss the top three.
+      2: { RB: { deficit: 1, net_vorp: -5 } },
+      3: { RB: { deficit: 1, net_vorp: -4 } },
+      4: { RB: { deficit: 1, net_vorp: -3 } },
+      5: { RB: { deficit: 1, net_vorp: -2 } },
+      6: { RB: { deficit: 1, net_vorp: -1 } },
+    },
+  });
+  const context = await fetchTradeContext();
+  context.teams[1].bye_outlook = { crunch_weeks: [8], weeks: [] };
+  context.teams[5] = { ...team("5", [player("500", "RB")]), bye_outlook: { crunch_weeks: [8], weeks: [] } };
+  context.teams[6] = { ...team("6", [player("600", "RB")]), bye_outlook: { crunch_weeks: [9], weeks: [] } };
+  context.teams[4] = team("4", [player("400", "RB")]);
+  fetchTradeContext.mockResolvedValue(context);
+
+  await generateTradeProposal(payload);
+
+  const prompt = systemPrompt("trade_proposal_packages");
+  expect(prompt).toMatch(/Team 6 weakness: \{[^}]*"bye_partner":true/);
+  expect(prompt).not.toContain("Team 5 weakness");
 });

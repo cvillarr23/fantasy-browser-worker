@@ -157,14 +157,16 @@ async function runTradeScan(
       tracking_id: trackingId,
       ...(excluded.length ? { exclude_team_ids: excluded } : {}),
     });
-    if (result.submission?.status === "fill_failed")
-      throw new Error(`Trade scan staging failed: ${result.submission.error}`);
+    const offers = result.offers ?? (result.submission ? [result] : []);
+    const failed = offers.find((offer) => offer.submission?.status === "fill_failed");
+    if (failed) throw new Error(`Trade scan staging failed: ${failed.submission.error}`);
     return {
       status: result.status || "proposal",
       ...(result.reason ? { reason: result.reason } : {}),
       ...period,
       scanKey: key,
       submissionStatus: result.submission?.status,
+      offersStaged: offers.length,
     };
   } finally {
     if (ownedPool) await ownedPool.end();

@@ -122,6 +122,14 @@ test("staging failure fails the job without retrying generation", async () => {
   expect(deps.generate).toHaveBeenCalledTimes(1);
   expect(deps.claim).toHaveBeenCalledTimes(1);
 });
+test("a staging failure on any alternative fails the job; the count reports every offer", async () => {
+  const staged = { submission: { status: "awaiting_approval" } };
+  deps.generate.mockResolvedValue({ ...staged, offers: [staged, { submission: { status: "fill_failed", error: "DOM2" } }] });
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("DOM2");
+
+  deps.generate.mockResolvedValue({ ...staged, offers: [staged, staged] });
+  await expect(runTradeScan({ stage: true }, deps)).resolves.toMatchObject({ offersStaged: 2 });
+});
 test("generation failure is not retried", async () => {
   deps.generate.mockRejectedValue(new Error("LLM"));
   await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("LLM");
