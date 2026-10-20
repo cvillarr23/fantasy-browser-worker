@@ -71,6 +71,18 @@ async function dispatch(queueName, payload) {
 // Centralized transaction dispatcher mapping queue events straight to automation targets
 async function handleIncomingMessage(queueName, payload) {
   logger.info(`Routing task parameters for queue event: "${queueName}"`);
+  // The Sleeper ingestor shares waiver_actions for injury alerts (Sleeper ids, no drop, any
+  // league-rostered player). They are not claims, so ack them before an activity row exists.
+  if (
+    queueName === "waiver_actions" &&
+    payload &&
+    payload.event_type === "INJURY_STATUS_CHANGE"
+  ) {
+    logger.info(
+      `Injury alert for ${payload.name || payload.player_id} is not a waiver claim; acking.`,
+    );
+    return true;
+  }
   if (!(await activity.claim(queueName, payload))) return true;
   try {
   if (
