@@ -6,6 +6,7 @@ const { fetchRosterDeficits } = require("./trade_bot");
 const { findTradeTargets } = require("../lib/trade_targets");
 const { completeWithFallback } = require("../lib/llm_client");
 const { submitTradeOffer } = require("./trade_builder");
+const { fetchTradeCandidates, selectCandidatePackages } = require("../lib/trade_candidates");
 const { PLAYER_ID_PATTERN } = require("../lib/espn_ids");
 const {
   SCORE_HORIZON_WEEKS,
@@ -22,8 +23,8 @@ const {
 const { logger } = require("../telemetry/logger");
 const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
 
-// Bounds one scan to 2 LLM calls and at most this many score calls, inside trade_scan.js's
-// runtime limit, while still giving the ranking real alternatives to compare.
+// Bounds fallback target selection and package scoring inside the scan runtime limit,
+// while still giving the ranking real alternatives to compare.
 const MAX_TARGET_TEAMS = 3;
 // Extra targets when we have bye crunch weeks: teams whose own crunch weeks miss ours, so
 // they can spare a starter for our empty weeks.
@@ -272,24 +273,38 @@ async function generateTradeProposal(payload) {
   const trackingId = payload.tracking_id ?? "no-tracking-id";
   let session;
   try {
-    const deficits = await fetchRosterDeficits({ season, week });
     const excluded = new Set(payload.exclude_team_ids || []);
-    if (!selectTargets(deficits, fromTeamId, excluded).length) return { status: "no_target" };
-
     const period = { leagueId, season, week, horizon: SCORE_HORIZON_WEEKS };
-    const context = await fetchTradeContext(period);
-    if (!context?.teams?.[fromTeamId])
-      throw new PermanentError(`[Trade Proposal] Our team ${fromTeamId} is missing from the trade context.`);
-    const targets = selectTargets(deficits, fromTeamId, excluded, context);
-    if (!targets.length) return { status: "no_target" };
-    const [topTarget] = targets;
-    const grounding = { targets, context, fromTeamId };
-
-    const { text } = await completeWithFallback(
-      "Propose candidate trade packages for the identified weaknesses.",
-      { systemPrompt: buildPackageSystemPrompt(grounding), callSite: "trade_proposal_packages" },
-    );
-    const { packages, invalid } = parsePackagesResponse(text, grounding);
+    const candidates = await fetchTradeCandidates(period);
+    const source = candidates.status === "available" ? "candidates" : "llm";
+    logger.info("[Trade Proposal] Selected package source", {
+      trackingId, source, fallbackReason: candidates.reason, computedAt: candidates.computedAt,
+    });
+    let packages;
+    let invalid = [];
+    let topTarget;
+    if (source === "candidates") {
+      const context = await fetchTradeContext(period);
+      packages = selectCandidatePackages(candidates.items, { fromTeamId, excluded, context });
+      if (!packages.length) return { status: "no_target" };
+      const [bestCandidate] = packages;
+      topTarget = bestCandidate.target;
+    } else {
+      const deficits = await fetchRosterDeficits({ season, week });
+      if (!selectTargets(deficits, fromTeamId, excluded).length) return { status: "no_target" };
+      const context = await fetchTradeContext(period);
+      if (!context?.teams?.[fromTeamId])
+        throw new PermanentError(`[Trade Proposal] Our team ${fromTeamId} is missing from the trade context.`);
+      const targets = selectTargets(deficits, fromTeamId, excluded, context);
+      if (!targets.length) return { status: "no_target" };
+      [topTarget] = targets;
+      const grounding = { targets, context, fromTeamId };
+      const { text } = await completeWithFallback(
+        "Propose candidate trade packages for the identified weaknesses.",
+        { systemPrompt: buildPackageSystemPrompt(grounding), callSite: "trade_proposal_packages" },
+      );
+      ({ packages, invalid } = parsePackagesResponse(text, grounding));
+    }
     if (!packages.length)
       return noOffer(invalid.length ? "no_valid_packages" : "no_packages", topTarget, invalid);
 
@@ -315,6 +330,7 @@ async function generateTradeProposal(payload) {
     if (!ranked.length) return noOffer("no_useful_offer", topTarget, allRejections);
 
     const ranking = {
+      source,
       packages_proposed: packages.length + invalid.length,
       packages_scored: scored.length,
       packages_eligible: ranked.length,
