@@ -5,6 +5,10 @@ jest.mock("../../src/bots/auth", () => ({
 jest.mock("../../src/bots/trade_bot", () => ({
   fetchRosterDeficits: jest.fn(),
 }));
+jest.mock("../../src/lib/trade_candidates", () => ({
+  ...jest.requireActual("../../src/lib/trade_candidates"),
+  fetchTradeCandidates: jest.fn(),
+}));
 jest.mock("../../src/lib/llm_client", () => ({
   completeWithFallback: jest.fn(),
 }));
@@ -16,6 +20,7 @@ jest.mock("../../src/lib/trade_scoring", () => ({
   fetchTradeContext: jest.fn(),
   scoreTradePackage: jest.fn(),
 }));
+const { fetchTradeCandidates } = require("../../src/lib/trade_candidates");
 const { generateTradeProposal } = require("../../src/bots/trade_proposal");
 const { createSessionFromStoredState } = require("../../src/bots/auth");
 const { fetchRosterDeficits } = require("../../src/bots/trade_bot");
@@ -55,6 +60,7 @@ let pitch;
 let scores;
 beforeEach(() => {
   jest.resetAllMocks();
+  fetchTradeCandidates.mockResolvedValue({ status: "fallback", reason: "empty" });
   process.env.ESPN_LEAGUE_ID = "123";
   process.env.ESPN_TEAM_ID = "1";
   fetchRosterDeficits.mockResolvedValue({
@@ -371,4 +377,99 @@ test("with bye crunch weeks, teams whose byes miss ours are added as bye partner
   const prompt = systemPrompt("trade_proposal_packages");
   expect(prompt).toMatch(/Team 6 weakness: \{[^}]*"bye_partner":true/);
   expect(prompt).not.toContain("Team 5 weakness");
+});
+
+const useCandidates = (items = [
+  { counterparty: { team_id: "3" }, receive: [{ espn_id: "300", player_id: "wrong-id" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },
+  { counterparty: { team_id: "2" }, receive: [{ espn_id: "200" }], send: [{ espn_id: "100" }], status: "proposable", final_score: 9 },
+]) => {
+  pitch = () => ({ message: "This deal helps your lineup.", cited_evidence_ids: ["e1"] });
+  return fetchTradeCandidates.mockResolvedValue({ status: "available", computedAt: "2026-10-20T12:00:00Z", items });
+};
+
+test("fresh candidates stage evaluated alternatives with live scores and only LLM pitches", async () => {
+  useCandidates();
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["3", "2"]);
+  expect(result.evaluation).toMatchObject({
+    request: { counterparty_team_id: "3" }, score: scores[3],
+    ranking: { source: "candidates", packages_proposed: 2, packages_scored: 2, packages_eligible: 2 },
+  });
+  expect(completeWithFallback.mock.calls.map(([, opts]) => opts.callSite)).toEqual([
+    "trade_proposal_pitch", "trade_proposal_pitch",
+  ]);
+  expect(scoreTradePackage.mock.calls[0][0]).toEqual({
+    leagueId: "123", season: 2026, week: 5, horizon: 4, ourTeamId: "1",
+    tradePackage: { to_team_id: "3", incoming_player_ids: ["300"], outgoing_player_ids: ["101"] },
+  });
+  expect(submitTradeOffer).toHaveBeenCalledTimes(2);
+});
+
+test("candidates can stage even when no deficit target exists", async () => {
+  useCandidates();
+  fetchRosterDeficits.mockResolvedValue({ teams: {} });
+  const result = await generateTradeProposal(payload);
+  expect(result.offers).toHaveLength(2);
+  expect(fetchRosterDeficits).not.toHaveBeenCalled();
+});
+
+test("candidate exclusions apply before scoring", async () => {
+  useCandidates();
+  const result = await generateTradeProposal({ ...payload, exclude_team_ids: ["3"] });
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(scoreTradePackage.mock.calls.map(([args]) => args.tradePackage.to_team_id)).toEqual(["2"]);
+});
+
+test.each(["ownership_changed", "score_unavailable"])("a live %s skips that candidate and stages the surviving alternative", async (reason) => {
+  useCandidates();
+  scoreTradePackage.mockResolvedValueOnce({ status: "rejected", reason });
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(result.evaluation.ranking.source).toBe("candidates");
+  expect(completeWithFallback.mock.calls.map(([, opts]) => opts.callSite)).toEqual(["trade_proposal_pitch"]);
+});
+
+test.each([
+  { ourWeeks: [lineupWeek(5, 0)] },
+  { theirWeeks: [lineupWeek(5, -1)] },
+  { exceeds: { us: true, counterparty: false } },
+  { unmappedTraded: ["300"] },
+])("live gate drift skips that candidate: %j", async (drift) => {
+  useCandidates();
+  scores[3] = makeScore(drift);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(completeWithFallback.mock.calls.map(([, opts]) => opts.callSite)).toEqual(["trade_proposal_pitch"]);
+});
+
+test("all live candidates failing gates stages nothing without generating replacements", async () => {
+  useCandidates();
+  scoreTradePackage.mockResolvedValue({ status: "rejected", reason: "ownership_changed" });
+  await expect(generateTradeProposal(payload)).resolves.toMatchObject({ status: "no_offer", reason: "no_useful_offer" });
+  expect(completeWithFallback).not.toHaveBeenCalled();
+  expect(submitTradeOffer).not.toHaveBeenCalled();
+});
+
+test.each(["never_run", "unavailable", "empty", "stale", "invalid"])("%s candidate data uses the LLM fallback and records its source", async (reason) => {
+  fetchTradeCandidates.mockResolvedValue({ status: "fallback", reason });
+  const result = await generateTradeProposal(payload);
+  expect(result.evaluation.ranking.source).toBe("llm");
+  expect(systemPrompt("trade_proposal_packages")).toBeDefined();
+});
+
+test.each([false, true])("scan offersStaged counts only surviving live candidates (all drift=%s)", async (allDrift) => {
+  useCandidates();
+  if (allDrift) scoreTradePackage.mockResolvedValue({ status: "rejected", reason: "ownership_changed" });
+  else scoreTradePackage.mockResolvedValueOnce({ status: "rejected", reason: "ownership_changed" });
+  const { runTradeScan } = require("../../src/bots/trade_scan");
+  const result = await runTradeScan({ stage: true }, {
+    now: new Date("2026-10-20T18:00:00Z"),
+    readState: async () => ({ season_type: "regular", season: "2026", week: 5 }),
+    claim: async () => true,
+    refreshInbox: async () => ({ openOfferTeamIds: [] }),
+    pool: {},
+    generate: generateTradeProposal,
+  });
+  expect(result.offersStaged).toBe(allDrift ? 0 : 1);
+  expect(submitTradeOffer).toHaveBeenCalledTimes(allDrift ? 0 : 1);
 });
