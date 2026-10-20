@@ -51,7 +51,7 @@ Selection prefers a bye partner when its stored `final_score` is within 5% of th
 
 The list’s `computed_at` must be valid and no more than 36 hours old. A 404 (the candidate job has never run), other HTTP/network/JSON errors, empty results, stale data or malformed data use the LLM fallback below. A run changing between pages also triggers fallback. The worker logs `source` (`candidates` or `llm`) and the fallback reason, and stores `ranking.source` in every evaluation.
 
-Each selected candidate is re-scored through `POST /v1/trade/score` using its ESPN send/receive ids and the scan’s period before any pitch is written or offer is staged. An ownership change, unavailable live score or failed eligibility gate skips that alternative. It does not trigger LLM package generation or substitute another snapshot package. On this path, the LLM only writes the grounded pitch.
+Each selected candidate is re-scored through `POST /v1/trade/score` using its ESPN send/receive ids and the scan’s period before any pitch is written or offer is staged. When a counterparty's best stored package fails its live score or gates (an ownership change, an unavailable score or a failed eligibility gate), the worker tries that counterparty's next-best stored packages, in the stored sort order, at most 2 more. The first survivor is the counterparty's one candidate, and the cap of 3 staged alternatives is unchanged. The evaluation's `ranking.candidate_rank` is the survivor's position among that counterparty's stored candidates (1 is the best, 2 and 3 are runner-ups). A counterparty with no survivor is skipped. Nothing triggers LLM package generation or substitutes another counterparty's package, so when nothing survives the result is `no_offer`. On this path, the LLM only writes the grounded pitch.
 
 ### LLM package fallback
 
@@ -77,7 +77,7 @@ For either package source, the pitch comes from an LLM call that sees only count
 |---|---|
 | `no_target` | No candidate counterparty remains after exclusions, or the fallback finds no weak position to target. |
 | `no_offer` with a `reason` | `no_packages`, `no_valid_packages`, `no_useful_offer`, `pitch_rejected` or `evaluation_too_large` (the first alternative's reason, when every alternative failed). Nothing is staged. |
-| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source`) and the pitch. |
+| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. |
 | Error | Core couldn't score any package. Nothing is ever staged unscored. |
 
 A staging failure returns `fill_failed` with the computed offer instead of regenerating on a retry. A failure on any alternative fails the CronJob.

@@ -10,6 +10,9 @@ const SELECTED_CHOICE_COUNT = 1;
 const HTTP_NOT_FOUND = 404;
 const MAX_SELECTED_CANDIDATES = 3;
 const CLOSE_SCORE_RATIO = 0.05;
+// Next-best stored packages tried for a counterparty whose best one fails its live re-score.
+const MAX_RUNNER_UPS_PER_COUNTERPARTY = 2;
+const FIRST_CANDIDATE_RANK = 1;
 
 function validCandidate(item) {
   const validPlayers = (players) => Array.isArray(players) && players.length &&
@@ -64,21 +67,33 @@ function selectCandidatePackages(items, { fromTeamId, excluded, context }) {
   const seen = new Set([fromTeamId, ...excluded]);
   const choices = [];
   // The API sorts descending by final_score, with nulls last and a stable key tie-break.
+  const byTeam = new Map();
   for (const item of items) {
     const teamId = item.counterparty?.team_id;
     if (item.status !== "proposable" || !teamId || seen.has(teamId)) continue;
-    seen.add(teamId);
+    if (!byTeam.has(teamId)) byTeam.set(teamId, []);
+    byTeam.get(teamId).push(item);
+  }
+  const toPackage = (teamId, item) => ({
+    to_team_id: teamId,
+    incoming_player_ids: item.receive.map((player) => player.espn_id),
+    outgoing_player_ids: item.send.map((player) => player.espn_id),
+  });
+  for (const [teamId, teamItems] of byTeam) {
     const theirCrunch = context?.teams?.[teamId]?.bye_outlook?.crunch_weeks;
     const byePartner = Boolean(ourCrunch.length && Array.isArray(theirCrunch) &&
       !theirCrunch.some((week) => ourCrunch.includes(week)));
+    const [best, ...rest] = teamItems;
     choices.push({
-      package: {
-        to_team_id: teamId,
-        incoming_player_ids: item.receive.map((player) => player.espn_id),
-        outgoing_player_ids: item.send.map((player) => player.espn_id),
-      },
+      package: toPackage(teamId, best),
       target: { team_id: teamId, ...(byePartner ? { bye_partner: true } : {}) },
-      storedScore: item.final_score,
+      storedScore: best.final_score,
+      candidateRank: FIRST_CANDIDATE_RANK,
+      // Stored sort order; only used when the best package fails its live re-score.
+      runnerUps: rest.slice(0, MAX_RUNNER_UPS_PER_COUNTERPARTY).map((item, index) => ({
+        package: toPackage(teamId, item),
+        candidateRank: FIRST_CANDIDATE_RANK + index + 1,
+      })),
     });
   }
   const picks = [];
