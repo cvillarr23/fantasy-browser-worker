@@ -44,6 +44,7 @@ const {
 
 const ENV_KEYS = [
   "DRY_RUN",
+  "TRADE_DRY_RUN",
   "TRADE_SUBMIT_ENABLED",
   "ESPN_LEAGUE_ID",
   "ESPN_TEAM_ID",
@@ -335,6 +336,7 @@ beforeEach(() => {
   savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
   savedVerifiedKeys = SELECTORS._verified.keys;
   delete process.env.DRY_RUN;
+  delete process.env.TRADE_DRY_RUN;
   delete process.env.TRADE_SUBMIT_ENABLED;
   process.env.ESPN_LEAGUE_ID = "1234567890";
   process.env.ESPN_TEAM_ID = "8";
@@ -883,6 +885,81 @@ describe("submitTradeOffer: dry run", () => {
 
     expect(createAuthenticatedSession).not.toHaveBeenCalled();
     expect(browser.close).not.toHaveBeenCalled();
+  });
+});
+
+describe("submitTradeOffer: TRADE_DRY_RUN", () => {
+  function armWithTradeDryRun() {
+    armForLiveSubmit();
+    delete process.env.DRY_RUN;
+    process.env.TRADE_DRY_RUN = "false";
+  }
+
+  it("goes live with TRADE_DRY_RUN=false and TRADE_SUBMIT_ENABLED=true while DRY_RUN is unset", async () => {
+    armWithTradeDryRun();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer), source: "proposal" });
+
+    expect(result).toMatchObject({ dryRun: false });
+    expect(result.closedLocks).toEqual([]);
+    expect(state.clicks).toContain("submit");
+  });
+
+  it("stays dry with TRADE_DRY_RUN=false when TRADE_SUBMIT_ENABLED is not true", async () => {
+    armWithTradeDryRun();
+    delete process.env.TRADE_SUBMIT_ENABLED;
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer), source: "proposal" });
+
+    expect(result).toMatchObject({ status: "submit_blocked", dryRun: true });
+    expect(result.closedLocks).toEqual(["TRADE_SUBMIT_ENABLED is not true"]);
+    expect(state.clicks).not.toContain("submit");
+  });
+
+  it("lets TRADE_DRY_RUN=true override DRY_RUN=false", async () => {
+    armForLiveSubmit();
+    process.env.TRADE_DRY_RUN = "true";
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer), source: "proposal" });
+
+    expect(result).toMatchObject({ status: "submit_blocked", dryRun: true });
+    expect(result.closedLocks).toEqual(["TRADE_DRY_RUN is not explicitly false"]);
+    expect(state.clicks).not.toContain("submit");
+  });
+
+  it("does a dry fill when both are unset and names both variables", async () => {
+    armForLiveSubmit();
+    delete process.env.DRY_RUN;
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer), source: "proposal" });
+
+    expect(result).toMatchObject({ status: "submit_blocked", dryRun: true });
+    expect(result.closedLocks).toEqual(["TRADE_DRY_RUN and DRY_RUN are unset (dry run by default)"]);
+    expect(state.clicks).not.toContain("submit");
+  });
+
+  it("names DRY_RUN when it decided the lock", async () => {
+    armForLiveSubmit();
+    process.env.DRY_RUN = "true";
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer), source: "proposal" });
+
+    expect(result.closedLocks).toEqual(["DRY_RUN is not explicitly false (TRADE_DRY_RUN unset)"]);
   });
 });
 

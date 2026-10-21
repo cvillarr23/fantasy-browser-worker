@@ -96,8 +96,8 @@ Other consumer behavior:
 | Lineup | **Live** | Set `DRY_RUN=true` to plan without writing. |
 | Waiver sniper | Dry run | A boolean `dry_run` in the message overrides the environment. |
 | Draft clicker | Dry run | A message with `mode: "practice"` defaults to live. An explicit `DRY_RUN` always wins. |
-| Trade builder | Dry run | Also needs `TRADE_SUBMIT_ENABLED=true`, a matching human approval, verified selectors and, for counters, verified counter linkage. |
-| Trade response | Dry run | Also needs `TRADE_RESPONSE_ENABLED=true`, a matching human approval, a verified action and a verified pending-trade shape. |
+| Trade builder | Dry run | Reads `TRADE_DRY_RUN` first (same values as `DRY_RUN`) and falls back to `DRY_RUN` when it is unset, so trades can go live without arming the other bots. Also needs `TRADE_SUBMIT_ENABLED=true`, a matching human approval, verified selectors and, for counters, verified counter linkage. |
+| Trade response | Dry run | Reads only `DRY_RUN`, never `TRADE_DRY_RUN`. Also needs `TRADE_RESPONSE_ENABLED=true`, a matching human approval, a verified action and a verified pending-trade shape. |
 | Trade negotiation | Never sends | It only stages an offer, with no approval. |
 
 With any gate closed, trade bots fill or build the request and record what they would have sent.

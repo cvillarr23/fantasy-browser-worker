@@ -56,6 +56,24 @@ describe("runFailed", () => {
 });
 
 describe("tradeAwaitingApproval", () => {
+  afterEach(() => {
+    delete process.env.TRADE_DRY_RUN;
+  });
+
+  it("follows TRADE_DRY_RUN over the shared DRY_RUN for the dry-run marker", () => {
+    const offer = { toTeamId: "3", incomingPlayerIds: ["1"], outgoingPlayerIds: ["9"] };
+    process.env.DRY_RUN = "true";
+    process.env.TRADE_DRY_RUN = "false";
+    expect(tradeAwaitingApproval({ offerKey: "abc", offer, source: "proposal" }).title).toBe(
+      "Trade offer ready for approval",
+    );
+    process.env.DRY_RUN = "false";
+    process.env.TRADE_DRY_RUN = "true";
+    expect(tradeAwaitingApproval({ offerKey: "abc", offer, source: "proposal" }).title).toBe(
+      "[dry run] Trade offer ready for approval",
+    );
+  });
+
   const offer = { toTeamId: "3", incomingPlayerIds: ["1", "2"], outgoingPlayerIds: ["9"] };
 
   it("deep-links to the staged offer", () => {

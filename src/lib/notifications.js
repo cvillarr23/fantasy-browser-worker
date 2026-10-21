@@ -2,7 +2,7 @@
  * The notifications the worker sends, one builder per event. Each returns the argument for
  * notify() (see ./notify), so wording, links and dedupe windows are tested without the network.
  */
-const { resolveDryRun } = require("./env");
+const { resolveDryRun, resolveTradeDryRun } = require("./env");
 const { PRIORITY_HIGH, PRIORITY_URGENT, truncate } = require("./notify");
 
 const MS_PER_HOUR = 60 * 60 * 1000;
@@ -20,6 +20,12 @@ const ESPN_SESSION_BOT = "check_espn_session";
 // Only an explicit DRY_RUN=true marks titles; unset means production.
 function titled(title) {
   return resolveDryRun(false).dryRun ? `[dry run] ${title}` : title;
+}
+
+// Trade-builder notifications follow the trade dry-run switch, so a trade that TRADE_DRY_RUN=false
+// arms isn't labelled dry run just because the shared DRY_RUN is true.
+function tradeTitled(title) {
+  return resolveTradeDryRun(false).dryRun ? `[dry run] ${title}` : title;
 }
 
 function runFailed({ botName, runId, error }) {
@@ -53,7 +59,7 @@ const playerList = (ids) => (ids && ids.length > 0 ? ids.join(", ") : "nothing")
 function tradeAwaitingApproval({ offerKey, offer, source }) {
   const what = source === "counter_offer" ? "Counter-offer" : "Trade offer";
   return {
-    title: titled(`${what} ready for approval`),
+    title: tradeTitled(`${what} ready for approval`),
     message:
       `To team ${offer.toTeamId}: receive ${playerList(offer.incomingPlayerIds)}; ` +
       `send ${playerList(offer.outgoingPlayerIds)}.`,
