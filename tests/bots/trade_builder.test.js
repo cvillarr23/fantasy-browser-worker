@@ -543,6 +543,11 @@ describe("fillTradeBuilder", () => {
   });
 
   describe("when the first click is swallowed", () => {
+    // Collapse the backoff so the exhausted-attempts cases do not take seconds.
+    beforeEach(() => {
+      jest.spyOn(global, "setTimeout").mockImplementation((fn) => fn());
+    });
+    afterEach(() => jest.restoreAllMocks());
     const withRow = (id, patch) =>
       [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === id ? { ...r, ...patch } : r));
 
@@ -556,6 +561,21 @@ describe("fillTradeBuilder", () => {
       );
     });
 
+    it("recovers when the box only toggles on the fourth click", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 3 }));
+      await fillTradeBuilder(page, offerFixture(), names);
+      expect(state.rows.find((r) => r.id === "4259545").checked).toBe(true);
+    });
+
+    it("waits longer between each attempt", async () => {
+      const { page } = makeBuilderPage(withRow("4259545", { failFirstChecks: 99 }));
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toBeDefined();
+      const delays = logger.warn.mock.calls
+        .filter(([msg]) => msg === "[Trade Builder] Checkbox click was ignored; retrying")
+        .map(([, meta]) => meta.retryDelayMs);
+      expect(delays).toEqual([300, 600, 1200, 2400]);
+    });
+
     it("raises a selection rejection once the bounded attempts are used up", async () => {
       const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 99 }));
       await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
@@ -563,7 +583,7 @@ describe("fillTradeBuilder", () => {
         classification: "espn_selection_rejected",
         playerId: "4259545",
       });
-      expect(state.rows.find((r) => r.id === "4259545").checkAttempts).toBe(3);
+      expect(state.rows.find((r) => r.id === "4259545").checkAttempts).toBe(5);
     });
 
     it("does not retry other errors", async () => {

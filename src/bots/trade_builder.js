@@ -449,8 +449,10 @@ async function reconcileStuckSubmission(existing, offer, { label, offerKey, prov
   );
 }
 
-const CHECK_ATTEMPTS = 3;
-// Long enough for a late React hydration or re-render to finish, short enough not to stall a run.
+// The same player on the same page was refused in one package and accepted in the next, so a
+// refusal is not always final. The wait doubles per attempt (300, 600, 1200, 2400 ms) to give a
+// slow hydration or re-render time to finish without stalling a genuinely refused run for long.
+const CHECK_ATTEMPTS = 5;
 const CHECK_RETRY_DELAY_MS = 300;
 
 function delay(ms) {
@@ -477,9 +479,9 @@ async function checkPlayerBox(id, row) {
         playerId: id,
         attempt,
         maxAttempts: CHECK_ATTEMPTS,
-        retryDelayMs: CHECK_RETRY_DELAY_MS,
+        retryDelayMs: CHECK_RETRY_DELAY_MS * 2 ** (attempt - 1),
       });
-      await delay(CHECK_RETRY_DELAY_MS);
+      await delay(CHECK_RETRY_DELAY_MS * 2 ** (attempt - 1));
     }
   }
 }
