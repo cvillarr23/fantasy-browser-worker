@@ -224,6 +224,114 @@ describe("planSwaps", () => {
   });
 });
 
+describe("planSwaps slot moves", () => {
+  it("moves a starter between starting slots as a single LINEUP item", () => {
+    const r = roster({ "300": 23, "301": 4 }, { ...DEFAULT_SLOT_COUNTS, 4: 2 });
+    const { items, intended } = planSwaps(
+      [{ kind: "move", player_id: "300", slot: "WR1" }],
+      r,
+      noopLog,
+    );
+
+    expect(items).toEqual([
+      { playerId: 300, type: "LINEUP", fromLineupSlotId: 23, toLineupSlotId: 4 },
+    ]);
+    expect(intended).toEqual(new Map([["300", 4]]));
+  });
+
+  it("skips a player already in the target slot, so a redelivered message is a no-op", () => {
+    const r = roster({ "300": 4 }, DEFAULT_SLOT_COUNTS);
+    const { items, skipped } = planSwaps(
+      [{ kind: "move", player_id: "300", slot: "WR2" }],
+      r,
+      noopLog,
+    );
+
+    expect(items).toEqual([]);
+    expect(skipped).toBe(1);
+  });
+
+  it("rejects a move into IR, which needs the injury check only the ir kind makes", () => {
+    const r = roster({ "300": 23 }, DEFAULT_SLOT_COUNTS);
+    expect(() => planSwaps([{ kind: "move", player_id: "300", slot: "IR" }], r, noopLog)).toThrow(
+      expect.objectContaining({ permanent: true, message: expect.stringMatching(/cannot target IR/) }),
+    );
+  });
+
+  it("rejects a move out of IR, which is the activate_ir kind's job", () => {
+    const r = roster({ "300": 21 }, DEFAULT_SLOT_COUNTS);
+    expect(() => planSwaps([{ kind: "move", player_id: "300", slot: "WR1" }], r, noopLog)).toThrow(
+      expect.objectContaining({ permanent: true, message: expect.stringMatching(/activate_ir/) }),
+    );
+  });
+
+  it("rejects a move for a player not on the roster", () => {
+    const r = roster({ "300": 23 }, DEFAULT_SLOT_COUNTS);
+    expect(() => planSwaps([{ kind: "move", player_id: "999", slot: "WR1" }], r, noopLog)).toThrow(
+      /not on team's roster/,
+    );
+  });
+
+  it("rejects a player who appears in both a move and a swap", () => {
+    const r = roster({ "100": 4, "200": 20, "300": 23 }, DEFAULT_SLOT_COUNTS);
+    expect(() =>
+      planSwaps(
+        [
+          { drop_player_id: "100", add_player_id: "200", slot: "WR1" },
+          { kind: "move", player_id: "200", slot: "FLEX" },
+        ],
+        r,
+        noopLog,
+      ),
+    ).toThrow(/already appears in swap #1/);
+  });
+
+  it("orders a swap and its move so every slot has room when it is filled", () => {
+    // Week 7: an RB (600) can only start in FLEX, which a kept WR (300) holds, and the dropped
+    // WR (100) leaves a WR slot. Bench -> FLEX must wait for 300 to leave FLEX, which must
+    // wait for 100 to leave the full WR slots.
+    const r = roster(
+      { "100": 4, "101": 4, "300": 23, "600": 20 },
+      DEFAULT_SLOT_COUNTS,
+    );
+    const { items, intended } = planSwaps(
+      [
+        { drop_player_id: "100", add_player_id: "600", slot: "FLEX" },
+        { kind: "move", player_id: "300", slot: "WR1" },
+      ],
+      r,
+      noopLog,
+    );
+
+    expect(items).toEqual([
+      { playerId: 100, type: "LINEUP", fromLineupSlotId: 4, toLineupSlotId: 20 },
+      { playerId: 300, type: "LINEUP", fromLineupSlotId: 23, toLineupSlotId: 4 },
+      { playerId: 600, type: "LINEUP", fromLineupSlotId: 20, toLineupSlotId: 23 },
+    ]);
+    expect(intended).toEqual(
+      new Map([
+        ["600", 23],
+        ["100", 20],
+        ["300", 4],
+      ]),
+    );
+  });
+
+  it("keeps the producer's order when nothing is blocked", () => {
+    const r = roster({ "100": 20, "300": 23, "400": 20 }, DEFAULT_SLOT_COUNTS);
+    const { items } = planSwaps(
+      [
+        { kind: "move", player_id: "300", slot: "WR1" },
+        { drop_player_id: "100", add_player_id: "400", slot: "FLEX" },
+      ],
+      r,
+      noopLog,
+    );
+
+    expect(items.map((item) => item.playerId)).toEqual([300, 400]);
+  });
+});
+
 describe("planSwaps IR moves", () => {
   it("moves an eligible bench player into IR as a single LINEUP item", () => {
     const r = roster({ "100": 20 }, DEFAULT_SLOT_COUNTS, { "100": "OUT" });

@@ -42,6 +42,9 @@ Each entry is either a swap or an IR move.
 | Swap (no `kind`) | `drop_player_id`, `add_player_id`, `slot` | Moves the dropped player to the bench and the added player into `slot`. |
 | `kind: "ir"` | `player_id`, `slot: "IR"` | Moves a player into IR. |
 | `kind: "activate_ir"` | `player_id`, `slot` (not IR, usually `BENCH`) | Moves a player out of IR. |
+| `kind: "move"` | `player_id`, `slot` (not IR) | Moves a starter to another slot and benches nobody. The producer sends it after a swap whose add can only start in a slot a kept starter holds, so that starter moves into the slot the dropped player left. |
+
+The bot sends the items in an order that never puts a starting slot over capacity: a swap that starts an RB in `FLEX` plus a `move` of the `FLEX` WR into a WR slot goes bench WR, move WR, start RB. Capacity is checked on the end state either way.
 
 Slot names such as `RB1` and `RB2` both resolve to the ESPN `RB` slot. Player ids must be ESPN ids.
 

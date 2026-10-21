@@ -31,6 +31,14 @@ const { withInstrumentation } = require("../telemetry/instrument");
  *
  * Each is a single LINEUP item with nobody promoted. An entry with no `kind` is `"swap"`.
  *
+ * A `move` re-slots a starter who is staying in the lineup, benching nobody:
+ *
+ *   { "kind": "move", "player_id": "...", "slot": "WR1" }
+ *
+ * The producer sends one after a swap whose add can only start in a slot a kept starter holds
+ * (an RB who needs FLEX while a kept WR sits there), so the WR moves to the slot the dropped
+ * player vacated. IR is not a `move` target or source; `ir` / `activate_ir` own that.
+ *
  * Executes via ESPN's authenticated REST API rather than by clicking the roster page. See
  * espn_api.js's header for why: the roster DOM carries no per-player identifier whatsoever, only a
  * positional `data-idx`, which WORKER-03 explicitly forbids depending on.
@@ -64,6 +72,7 @@ const IR_ELIGIBLE_INJURY_STATUSES = new Set(["OUT", "INJURY_RESERVE"]);
 const SWAP_KIND = "swap";
 const IR_KIND = "ir";
 const ACTIVATE_IR_KIND = "activate_ir";
+const MOVE_KIND = "move";
 // Swap diagnostics use one-based numbering for the zero-based payload array.
 const FIRST_SWAP_NUMBER = 1;
 
@@ -193,9 +202,42 @@ function planSwaps(swaps, roster, log) {
   // players in a 1-deep IR partway through. Leaving IR only ever lands in a slot with room (the
   // check above), so this can't overfill anything else.
   const leavesIr = (item) => item.fromLineupSlotId === IR_SLOT_ID;
-  const ordered = [...items.filter(leavesIr), ...items.filter((item) => !leavesIr(item))];
+  const ordered = orderByRoom(
+    [...items.filter(leavesIr), ...items.filter((item) => !leavesIr(item))],
+    roster,
+  );
 
   return { items: ordered, intended, skipped };
+}
+
+/**
+ * Reorders items so no starting slot is over capacity when filled, keeping the producer's order
+ * wherever nothing is blocked. A swap that benches the WR and starts an RB in FLEX, plus a move
+ * of the FLEX WR into the WR slot, only works in the order bench WR, move WR, start RB.
+ * Bench and IR are never treated as full: bench is where demotions land, and IR is already
+ * ordered by the caller. Items that can never fit (a cycle) keep their relative order at the
+ * end, where ESPN's own validation has the final say.
+ */
+function orderByRoom(items, roster) {
+  const occupancy = new Map();
+  for (const slotId of roster.slotByPlayerId.values()) {
+    occupancy.set(slotId, (occupancy.get(slotId) || 0) + 1);
+  }
+  const hasRoom = (slotId) =>
+    slotId === BENCH_SLOT_ID ||
+    slotId === IR_SLOT_ID ||
+    (occupancy.get(slotId) || 0) < (roster.slotCounts[String(slotId)] || 0);
+
+  const remaining = [...items];
+  const ordered = [];
+  while (remaining.length > 0) {
+    const next = remaining.findIndex((item) => hasRoom(item.toLineupSlotId));
+    const [item] = remaining.splice(next === -1 ? 0 : next, 1);
+    occupancy.set(item.fromLineupSlotId, (occupancy.get(item.fromLineupSlotId) || 0) - 1);
+    occupancy.set(item.toLineupSlotId, (occupancy.get(item.toLineupSlotId) || 0) + 1);
+    ordered.push(item);
+  }
+  return ordered;
 }
 
 /** lineup_slots.json is a documented reference; the league's live settings are the truth. */
@@ -305,7 +347,42 @@ function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
   };
 }
 
+/** A `kind: "move"` entry moves `player_id` to `slot` without benching anyone. */
+function planSlotMove(_kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
+  const playerId = requirePlayerId(
+    swap.player_id,
+    `Swap #${index + FIRST_SWAP_NUMBER}: player_id`,
+  );
+  const targetSlotId = resolveSlotId(swap.slot);
+
+  if (targetSlotId === IR_SLOT_ID) {
+    throw new PermanentError(
+      `Swap #${index + 1}: kind "${MOVE_KIND}" cannot target IR; use kind "${IR_KIND}", which ` +
+        "checks eligibility.",
+    );
+  }
+  claimPlayer(playerId, "player", index);
+  requireFieldedSlot(index, swap.slot, targetSlotId, roster.slotCounts);
+
+  const from = currentSlotOf(playerId, "player", index);
+  const satisfied = `${playerId} in ${describeSlot(targetSlotId)}`;
+  if (from === targetSlotId) return { moves: [], endState: [], satisfied };
+  if (from === IR_SLOT_ID) {
+    throw new PermanentError(
+      `Swap #${index + 1}: player ${playerId} is in IR; use kind "${ACTIVATE_IR_KIND}" to move ` +
+        "them out.",
+    );
+  }
+
+  return {
+    moves: [{ id: playerId, from, to: targetSlotId }],
+    endState: [[playerId, targetSlotId]],
+    satisfied,
+  };
+}
+
 const PLANNERS_BY_KIND = {
+  [MOVE_KIND]: planSlotMove,
   [SWAP_KIND]: planBenchAndPromote,
   [IR_KIND]: planIrMove,
   [ACTIVATE_IR_KIND]: planIrMove,
