@@ -103,6 +103,15 @@ async function claimScan(pool, key, trackingId) {
   }
 }
 
+// A scan that failed without staging anything gives its claim back, so a retry the same day is
+// not locked out by an outage. Best-effort: a release error must not mask the original failure.
+async function releaseClaim(pool, key) {
+  await pool.query(
+    "DELETE FROM execution_log WHERE transaction_type = 'trade_scan_claim' AND counter_offer->>'scan_key' = $1",
+    [key],
+  );
+}
+
 // The scan refreshes the inbox first so a new pitch never crosses an offer from that same manager
 // that we haven't answered yet. Best-effort: the inbox has its own schedule, so an ESPN or core
 // hiccup here shouldn't cost the twice-weekly pitch.
@@ -122,6 +131,7 @@ async function runTradeScan(
     readState = readSeason,
     now = new Date(),
     claim = claimScan,
+    release = releaseClaim,
     generate = generateTradeProposal,
     // Required lazily: trade_inbox.js reads this module's period helpers.
     refreshInbox = (options) => require("./trade_inbox").refreshTradeInbox(options),
@@ -147,11 +157,13 @@ async function runTradeScan(
         connectionTimeoutMillis: CLAIM_DB_TIMEOUT_MS,
         statement_timeout: CLAIM_DB_TIMEOUT_MS,
       });
+  let releasable = false;
   try {
     if (!(await claim(pool || ownedPool, key, trackingId)))
       return { status: "duplicate", ...period, scanKey: key };
-    // Retain the claim even on errors/timeouts: a generated pitch changes offer_key,
-    // so blind retries could stage a different offer. The next scheduled day's scan can proceed.
+    // The claim is kept once any offer is staged (a retry would generate a different pitch and
+    // offer_key), but released when the scan fails before staging anything.
+    releasable = true;
     const excluded = await openOfferTeams(refreshInbox);
     const result = await generate({
       ...period,
@@ -162,6 +174,7 @@ async function runTradeScan(
     const failures = offers.filter((offer) => offer.submission?.status === "fill_failed");
     const offersFailed = failures.length;
     const offersStaged = offers.length - offersFailed;
+    if (offersStaged) releasable = false;
     const failureSummaries = failures.map((offer) => ({
       team_id: offer.target?.team_id ?? offer.offer?.toTeamId,
       classification: offer.submission.classification || "fill_error",
@@ -195,6 +208,12 @@ async function runTradeScan(
       offersFailed,
       ...(failureSummaries.length ? { failures: failureSummaries } : {}),
     };
+  } catch (error) {
+    if (releasable) {
+      await release(pool || ownedPool, key).catch((releaseError) =>
+        logger.warn("[Trade Scan] Could not release the claim after a failed scan", { err: releaseError }));
+    }
+    throw error;
   } finally {
     if (ownedPool) await ownedPool.end();
   }

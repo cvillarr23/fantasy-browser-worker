@@ -23,6 +23,7 @@ beforeEach(() => {
     now,
     readState: jest.fn().mockResolvedValue(state),
     claim: jest.fn().mockResolvedValue(true),
+    release: jest.fn().mockResolvedValue(undefined),
     generate: jest.fn().mockResolvedValue({ status: "no_target" }),
     refreshInbox: jest.fn().mockResolvedValue({ status: "refreshed", openOfferTeamIds: [] }),
     pool: {},
@@ -125,6 +126,37 @@ test("every offer failing to stage fails the job without retrying generation", a
   await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("DOM");
   expect(deps.generate).toHaveBeenCalledTimes(1);
   expect(deps.claim).toHaveBeenCalledTimes(1);
+});
+test("a scan that fails without staging anything releases its claim", async () => {
+  deps.generate.mockRejectedValue(new Error("ESPN down"));
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("ESPN down");
+  expect(deps.release).toHaveBeenCalledWith(deps.pool, "trade-scan:123:7:2026-10-04");
+});
+test("every offer failing to stage releases the claim", async () => {
+  deps.generate.mockResolvedValue({
+    target: { team_id: "3" },
+    submission: { status: "fill_failed", error: "DOM", classification: "fill_error" },
+  });
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("DOM");
+  expect(deps.release).toHaveBeenCalledTimes(1);
+});
+test("a release failure does not mask the scan error", async () => {
+  deps.generate.mockRejectedValue(new Error("ESPN down"));
+  deps.release.mockRejectedValue(new Error("db gone"));
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("ESPN down");
+});
+test("a duplicate scan never releases the existing claim", async () => {
+  deps.claim.mockResolvedValue(false);
+  await runTradeScan({ stage: true }, deps);
+  expect(deps.release).not.toHaveBeenCalled();
+});
+test("a scan that staged an offer keeps its claim even if later work throws", async () => {
+  deps.generate.mockResolvedValue({
+    offers: [stagedOffer("6"), failedOffer("3")],
+    submission: { status: "awaiting_approval" },
+  });
+  await runTradeScan({ stage: true }, deps);
+  expect(deps.release).not.toHaveBeenCalled();
 });
 const stagedOffer = (teamId) => ({ target: { team_id: teamId }, submission: { status: "awaiting_approval" } });
 const failedOffer = (teamId, extra = {}) => ({
