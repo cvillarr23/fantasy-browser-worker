@@ -8,6 +8,7 @@ jest.mock("../../src/bots/trade_bot", () => ({
 jest.mock("../../src/lib/trade_candidates", () => ({
   ...jest.requireActual("../../src/lib/trade_candidates"),
   fetchTradeCandidates: jest.fn(),
+  selectCandidatePackages: jest.fn(),
 }));
 jest.mock("../../src/lib/llm_client", () => ({
   completeWithFallback: jest.fn(),
@@ -20,7 +21,8 @@ jest.mock("../../src/lib/trade_scoring", () => ({
   fetchTradeContext: jest.fn(),
   scoreTradePackage: jest.fn(),
 }));
-const { fetchTradeCandidates } = require("../../src/lib/trade_candidates");
+const { fetchTradeCandidates, selectCandidatePackages } = require("../../src/lib/trade_candidates");
+const actualCandidates = jest.requireActual("../../src/lib/trade_candidates");
 const { generateTradeProposal } = require("../../src/bots/trade_proposal");
 const { createSessionFromStoredState } = require("../../src/bots/auth");
 const { fetchRosterDeficits } = require("../../src/bots/trade_bot");
@@ -61,6 +63,7 @@ let scores;
 beforeEach(() => {
   jest.resetAllMocks();
   fetchTradeCandidates.mockResolvedValue({ status: "fallback", reason: "empty" });
+  selectCandidatePackages.mockImplementation(actualCandidates.selectCandidatePackages);
   process.env.ESPN_LEAGUE_ID = "123";
   process.env.ESPN_TEAM_ID = "1";
   fetchRosterDeficits.mockResolvedValue({
@@ -536,4 +539,79 @@ test.each([false, true])("scan offersStaged counts only surviving live candidate
   });
   expect(result.offersStaged).toBe(allDrift ? 0 : 1);
   expect(submitTradeOffer).toHaveBeenCalledTimes(allDrift ? 0 : 1);
+});
+
+describe("ESPN refusing a player selection", () => {
+  const rejection = (reason = "Player is locked") => Object.assign(new Error("ESPN would not let player 300 be selected"), {
+    classification: "espn_selection_rejected",
+    reason,
+  });
+  // The picks as selectCandidatePackages returns them: team 3 carries a runner-up for rank 2 and 3.
+  const withRunnerUps = () => {
+    useCandidates();
+    selectCandidatePackages.mockReturnValue([
+      {
+        package: pkg("3", ["300"], ["101"]),
+        target: { team_id: "3" },
+        candidateRank: 1,
+        runnerUps: [
+          { package: pkg("3", ["301"], ["101"]), candidateRank: 2 },
+          { package: pkg("3", ["302"], ["101"]), candidateRank: 3 },
+        ],
+      },
+      { package: pkg("2", ["200"], ["100"]), target: { team_id: "2" }, candidateRank: 1, runnerUps: [] },
+    ]);
+  };
+
+  test("is classified and the same counterparty's runner-up is staged instead", async () => {
+    withRunnerUps();
+    submitTradeOffer.mockRejectedValueOnce(rejection());
+    const result = await generateTradeProposal(payload);
+
+    expect(result.offers.map(({ offer }) => offer.incomingPlayerIds)).toEqual([["301"], ["200"]]);
+    expect(result.offers[0].submission.status).toBe("awaiting_approval");
+    expect(result.offers[0].evaluation.ranking.candidate_rank).toBe(2);
+    expect(result.offers[0].rejectedAttempts).toEqual([
+      expect.objectContaining({
+        candidate_rank: 1,
+        classification: "espn_selection_rejected",
+        reason: "Player is locked",
+      }),
+    ]);
+    expect(result.offers[1].rejectedAttempts).toBeUndefined();
+  });
+
+  test("tries at most two runner-ups, then reports the classified failure", async () => {
+    withRunnerUps();
+    submitTradeOffer.mockImplementation(async (offer) => {
+      if (offer.toTeamId === "3") throw rejection("unknown");
+      return { status: "awaiting_approval" };
+    });
+    const result = await generateTradeProposal(payload);
+
+    expect(submitTradeOffer.mock.calls.filter(([offer]) => offer.toTeamId === "3")).toHaveLength(3);
+    expect(result.offers[0].submission).toMatchObject({
+      status: "fill_failed",
+      classification: "espn_selection_rejected",
+      reason: "unknown",
+    });
+    expect(result.offers[0].rejectedAttempts).toHaveLength(3);
+    expect(result.offers[1].submission.status).toBe("awaiting_approval");
+  });
+
+  test("with no runner-up the failure is recorded and the other offers still stage", async () => {
+    useCandidates();
+    submitTradeOffer.mockRejectedValueOnce(rejection());
+    const result = await generateTradeProposal(payload);
+    expect(result.offers.map((entry) => entry.submission.status)).toEqual(["fill_failed", "awaiting_approval"]);
+    expect(result.offers[0].submission).toMatchObject({ classification: "espn_selection_rejected" });
+  });
+
+  test("other staging errors are not retried against runner-ups", async () => {
+    withRunnerUps();
+    submitTradeOffer.mockRejectedValueOnce(new Error("selector missing"));
+    const result = await generateTradeProposal(payload);
+    expect(result.offers[0].submission).toMatchObject({ status: "fill_failed", classification: "fill_error" });
+    expect(submitTradeOffer).toHaveBeenCalledTimes(2);
+  });
 });

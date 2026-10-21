@@ -2,6 +2,7 @@ const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
 const { generateTradeProposal } = require("./trade_proposal");
 const { logger } = require("../telemetry/logger");
+const { addSummary } = require("../db/run_log");
 
 const NFL_STATE_TIMEOUT_MS = 10_000;
 const MIN_SUPPORTED_SEASON = 2000;
@@ -158,15 +159,41 @@ async function runTradeScan(
       ...(excluded.length ? { exclude_team_ids: excluded } : {}),
     });
     const offers = result.offers ?? (result.submission ? [result] : []);
-    const failed = offers.find((offer) => offer.submission?.status === "fill_failed");
-    if (failed) throw new Error(`Trade scan staging failed: ${failed.submission.error}`);
+    const failures = offers.filter((offer) => offer.submission?.status === "fill_failed");
+    const offersFailed = failures.length;
+    const offersStaged = offers.length - offersFailed;
+    const failureSummaries = failures.map((offer) => ({
+      team_id: offer.target?.team_id ?? offer.offer?.toTeamId,
+      classification: offer.submission.classification || "fill_error",
+      reason: offer.submission.reason || offer.submission.error,
+    }));
+    for (const failure of failureSummaries) {
+      logger.warn("[Trade Scan] An offer could not be staged; continuing with the rest", { ...failure, trackingId });
+    }
+    const rejectedSelections = offers.flatMap((offer) =>
+      (offer.rejectedAttempts || []).map((attempt) => ({ team_id: offer.target?.team_id, ...attempt })));
+    if (offers.length) {
+      addSummary({
+        offersStaged,
+        offersFailed,
+        ...(failureSummaries.length ? { failures: failureSummaries } : {}),
+        ...(rejectedSelections.length ? { rejectedSelections } : {}),
+      });
+    }
+    // Partial success is a success: the staged offers are waiting for review. Only a scan that
+    // stages nothing while something failed should page.
+    if (offersFailed && !offersStaged) {
+      throw new Error(`Trade scan staging failed: ${failureSummaries.map((f) => `team ${f.team_id}: ${f.reason}`).join("; ")}`);
+    }
     return {
       status: result.status || "proposal",
       ...(result.reason ? { reason: result.reason } : {}),
       ...period,
       scanKey: key,
       submissionStatus: result.submission?.status,
-      offersStaged: offers.length,
+      offersStaged,
+      offersFailed,
+      ...(failureSummaries.length ? { failures: failureSummaries } : {}),
     };
   } finally {
     if (ownedPool) await ownedPool.end();

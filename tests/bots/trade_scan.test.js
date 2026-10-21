@@ -4,6 +4,9 @@ jest.mock("../../src/bots/trade_proposal", () => ({
 jest.mock("../../src/telemetry/logger", () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
+jest.mock("../../src/db/run_log", () => ({ addSummary: jest.fn() }));
+const { logger } = require("../../src/telemetry/logger");
+const { addSummary } = require("../../src/db/run_log");
 const {
   resolvePeriod,
   runTradeScan,
@@ -114,21 +117,49 @@ test("a no_offer reason is reported with the scan result", async () => {
     reason: "no_useful_offer",
   });
 });
-test("staging failure fails the job without retrying generation", async () => {
+test("every offer failing to stage fails the job without retrying generation", async () => {
   deps.generate.mockResolvedValue({
-    submission: { status: "fill_failed", error: "DOM" },
+    target: { team_id: "3" },
+    submission: { status: "fill_failed", error: "DOM", classification: "fill_error" },
   });
   await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("DOM");
   expect(deps.generate).toHaveBeenCalledTimes(1);
   expect(deps.claim).toHaveBeenCalledTimes(1);
 });
-test("a staging failure on any alternative fails the job; the count reports every offer", async () => {
-  const staged = { submission: { status: "awaiting_approval" } };
-  deps.generate.mockResolvedValue({ ...staged, offers: [staged, { submission: { status: "fill_failed", error: "DOM2" } }] });
-  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("DOM2");
-
-  deps.generate.mockResolvedValue({ ...staged, offers: [staged, staged] });
-  await expect(runTradeScan({ stage: true }, deps)).resolves.toMatchObject({ offersStaged: 2 });
+const stagedOffer = (teamId) => ({ target: { team_id: teamId }, submission: { status: "awaiting_approval" } });
+const failedOffer = (teamId, extra = {}) => ({
+  target: { team_id: teamId },
+  submission: { status: "fill_failed", error: `team ${teamId} DOM`, classification: "fill_error", ...extra },
+});
+test("a failure on one offer is a partial success with counts, a warning and a run summary", async () => {
+  const offers = [failedOffer("3", { classification: "espn_selection_rejected", reason: "Player is locked" }), failedOffer("10"), stagedOffer("6")];
+  deps.generate.mockResolvedValue({ ...offers[2], offers });
+  const result = await runTradeScan({ stage: true }, deps);
+  expect(result).toMatchObject({
+    status: "proposal",
+    offersStaged: 1,
+    offersFailed: 2,
+    failures: [
+      { team_id: "3", classification: "espn_selection_rejected", reason: "Player is locked" },
+      { team_id: "10", classification: "fill_error", reason: "team 10 DOM" },
+    ],
+  });
+  expect(logger.warn).toHaveBeenCalledWith(
+    "[Trade Scan] An offer could not be staged; continuing with the rest",
+    expect.objectContaining({ team_id: "3", classification: "espn_selection_rejected" }),
+  );
+  expect(addSummary).toHaveBeenCalledWith(expect.objectContaining({ offersStaged: 1, offersFailed: 2 }));
+});
+test("all offers failing names every team in the error", async () => {
+  const offers = [failedOffer("3"), failedOffer("10")];
+  deps.generate.mockResolvedValue({ ...offers[0], offers });
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow(/team 3: team 3 DOM; team 10: team 10 DOM/);
+});
+test("staged offers report zero failures", async () => {
+  deps.generate.mockResolvedValue({ ...stagedOffer("3"), offers: [stagedOffer("3"), stagedOffer("6")] });
+  const result = await runTradeScan({ stage: true }, deps);
+  expect(result).toMatchObject({ offersStaged: 2, offersFailed: 0 });
+  expect(result).not.toHaveProperty("failures");
 });
 test("generation failure is not retried", async () => {
   deps.generate.mockRejectedValue(new Error("LLM"));
