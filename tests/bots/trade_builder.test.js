@@ -1,3 +1,6 @@
+jest.mock("../../src/telemetry/logger", () => ({
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
+}));
 jest.mock("../../src/bots/auth");
 jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/debug_capture");
@@ -7,6 +10,7 @@ jest.mock("../../src/lib/notify", () => ({
   notify: jest.fn(async () => "sent"),
 }));
 const { notify } = require("../../src/lib/notify");
+const { logger } = require("../../src/telemetry/logger");
 
 const {
   createAuthenticatedSession,
@@ -150,6 +154,8 @@ function makeBuilderPage(
     routeHandlers: [],
     gotoUrls: [],
     filledMessage: null,
+    // Stands in for running the in-page reader against the refused row.
+    evaluate: async () => ({ signals: [], rowHtml: "", visibleText: "" }),
   };
   let pendingResponse = null;
 
@@ -159,6 +165,7 @@ function makeBuilderPage(
       if (set.length !== 1) {
         throw new Error(`strict mode violation: ${set.length} elements`);
       }
+      if (set[0].refuses) throw new Error("locator.check: Clicking the checkbox did not change its state");
       set[0].checked = true;
       state.clicks.push(`check:${set[0].id}`);
     },
@@ -180,6 +187,7 @@ function makeBuilderPage(
       throw new Error(`fake rows.filter: unsupported ${JSON.stringify({ has, hasText })}`);
     },
     count: async () => set.length,
+    first: () => ({ evaluate: async (fn, options) => state.evaluate(set[0], fn, options) }),
     locator: (sel) => {
       if (sel !== SELECTORS.trade_player_checkbox) {
         throw new Error(`fake row locator: unexpected selector ${sel}`);
@@ -526,6 +534,54 @@ describe("fillTradeBuilder", () => {
     expect(checked).toEqual(["-16021", "15847", "3139477", "4259545", "4362628"].sort());
     expect(result.resolvedBy).toMatchObject({ "-16021": "name", "4259545": "headshot" });
     expect(state.clicks.every((c) => c.startsWith("check:"))).toBe(true);
+  });
+
+  describe("when ESPN refuses a selection", () => {
+    const refusing = (id) => [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === id ? { ...r, refuses: true } : r));
+
+    it("classifies it, keeps ESPN's reason and logs the row at error level", async () => {
+      const { page, state } = makeBuilderPage(refusing("4259545"));
+      state.evaluate = async () => ({
+        signals: ["title: Player is locked", "page message: Trade not allowed"],
+        rowHtml: '<tr class="Table__TR"><span role="checkbox" aria-checked="false"></span></tr>',
+        visibleText: "Trade not allowed",
+      });
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+        permanent: true,
+        classification: "espn_selection_rejected",
+        playerId: "4259545",
+        reason: "title: Player is locked; page message: Trade not allowed",
+        capture: { rowHtml: expect.stringContaining('role="checkbox"'), visibleText: "Trade not allowed" },
+      });
+      expect(logger.error).toHaveBeenCalledWith(
+        "[Trade Builder] ESPN did not toggle a player's checkbox",
+        expect.objectContaining({
+          playerId: "4259545",
+          rowHtml: expect.stringContaining("Table__TR"),
+          visibleText: "Trade not allowed",
+        }),
+      );
+    });
+
+    it("reports unknown when the page shows nothing, and still logs", async () => {
+      const { page } = makeBuilderPage(refusing("4259545"));
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+        classification: "espn_selection_rejected",
+        reason: "unknown",
+      });
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it("still classifies it when reading the row fails", async () => {
+      const { page, state } = makeBuilderPage(refusing("4259545"));
+      state.evaluate = async () => {
+        throw new Error("Element is not attached to the DOM");
+      };
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+        classification: "espn_selection_rejected",
+        reason: "unknown",
+      });
+    });
   });
 
   it("fails closed when a player's row cannot be found", async () => {
@@ -1122,6 +1178,32 @@ describe("submitTradeOffer: counter linkage", () => {
     expect(state.clicks).not.toContain("submit");
     expect(recordTradeOfferFill).toHaveBeenCalledWith(
       expect.objectContaining({ relatedTransactionId: "tx-3", threadRootId: "tx-1" }),
+    );
+  });
+
+  it("keeps a refused selection's evidence in the failure row, since disk captures vanish with the pod", async () => {
+    const rows = [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === "4259545" ? { ...r, refuses: true } : r));
+    const { page, state } = makeBuilderPage(rows);
+    state.evaluate = async () => ({ signals: ["title: Locked"], rowHtml: "<tr>row</tr>", visibleText: "" });
+    useSession(page);
+
+    await expect(submitTradeOffer(offerFixture(), { source: "proposal" })).rejects.toMatchObject({
+      classification: "espn_selection_rejected",
+    });
+
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: "failure",
+        failure: expect.objectContaining({
+          classification: "espn_selection_rejected",
+          reason: "title: Locked",
+          rowHtml: "<tr>row</tr>",
+        }),
+      }),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "[Trade Builder] ESPN did not toggle a player's checkbox",
+      expect.objectContaining({ rowHtml: "<tr>row</tr>" }),
     );
   });
 

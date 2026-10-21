@@ -22,6 +22,7 @@ const {
   eligibilityReasons,
 } = require("../lib/trade_scoring");
 const { logger } = require("../telemetry/logger");
+const { SELECTION_REJECTED } = require("../lib/espn_selection_rejection");
 const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
 
 // Bounds fallback target selection and package scoring inside the scan runtime limit,
@@ -270,6 +271,68 @@ async function buildOffer(entry, rank, { leagueId, season, fromTeamId, trackingI
   return { target: entry.target, offer, evaluation };
 }
 
+const FIRST_CANDIDATE_RANK = 1;
+
+// Stages one computed offer. Each offer stands alone: a failure is recorded on that offer's own
+// submission and never stops the others. As with counters, a computed offer is not regenerated
+// just because staging failed. The one exception is ESPN refusing a player's selection: the same
+// counterparty's next stored package (never another counterparty's, never an LLM one) is scored
+// and staged instead, within the same per-counterparty cap used for live-score fallbacks.
+async function stageWithRunnerUps(first, { rank, runnerUps, period, leagueId, season, fromTeamId, trackingId, ranking, session }) {
+  let current = first;
+  let currentRank = first.evaluation.ranking.candidate_rank ?? FIRST_CANDIDATE_RANK;
+  const pending = runnerUps.filter((runnerUp) => runnerUp.candidateRank > currentRank);
+  const rejectedAttempts = [];
+  for (;;) {
+    const { target, offer, evaluation } = current;
+    logger.info("[Trade Proposal] Computed offer for approval", { target, offer, trackingId });
+    let submission;
+    try {
+      submission = await submitTradeOffer(offer, { source: "proposal", trackingId, session, evaluation });
+    } catch (error) {
+      logger.warn("[Trade Proposal] Could not stage computed offer", { err: error, target, offer });
+      submission = {
+        status: "fill_failed",
+        error: error.message,
+        classification: error.classification || "fill_error",
+        ...(error.reason ? { reason: error.reason } : {}),
+      };
+    }
+    const result = {
+      target, offer, evaluation, submission,
+      ...(rejectedAttempts.length ? { rejectedAttempts } : {}),
+    };
+    if (submission.classification !== SELECTION_REJECTED) return result;
+    rejectedAttempts.push({
+      candidate_rank: currentRank,
+      package: { incoming_player_ids: offer.incomingPlayerIds, outgoing_player_ids: offer.outgoingPlayerIds },
+      classification: submission.classification,
+      reason: submission.reason,
+    });
+    const next = await nextRunnerUp(pending, { period, fromTeamId, rank, leagueId, season, trackingId, ranking, target });
+    if (!next) return { ...result, rejectedAttempts };
+    logger.warn("[Trade Proposal] ESPN refused a selection; trying the counterparty's next stored package", {
+      trackingId, target, rejected: rejectedAttempts.at(-1),
+    });
+    current = next;
+    currentRank = next.evaluation.ranking.candidate_rank;
+  }
+}
+
+// Consumes runner-ups until one passes its live score and gates and yields a pitch.
+async function nextRunnerUp(pending, { period, fromTeamId, rank, leagueId, season, trackingId, ranking, target }) {
+  while (pending.length) {
+    const runnerUp = pending.shift();
+    const result = await scoreTradePackage({ ...period, ourTeamId: fromTeamId, tradePackage: runnerUp.package });
+    if (result.status !== "scored") continue;
+    const { ranked } = rankScoredPackages([{ ...runnerUp, target, request: result.request, score: result.score }]);
+    if (!ranked.length) continue;
+    const built = await buildOffer(ranked[0], rank, { leagueId, season, fromTeamId, trackingId, ranking });
+    if (!built.reason) return built;
+  }
+  return null;
+}
+
 // ESPN-only ids throughout avoid the internal/Sleeper id collision. Never forward payload
 // approvals: generated offers always need a separate review.
 async function generateTradeProposal(payload) {
@@ -372,17 +435,13 @@ async function generateTradeProposal(payload) {
 
     session = (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     const offers = [];
-    for (const { target, offer, evaluation } of computed) {
-      logger.info("[Trade Proposal] Computed offer for approval", { target, offer, trackingId });
-      // As with counters, don't regenerate a computed offer just because staging failed.
-      let submission;
-      try {
-        submission = await submitTradeOffer(offer, { source: "proposal", trackingId, session, evaluation });
-      } catch (error) {
-        logger.warn("[Trade Proposal] Could not stage computed offer", { err: error, target, offer });
-        submission = { status: "fill_failed", error: error.message };
-      }
-      offers.push({ target, offer, evaluation, submission });
+    const runnerUpsByTeam = new Map(packages.map((candidate) => [candidate.package.to_team_id, candidate.runnerUps || []]));
+    for (const [index, built] of computed.entries()) {
+      offers.push(await stageWithRunnerUps(built, {
+        rank: index + 1,
+        runnerUps: runnerUpsByTeam.get(built.offer.toTeamId) || [],
+        period, leagueId, season, fromTeamId, trackingId, ranking, session,
+      }));
     }
     // The best offer's fields stay at the top level for existing callers.
     return { ...offers[0], offers };

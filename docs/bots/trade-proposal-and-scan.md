@@ -77,10 +77,29 @@ For either package source, the pitch comes from an LLM call that sees only count
 |---|---|
 | `no_target` | No candidate counterparty remains after exclusions, or the fallback finds no weak position to target. |
 | `no_offer` with a `reason` | `no_packages`, `no_valid_packages`, `no_useful_offer`, `pitch_rejected` or `evaluation_too_large` (the first alternative's reason, when every alternative failed). Nothing is staged. |
-| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. |
+| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged` (offers that reached `awaiting_approval`) and `offersFailed`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. |
 | Error | Core couldn't score any package. Nothing is ever staged unscored. |
 
-A staging failure returns `fill_failed` with the computed offer instead of regenerating on a retry. A failure on any alternative fails the CronJob.
+## What happens when an offer fails to stage?
+
+Each offer is staged on its own. A failure is recorded on that offer's `submission` (`status: fill_failed`, `error`, a `classification` and, for a refusal, the `reason`), a warning is logged, and the scan carries on with the remaining offers. The computed offer is never regenerated because staging failed.
+
+The scan's result and run summary show `offersStaged`, `offersFailed` and, when any failed, `failures` (team id, classification, reason). The CronJob exits non-zero only when nothing staged and at least one offer failed, so a partial success doesn't fire the pod failure alert. `no_target` and `no_offer` are unchanged and never a failure.
+
+### ESPN refusing a selection
+
+If ESPN leaves a player's checkbox unchecked after the click, the attempt is classified `espn_selection_rejected` rather than treated as a crash. The worker reads what the page shows near that row: `title` and tooltip attributes, `aria-disabled`, disabled or locked state classes, and any visible alert, status, tooltip, toast or error element. The reason is those signals joined together, or `unknown` when the page shows nothing. The signals are generic because the refusal UI hasn't been recorded yet.
+
+For a candidate-sourced offer, the same counterparty's next stored packages (the runner-ups, by `candidate_rank`) are then live-scored, gated and pitched, and staged in its place. The cap is the same as for live-score fallbacks: at most 2 runner-ups per counterparty in total, so at most 3 attempts. Another counterparty's package is never substituted and the LLM never writes a replacement package. The offer that finally staged lists the refused ones in `rejectedAttempts`, and the run summary lists them in `rejectedSelections`. Any other staging error is not retried against runner-ups.
+
+### Where does the failure evidence go?
+
+Debug captures written to `recon-output` are lost with the pod. The Job has no volume for artifacts and the infra repo has no object store or PVC for them. A refused selection is therefore also kept in:
+
+- the pod logs, at error level: the failing row's `outerHTML` (first 2000 characters), the visible error text and the reason.
+- the failed offer's `trade_offer_submit` row in `execution_log`, under `counter_offer.failure` (classification, player id, reason, `rowHtml`, `visibleText`).
+
+The screenshot is not persisted. Persisting it would need new storage in the cluster.
 
 ## How is a repeat run prevented?
 
@@ -94,6 +113,8 @@ The CLI has a 15-minute hard deadline. The CronJob uses `backoffLimit: 0`, forbi
 |---|---|
 | Invalid `season`/`week`, or `ESPN_LEAGUE_ID`/`ESPN_TEAM_ID` not a positive id | `PermanentError` |
 | Core can't score any package | Error, nothing staged, CronJob exits non-zero |
+| Some offers fail to stage, at least one stages | Success. Counts and failures are in the result and run summary. |
+| Every offer fails to stage | `Trade scan staging failed`, CronJob exits non-zero |
 | LLM or core read failure on the queue path | Delayed retry |
 | Same-day second run | Refused by the claim |
 

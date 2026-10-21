@@ -20,6 +20,7 @@ const {
   recordTradeOfferFill,
 } = require("../db/execution_log");
 const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
+const { isNotToggled, buildSelectionRejection } = require("../lib/espn_selection_rejection");
 const { requirePlayerId } = require("../lib/espn_ids");
 const SELECTORS = require("../selectors/espn_selectors.json");
 const { resolveDryRun } = require("../lib/env");
@@ -523,8 +524,14 @@ async function fillTradeBuilder(page, offer, names) {
 
   // trade_player_checkbox is the visible span[role=checkbox] (it wraps a hidden input; confirmed
   // live in #123). .first() is defensive: a row is expected to hold exactly one.
-  for (const { row } of resolved) {
-    await row.locator(SELECTORS.trade_player_checkbox).first().check();
+  for (const { id, row } of resolved) {
+    try {
+      await row.locator(SELECTORS.trade_player_checkbox).first().check();
+    } catch (error) {
+      // The click landed but ESPN left the box unchecked: a refusal, not a broken selector.
+      if (!isNotToggled(error)) throw error;
+      throw await buildSelectionRejection(id, row);
+    }
   }
 
   // Both checks are PermanentErrors: the same page will fail them the same way on every redelivery.
@@ -837,6 +844,8 @@ async function submitTradeOffer(
       `${label} Trade offer ${offerKey} failed${error.permanent ? " (permanent)" : ""}: ${error.message}`,
       { err: error, permanent: error.permanent === true },
     );
+    // Written to the pod's disk, which is gone once the Job ends. A classified failure therefore
+    // also keeps its evidence in the execution_log row below.
     if (session && session.page) {
       await captureDebugSnapshot(session.page, "trade-offer-failure");
     }
@@ -850,6 +859,9 @@ async function submitTradeOffer(
         status: "failure",
         dryRun: !live,
         errorMessage: error.message,
+        ...(error.classification
+          ? { failure: { classification: error.classification, ...error.capture } }
+          : {}),
       });
     }
     throw withRetryDelay(error);

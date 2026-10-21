@@ -177,6 +177,8 @@ function tradeOfferJson(offerKey, row) {
     thread_root_id: row.threadRootId || undefined,
     screenshot_path: row.screenshotPath || null,
     reasons: row.reasons || undefined,
+    // Why a fill failed, with the page evidence that outlives the pod (see espn_selection_rejection).
+    failure: row.failure || undefined,
     // A generated proposal's score evidence, read by core's offer list for the reviewer UI.
     evaluation: row.evaluation || undefined,
   });
