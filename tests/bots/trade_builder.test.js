@@ -165,6 +165,12 @@ function makeBuilderPage(
       if (set.length !== 1) {
         throw new Error(`strict mode violation: ${set.length} elements`);
       }
+      if (set[0].failFirstChecks > 0) {
+        set[0].failFirstChecks -= 1;
+        set[0].checkAttempts = (set[0].checkAttempts || 0) + 1;
+        throw new Error("locator.check: Clicking the checkbox did not change its state");
+      }
+      if (set[0].checkError) throw new Error(set[0].checkError);
       if (set[0].refuses) throw new Error("locator.check: Clicking the checkbox did not change its state");
       set[0].checked = true;
       state.clicks.push(`check:${set[0].id}`);
@@ -534,6 +540,41 @@ describe("fillTradeBuilder", () => {
     expect(checked).toEqual(["-16021", "15847", "3139477", "4259545", "4362628"].sort());
     expect(result.resolvedBy).toMatchObject({ "-16021": "name", "4259545": "headshot" });
     expect(state.clicks.every((c) => c.startsWith("check:"))).toBe(true);
+  });
+
+  describe("when the first click is swallowed", () => {
+    const withRow = (id, patch) =>
+      [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === id ? { ...r, ...patch } : r));
+
+    it("retries the check, warns, and succeeds", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 1 }));
+      await fillTradeBuilder(page, offerFixture(), names);
+      expect(state.rows.find((r) => r.id === "4259545").checked).toBe(true);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "[Trade Builder] Checkbox click was ignored; retrying",
+        expect.objectContaining({ playerId: "4259545", attempt: 1 }),
+      );
+    });
+
+    it("raises a selection rejection once the bounded attempts are used up", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 99 }));
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+        permanent: true,
+        classification: "espn_selection_rejected",
+        playerId: "4259545",
+      });
+      expect(state.rows.find((r) => r.id === "4259545").checkAttempts).toBe(3);
+    });
+
+    it("does not retry other errors", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { checkError: "element is detached" }));
+      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toThrow("element is detached");
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        "[Trade Builder] Checkbox click was ignored; retrying",
+        expect.anything(),
+      );
+      expect(state.rows.some((r) => r.checked)).toBe(false);
+    });
   });
 
   describe("when ESPN refuses a selection", () => {

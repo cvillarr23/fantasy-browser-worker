@@ -83,7 +83,7 @@ A browser-wide guard aborts every non-GET ESPN request until the instant before 
 |---|---|
 | Malformed offer, own team as target, approval for a different offer | `PermanentError` |
 | A row doesn't resolve to exactly one player, or a box doesn't stay ticked | `PermanentError` |
-| A box doesn't toggle after the click | `PermanentError` classified `espn_selection_rejected`, with ESPN's reason or `unknown`. The row's HTML and the reason are logged at error level and stored in the failure row. See [Trade proposal and scan](trade-proposal-and-scan.md). |
+| A box doesn't toggle after the click, on every one of 3 attempts (300 ms apart; each retry logs a warning) | `PermanentError` classified `espn_selection_rejected`, with ESPN's reason or `unknown`. The row's HTML and the reason are logged at error level and stored in the failure row. See [Trade proposal and scan](trade-proposal-and-scan.md). |
 | ESPN rejects with 4xx | `PermanentError`, claim marked `failure` |
 | ESPN returns 5xx or 429, or no response | Outcome unknown, reconciled as above |
 | Claimed but never clicked | Claim released so a retry can run |

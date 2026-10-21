@@ -449,6 +449,41 @@ async function reconcileStuckSubmission(existing, offer, { label, offerKey, prov
   );
 }
 
+const CHECK_ATTEMPTS = 3;
+// Long enough for a late React hydration or re-render to finish, short enough not to stall a run.
+const CHECK_RETRY_DELAY_MS = 300;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Ticks one player's box. ESPN's server-rendered rows can exist before its handlers attach or
+ * before a re-render resets the box, which swallows the click and makes Playwright report "did
+ * not change its state" with no refusal on the page. So that one error is retried a bounded
+ * number of times, re-locating the row's box each time. Only when every attempt fails is it
+ * treated as a genuine refusal. Any other error is thrown at once.
+ */
+async function checkPlayerBox(id, row) {
+  for (let attempt = 1; attempt <= CHECK_ATTEMPTS; attempt += 1) {
+    try {
+      await row.locator(SELECTORS.trade_player_checkbox).first().check();
+      return;
+    } catch (error) {
+      // The click landed but ESPN left the box unchecked: a refusal, not a broken selector.
+      if (!isNotToggled(error)) throw error;
+      if (attempt === CHECK_ATTEMPTS) throw await buildSelectionRejection(id, row);
+      logger.warn("[Trade Builder] Checkbox click was ignored; retrying", {
+        playerId: id,
+        attempt,
+        maxAttempts: CHECK_ATTEMPTS,
+        retryDelayMs: CHECK_RETRY_DELAY_MS,
+      });
+      await delay(CHECK_RETRY_DELAY_MS);
+    }
+  }
+}
+
 /**
  * Navigates to the trade builder and ticks exactly the offer's players. `names` holds the
  * playerId -> name maps from readRoster for each side. Every row is resolved before any box is
@@ -525,13 +560,7 @@ async function fillTradeBuilder(page, offer, names) {
   // trade_player_checkbox is the visible span[role=checkbox] (it wraps a hidden input; confirmed
   // live in #123). .first() is defensive: a row is expected to hold exactly one.
   for (const { id, row } of resolved) {
-    try {
-      await row.locator(SELECTORS.trade_player_checkbox).first().check();
-    } catch (error) {
-      // The click landed but ESPN left the box unchecked: a refusal, not a broken selector.
-      if (!isNotToggled(error)) throw error;
-      throw await buildSelectionRejection(id, row);
-    }
+    await checkPlayerBox(id, row);
   }
 
   // Both checks are PermanentErrors: the same page will fail them the same way on every redelivery.
