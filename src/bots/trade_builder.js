@@ -457,12 +457,33 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A freshly restored ESPN session renders the trade builder but ignores selection clicks for its
+// first ~20 s (seen in prod on the first fill of every new session; later fills in the same session
+// work). The quick per-box retries above are far too short for that, so a box that stays ignored
+// triggers a wait, a reload and a full re-fill. Waits grow so the last attempt lands well past 20 s.
+const FULL_FILL_RETRY_DELAYS_MS = [5000, 10000, 15000];
+// Past this session age the warm-up theory no longer explains an ignored click, so it is treated
+// as a real refusal at once instead of spending the remaining waits (and the scan's runtime budget).
+const SESSION_WARMUP_WINDOW_MS = 45000;
+const TRADE_BUILDER_NAV_TIMEOUT_MS = 20000;
+const TRADE_ROWS_TIMEOUT_MS = 10000;
+
+/** Internal signal: a box stayed unchecked after the quick retries. Never leaves this module. */
+class ClickIgnored extends Error {
+  constructor(playerId, row) {
+    super(`Click on player ${playerId}'s box was ignored`);
+    this.playerId = playerId;
+    this.row = row;
+  }
+}
+
 /**
  * Ticks one player's box. ESPN's server-rendered rows can exist before its handlers attach or
  * before a re-render resets the box, which swallows the click and makes Playwright report "did
  * not change its state" with no refusal on the page. So that one error is retried a bounded
- * number of times, re-locating the row's box each time. Only when every attempt fails is it
- * treated as a genuine refusal. Any other error is thrown at once.
+ * number of times, re-locating the row's box each time. Only when every attempt fails is
+ * ClickIgnored thrown; the caller decides whether that is a refusal. Any other error is thrown
+ * at once.
  */
 async function checkPlayerBox(id, row) {
   for (let attempt = 1; attempt <= CHECK_ATTEMPTS; attempt += 1) {
@@ -472,7 +493,7 @@ async function checkPlayerBox(id, row) {
     } catch (error) {
       // The click landed but ESPN left the box unchecked: a refusal, not a broken selector.
       if (!isNotToggled(error)) throw error;
-      if (attempt === CHECK_ATTEMPTS) throw await buildSelectionRejection(id, row);
+      if (attempt === CHECK_ATTEMPTS) throw new ClickIgnored(id, row);
       logger.warn("[Trade Builder] Checkbox click was ignored; retrying", {
         playerId: id,
         attempt,
@@ -488,11 +509,47 @@ async function checkPlayerBox(id, row) {
  * Navigates to the trade builder and ticks exactly the offer's players. `names` holds the
  * playerId -> name maps from readRoster for each side. Every row is resolved before any box is
  * ticked, so an unresolvable player fails with nothing checked. Returns {resolvedBy}.
+ *
+ * If a box is still ignored after checkPlayerBox's quick retries (a fresh session's warm-up, see
+ * above), the page is reloaded after a backoff and the whole fill starts over, since a reload
+ * clears every tick. Only the last attempt's ignored click is raised as a selection rejection.
+ * `sessionStartedAt` (ms epoch, from the session) is used for logging and to stop retrying once
+ * the session is too old for warm-up to be the cause. This never sends anything: the write guard
+ * lives on the BrowserContext and survives reloads, and the caller lifts it after we return.
  */
-async function fillTradeBuilder(page, offer, names) {
-  await page.goto(buildTradeBuilderUrl(offer), { waitUntil: "networkidle", timeout: 20000 });
+async function fillTradeBuilder(page, offer, names, { sessionStartedAt } = {}) {
+  const maxAttempts = FULL_FILL_RETRY_DELAYS_MS.length + 1;
+  const sessionAgeMs = () => (sessionStartedAt ? Date.now() - sessionStartedAt : undefined);
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fillTradeBuilderOnce(page, offer, names);
+    } catch (error) {
+      if (!(error instanceof ClickIgnored)) throw error;
+      const age = sessionAgeMs();
+      const warmedUp = age !== undefined && age >= SESSION_WARMUP_WINDOW_MS;
+      if (attempt >= maxAttempts || warmedUp) {
+        throw await buildSelectionRejection(error.playerId, error.row);
+      }
+      const waitMs = FULL_FILL_RETRY_DELAYS_MS[attempt - 1];
+      logger.warn("[Trade Builder] Selection ignored; reloading the trade builder to re-fill", {
+        playerId: error.playerId,
+        attempt,
+        maxAttempts,
+        waitMs,
+        sessionAgeMs: age,
+      });
+      await delay(waitMs);
+    }
+  }
+}
+
+async function fillTradeBuilderOnce(page, offer, names) {
+  await page.goto(buildTradeBuilderUrl(offer), {
+    waitUntil: "networkidle",
+    timeout: TRADE_BUILDER_NAV_TIMEOUT_MS,
+  });
   try {
-    await page.waitForSelector(SELECTORS.trade_player_row, { timeout: 10000 });
+    await page.waitForSelector(SELECTORS.trade_player_row, { timeout: TRADE_ROWS_TIMEOUT_MS });
   } catch (waitError) {
     // Permanent: trade_player_row is unverified, and a selector that doesn't match will keep not
     // matching. A plain Error would requeue forever under connection.js's prefetch(1).
@@ -711,7 +768,7 @@ async function submitTradeOffer(
     await fillTradeBuilder(page, offer, {
       incoming: theirs.nameByPlayerId,
       outgoing: ours.nameByPlayerId,
-    });
+    }, { sessionStartedAt: session.startedAt });
 
     const snapshotLabel = `trade-offer-${offerKey}`;
     screenshotPath = (await captureDebugSnapshot(page, snapshotLabel)) ?? null;

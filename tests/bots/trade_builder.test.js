@@ -153,6 +153,8 @@ function makeBuilderPage(
     clicks: [],
     routeHandlers: [],
     gotoUrls: [],
+    // Page loads so far; a row with ignoreUntilLoad: n swallows clicks until the nth load.
+    loads: 0,
     filledMessage: null,
     // Stands in for running the in-page reader against the refused row.
     evaluate: async () => ({ signals: [], rowHtml: "", visibleText: "" }),
@@ -171,6 +173,9 @@ function makeBuilderPage(
         throw new Error("locator.check: Clicking the checkbox did not change its state");
       }
       if (set[0].checkError) throw new Error(set[0].checkError);
+      if (set[0].ignoreUntilLoad > state.loads) {
+        throw new Error("locator.check: Clicking the checkbox did not change its state");
+      }
       if (set[0].refuses) throw new Error("locator.check: Clicking the checkbox did not change its state");
       set[0].checked = true;
       state.clicks.push(`check:${set[0].id}`);
@@ -245,6 +250,9 @@ function makeBuilderPage(
   const page = {
     goto: jest.fn(async (url) => {
       state.gotoUrls.push(url);
+      state.loads += 1;
+      // A reload is a fresh page: every tick is gone.
+      if (state.loads > 1) for (const r of state.rows) r.checked = false;
     }),
     waitForSelector: jest.fn(async () => {}),
     route: jest.fn(async (_pattern, handler) => {
@@ -273,6 +281,13 @@ function makeBuilderPage(
     }),
   };
   return { page, state };
+}
+
+// Lets fake-timer backoffs elapse while a fill that is expected to reject is in flight, then hands
+// back the (rejected) promise for the usual expect(...).rejects.
+function drain(promise) {
+  promise.catch(() => {});
+  return jest.runAllTimersAsync().then(() => promise);
 }
 
 function fakeRoute(method, url) {
@@ -556,15 +571,6 @@ describe("fillTradeBuilder", () => {
       );
     });
 
-    it("raises a selection rejection once the bounded attempts are used up", async () => {
-      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 99 }));
-      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
-        permanent: true,
-        classification: "espn_selection_rejected",
-        playerId: "4259545",
-      });
-      expect(state.rows.find((r) => r.id === "4259545").checkAttempts).toBe(3);
-    });
 
     it("does not retry other errors", async () => {
       const { page, state } = makeBuilderPage(withRow("4259545", { checkError: "element is detached" }));
@@ -577,7 +583,116 @@ describe("fillTradeBuilder", () => {
     });
   });
 
+  describe("when a fresh session ignores every click for a while", () => {
+    const withRow = (id, patch) =>
+      [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === id ? { ...r, ...patch } : r));
+    // Runs the fill under fake timers, letting every backoff elapse instantly.
+    async function settle(promise) {
+      const outcome = promise.then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      await jest.runAllTimersAsync();
+      return outcome;
+    }
+    const reloadWarnings = () =>
+      logger.warn.mock.calls.filter(([msg]) => /reloading the trade builder/.test(msg));
+
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it("reloads and re-fills from scratch, then succeeds", async () => {
+      // Ignored on the first load, fine from the second.
+      const { page, state } = makeBuilderPage(withRow("4259545", { ignoreUntilLoad: 2 }));
+      const startedAt = Date.now();
+      const { value, error } = await settle(
+        fillTradeBuilder(page, offerFixture(), names, { sessionStartedAt: startedAt }),
+      );
+      expect(error).toBeUndefined();
+      expect(value.resolvedBy).toBeDefined();
+      expect(state.gotoUrls).toEqual(Array(2).fill(buildTradeBuilderUrl(offerFixture())));
+      expect(state.rows.filter((r) => r.checked)).toHaveLength(5);
+      expect(reloadWarnings()).toHaveLength(1);
+      expect(reloadWarnings()[0][1]).toMatchObject({
+        playerId: "4259545",
+        attempt: 1,
+        waitMs: 5000,
+        sessionAgeMs: expect.any(Number),
+      });
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it("raises a selection rejection once every full attempt is ignored", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 999 }));
+      const { error } = await settle(fillTradeBuilder(page, offerFixture(), names));
+      expect(error).toMatchObject({
+        permanent: true,
+        classification: "espn_selection_rejected",
+        playerId: "4259545",
+      });
+      // 1 initial fill + one per backoff, each with the quick 3 tries per box.
+      expect(state.gotoUrls).toHaveLength(4);
+      expect(state.rows.find((r) => r.id === "4259545").checkAttempts).toBe(12);
+      expect(reloadWarnings().map(([, ctx]) => ctx.waitMs)).toEqual([5000, 10000, 15000]);
+      expect(logger.error).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not back off once the session is too old for warm-up to be the cause", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { failFirstChecks: 999 }));
+      const { error } = await settle(
+        fillTradeBuilder(page, offerFixture(), names, { sessionStartedAt: Date.now() - 60000 }),
+      );
+      expect(error).toMatchObject({ classification: "espn_selection_rejected" });
+      expect(state.gotoUrls).toHaveLength(1);
+      expect(reloadWarnings()).toHaveLength(0);
+    });
+
+    it("does not reload for other errors", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { checkError: "element is detached" }));
+      const { error } = await settle(fillTradeBuilder(page, offerFixture(), names));
+      expect(error.message).toMatch(/element is detached/);
+      expect(state.gotoUrls).toHaveLength(1);
+      expect(reloadWarnings()).toHaveLength(0);
+    });
+
+    it("does not reload when a row cannot be resolved", async () => {
+      const { page, state } = makeBuilderPage(OUR_ROWS);
+      const { error } = await settle(fillTradeBuilder(page, offerFixture(), names));
+      expect(error).toMatchObject({ permanent: true });
+      expect(state.gotoUrls).toHaveLength(1);
+    });
+
+    it("never lifts the write guard or clicks anything while retrying", async () => {
+      const { page, state } = makeBuilderPage(withRow("4259545", { ignoreUntilLoad: 3 }));
+      const guard = await installWriteGuard(fakeContext(page));
+      const allow = jest.spyOn(guard, "allowWrites");
+      const { error } = await settle(fillTradeBuilder(page, offerFixture(), names));
+      expect(error).toBeUndefined();
+      expect(allow).not.toHaveBeenCalled();
+      expect(guard.writesAllowed).toBe(false);
+      expect(state.clicks.every((c) => c.startsWith("check:"))).toBe(true);
+    });
+
+    it("a live submit still claims and sends once after a retried fill", async () => {
+      armForLiveSubmit();
+      const { page, state } = makeBuilderPage(withRow("4259545", { ignoreUntilLoad: 2 }));
+      const browser = useSession(page);
+      const offer = offerFixture();
+      const { value, error } = await settle(
+        submitTradeOffer(offer, { approval: approvalFor(offer), trackingId: "t-warm" }),
+      );
+      expect(error).toBeUndefined();
+      expect(value).toMatchObject({ status: "submitted" });
+      expect(state.gotoUrls).toHaveLength(2);
+      expect(state.clicks.filter((c) => c === "submit")).toHaveLength(1);
+      expect(claimTradeSubmission).toHaveBeenCalledTimes(1);
+      expect(browser.close).toHaveBeenCalled();
+    });
+  });
+
   describe("when ESPN refuses a selection", () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
     const refusing = (id) => [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === id ? { ...r, refuses: true } : r));
 
     it("classifies it, keeps ESPN's reason and logs the row at error level", async () => {
@@ -587,7 +702,7 @@ describe("fillTradeBuilder", () => {
         rowHtml: '<tr class="Table__TR"><span role="checkbox" aria-checked="false"></span></tr>',
         visibleText: "Trade not allowed",
       });
-      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+      await expect(drain(fillTradeBuilder(page, offerFixture(), names))).rejects.toMatchObject({
         permanent: true,
         classification: "espn_selection_rejected",
         playerId: "4259545",
@@ -606,7 +721,7 @@ describe("fillTradeBuilder", () => {
 
     it("reports unknown when the page shows nothing, and still logs", async () => {
       const { page } = makeBuilderPage(refusing("4259545"));
-      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+      await expect(drain(fillTradeBuilder(page, offerFixture(), names))).rejects.toMatchObject({
         classification: "espn_selection_rejected",
         reason: "unknown",
       });
@@ -618,7 +733,7 @@ describe("fillTradeBuilder", () => {
       state.evaluate = async () => {
         throw new Error("Element is not attached to the DOM");
       };
-      await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toMatchObject({
+      await expect(drain(fillTradeBuilder(page, offerFixture(), names))).rejects.toMatchObject({
         classification: "espn_selection_rejected",
         reason: "unknown",
       });
@@ -1201,6 +1316,8 @@ describe("submitTradeOffer: redelivery", () => {
 });
 
 describe("submitTradeOffer: counter linkage", () => {
+  afterEach(() => jest.useRealTimers());
+
   const espnApi = require("../../src/bots/espn_api");
   const linked = (overrides) =>
     offerFixture({ relatedTransactionId: "tx-3", threadRootId: "tx-1", ...overrides });
@@ -1223,12 +1340,13 @@ describe("submitTradeOffer: counter linkage", () => {
   });
 
   it("keeps a refused selection's evidence in the failure row, since disk captures vanish with the pod", async () => {
+    jest.useFakeTimers();
     const rows = [...THEIR_ROWS, ...OUR_ROWS].map((r) => (r.id === "4259545" ? { ...r, refuses: true } : r));
     const { page, state } = makeBuilderPage(rows);
     state.evaluate = async () => ({ signals: ["title: Locked"], rowHtml: "<tr>row</tr>", visibleText: "" });
     useSession(page);
 
-    await expect(submitTradeOffer(offerFixture(), { source: "proposal" })).rejects.toMatchObject({
+    await expect(drain(submitTradeOffer(offerFixture(), { source: "proposal" }))).rejects.toMatchObject({
       classification: "espn_selection_rejected",
     });
 
