@@ -346,6 +346,7 @@ module.exports = {
   fetchByeOutlook,
   summarizeByeOutlook,
   scoreTradePackage,
+  eligibilityReasons,
   rankScoredPackages,
   counterVerdict,
   buildPitchEvidence,

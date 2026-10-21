@@ -450,6 +450,70 @@ test("all live candidates failing gates stages nothing without generating replac
   expect(submitTradeOffer).not.toHaveBeenCalled();
 });
 
+const cand = (team, espnId, score, send = "100") => ({
+  counterparty: { team_id: team }, receive: [{ espn_id: espnId }], send: [{ espn_id: send }],
+  status: "proposable", final_score: score,
+});
+// Scores by team, with specific incoming ids overridden: a string reason rejects the live score.
+const liveBy = (overrides) => scoreTradePackage.mockImplementation(async ({ tradePackage }) => {
+  const override = overrides[tradePackage.incoming_player_ids[0]];
+  if (typeof override === "string") return { status: "rejected", reason: override };
+  return {
+    status: "scored",
+    request: { counterparty_team_id: tradePackage.to_team_id, incoming: tradePackage.incoming_player_ids },
+    score: override || scores[tradePackage.to_team_id],
+  };
+});
+
+test("a runner-up stages after the best stored package fails live, and records its depth", async () => {
+  useCandidates([cand("3", "300", 10), cand("3", "302", 9), cand("2", "200", 8)]);
+  liveBy({ 300: "ownership_changed" });
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => [offer.toTeamId, offer.incomingPlayerIds[0]])).toEqual([["3", "302"], ["2", "200"]]);
+  expect(result.offers.map(({ evaluation }) => evaluation.ranking.candidate_rank)).toEqual([2, 1]);
+  expect(completeWithFallback.mock.calls.map(([, opts]) => opts.callSite)).not.toContain("trade_proposal_packages");
+});
+
+test("a runner-up is tried after a live gate failure too", async () => {
+  useCandidates([cand("3", "300", 10), cand("3", "302", 9)]);
+  liveBy({ 300: makeScore({ ourWeeks: [lineupWeek(5, 0)] }) });
+  const result = await generateTradeProposal(payload);
+  expect(result.offers).toHaveLength(1);
+  expect(result.evaluation.ranking.candidate_rank).toBe(2);
+});
+
+test("when every runner-up also fails, nothing is staged and the LLM is not used for packages", async () => {
+  useCandidates([cand("3", "300", 10), cand("3", "302", 9), cand("3", "303", 8)]);
+  liveBy({ 300: "ownership_changed", 302: "score_unavailable", 303: makeScore({ ourWeeks: [lineupWeek(5, 0)] }) });
+  await expect(generateTradeProposal(payload)).resolves.toMatchObject({ status: "no_offer", reason: "no_useful_offer" });
+  expect(completeWithFallback).not.toHaveBeenCalled();
+  expect(submitTradeOffer).not.toHaveBeenCalled();
+});
+
+test("at most two runner-ups are tried per counterparty", async () => {
+  useCandidates([cand("3", "300", 10), cand("3", "302", 9), cand("3", "303", 8), cand("3", "304", 7)]);
+  liveBy({ 300: "ownership_changed", 302: "ownership_changed", 303: "ownership_changed" });
+  await expect(generateTradeProposal(payload)).resolves.toMatchObject({ status: "no_offer" });
+  expect(scoreTradePackage.mock.calls.map(([args]) => args.tradePackage.incoming_player_ids[0])).toEqual(["300", "302", "303"]);
+});
+
+test("runner-ups never exceed one staged offer per counterparty or three alternatives", async () => {
+  const context = await fetchTradeContext();
+  for (const id of ["4", "5"]) context.teams[id] = team(id, [player(`${id}00`, "WR")]);
+  fetchTradeContext.mockResolvedValue(context);
+  scores[4] = scores[2];
+  scores[5] = scores[2];
+  useCandidates([
+    cand("2", "200", 10), cand("2", "202", 9.9), cand("3", "300", 9), cand("3", "302", 8.9),
+    cand("4", "400", 8), cand("5", "500", 7),
+  ]);
+  liveBy({ 200: "ownership_changed" });
+  const result = await generateTradeProposal(payload);
+  expect(result.offers).toHaveLength(3);
+  expect(new Set(result.offers.map(({ offer }) => offer.toTeamId)).size).toBe(3);
+  expect(scoreTradePackage.mock.calls.map(([args]) => args.tradePackage.to_team_id)).not.toContain("5");
+});
+
 test.each(["never_run", "unavailable", "empty", "stale", "invalid"])("%s candidate data uses the LLM fallback and records its source", async (reason) => {
   fetchTradeCandidates.mockResolvedValue({ status: "fallback", reason });
   const result = await generateTradeProposal(payload);

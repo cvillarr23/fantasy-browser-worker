@@ -19,6 +19,7 @@ const {
   validatePitch,
   buildEvaluation,
   evaluationFits,
+  eligibilityReasons,
 } = require("../lib/trade_scoring");
 const { logger } = require("../telemetry/logger");
 const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require("../errors");
@@ -245,7 +246,13 @@ async function buildOffer(entry, rank, { leagueId, season, fromTeamId, trackingI
     request: entry.request,
     score: entry.score,
     target: entry.target,
-    ranking: { basis: entry.basis, value_per_scored_week: entry.value_per_scored_week, rank, ...ranking },
+    ranking: {
+      basis: entry.basis,
+      value_per_scored_week: entry.value_per_scored_week,
+      rank,
+      ...(entry.candidateRank ? { candidate_rank: entry.candidateRank } : {}),
+      ...ranking,
+    },
     pitch,
     evidence,
     evaluatedAt: new Date().toISOString(),
@@ -312,12 +319,31 @@ async function generateTradeProposal(payload) {
     // than having core re-read ESPN.
     const scored = [];
     const unscored = [];
+    let ineligibleAttempt = false;
     for (const candidate of packages) {
-      const result = await scoreTradePackage({ ...period, ourTeamId: fromTeamId, tradePackage: candidate.package });
-      if (result.status === "scored") scored.push({ ...candidate, request: result.request, score: result.score });
-      else unscored.push({ package: candidate.package, reasons: [result.reason], detail: result.detail });
+      // Candidate picks carry runner-ups: the same counterparty's next-best stored packages, tried
+      // only when the better one fails its live score or gates. No other counterparty or LLM
+      // package substitutes.
+      const attempts = [candidate, ...(candidate.runnerUps || [])];
+      for (const attempt of attempts) {
+        const entry = { ...candidate, ...attempt };
+        delete entry.runnerUps;
+        const result = await scoreTradePackage({ ...period, ourTeamId: fromTeamId, tradePackage: entry.package });
+        if (result.status !== "scored") {
+          unscored.push({ package: entry.package, reasons: [result.reason], detail: result.detail });
+          continue;
+        }
+        const live = { ...entry, request: result.request, score: result.score };
+        if (attempts.length > 1 && !rankScoredPackages([live]).ranked.length) {
+          ineligibleAttempt = true;
+          unscored.push({ package: entry.package, reasons: eligibilityReasons(result.score) });
+          continue;
+        }
+        scored.push(live);
+        break;
+      }
     }
-    if (!scored.length && unscored.some((entry) => entry.reasons.includes("score_unavailable")))
+    if (!scored.length && !ineligibleAttempt && unscored.some((entry) => entry.reasons.includes("score_unavailable")))
       throw new Error("[Trade Proposal] Core could not score any candidate package; nothing staged.");
 
     const { ranked, rejections } = rankScoredPackages(scored);

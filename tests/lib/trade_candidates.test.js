@@ -69,6 +69,20 @@ test("takes the best per counterparty, excludes open offers and caps live scorin
   ]);
 });
 
+test("keeps at most two stored runner-ups per counterparty, in stored order", () => {
+  const withReceive = (id, score, espnId) => candidate(id, score, { receive: [{ espn_id: espnId }] });
+  const items = [
+    withReceive("2", 20, "201"), withReceive("2", 19, "202"), withReceive("2", 18, "203"),
+    withReceive("2", 17, "204"), candidate("3", 10),
+  ];
+  const picked = selectCandidatePackages(items, { fromTeamId: "1", excluded: new Set() });
+  expect(picked).toHaveLength(2);
+  expect(picked[0]).toMatchObject({ candidateRank: 1, package: { incoming_player_ids: ["201"] } });
+  expect(picked[0].runnerUps.map((entry) => [entry.candidateRank, entry.package.incoming_player_ids[0]]))
+    .toEqual([[2, "202"], [3, "203"]]);
+  expect(picked[1].runnerUps).toEqual([]);
+});
+
 test("prefers a bye partner within 5% while keeping a clearly better candidate ahead", () => {
   const context = { teams: {
     1: { bye_outlook: { crunch_weeks: [8] } },
