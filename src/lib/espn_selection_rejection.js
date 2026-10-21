@@ -55,10 +55,11 @@ function readRowSignals(el, { maxSignalChars, maxHtmlChars, maxVisibleChars }) {
       add("state class", node.getAttribute("class"));
     }
   }
-  for (const node of el.querySelectorAll("[title], [aria-disabled='true']")) {
+  // Only disabled controls count here. Every stat cell in the row carries a title ("Quarterback",
+  // "Position Rank"...), which is column labelling, not a refusal, and buried the real signals.
+  for (const node of el.querySelectorAll("[aria-disabled='true']")) {
     if (node === box) continue;
-    add("title", node.getAttribute("title"));
-    if (node.getAttribute("aria-disabled") === "true") add("disabled", node.textContent || "disabled control");
+    add("disabled", node.textContent || "disabled control");
   }
   const doc = el.ownerDocument;
   const alertSelector = '[role="alert"], [role="status"], [role="tooltip"], [class*="toast" i], [class*="Toast"], [class*="error" i], [class*="tooltip" i]';
