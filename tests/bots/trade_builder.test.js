@@ -256,6 +256,7 @@ function makeBuilderPage(
       if (state.loads > 1) for (const r of state.rows) r.checked = false;
     }),
     waitForSelector: jest.fn(async () => {}),
+    waitForLoadState: jest.fn(async () => {}),
     route: jest.fn(async (_pattern, handler) => {
       state.routeHandlers.push(handler);
     }),
@@ -557,6 +558,28 @@ describe("fillTradeBuilder", () => {
     expect(checked).toEqual(["-16021", "15847", "3139477", "4259545", "4362628"].sort());
     expect(result.resolvedBy).toMatchObject({ "-16021": "name", "4259545": "headshot" });
     expect(state.clicks.every((c) => c.startsWith("check:"))).toBe(true);
+  });
+
+  it("fills anyway when the page never goes network-idle", async () => {
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    const idleTimeout = Object.assign(new Error("Timeout 20000ms exceeded."), { name: "TimeoutError" });
+    page.waitForLoadState.mockRejectedValue(idleTimeout);
+
+    await fillTradeBuilder(page, offerFixture(), names);
+
+    expect(page.goto).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ waitUntil: "domcontentloaded" }));
+    expect(state.rows.filter((r) => r.checked)).toHaveLength(5);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "[Trade Builder] Trade builder never went network-idle; continuing once rows load",
+    );
+  });
+
+  it("still raises a non-timeout load-state error", async () => {
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    page.waitForLoadState.mockRejectedValue(new Error("Target page has been closed"));
+
+    await expect(fillTradeBuilder(page, offerFixture(), names)).rejects.toThrow("Target page has been closed");
+    expect(state.rows.some((r) => r.checked)).toBe(false);
   });
 
   describe("when the first click is swallowed", () => {

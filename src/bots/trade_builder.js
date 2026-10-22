@@ -555,9 +555,17 @@ async function fillTradeBuilder(page, offer, names, { sessionStartedAt } = {}) {
 
 async function fillTradeBuilderOnce(page, offer, names) {
   await page.goto(buildTradeBuilderUrl(offer), {
-    waitUntil: "networkidle",
+    waitUntil: "domcontentloaded",
     timeout: TRADE_BUILDER_NAV_TIMEOUT_MS,
   });
+  // Prefer a settled page, but ESPN's trade page sometimes keeps background requests going and
+  // never goes idle; the row wait below is what actually gates the fill.
+  try {
+    await page.waitForLoadState("networkidle", { timeout: TRADE_BUILDER_NAV_TIMEOUT_MS });
+  } catch (idleError) {
+    if (idleError?.name !== "TimeoutError") throw idleError;
+    logger.warn("[Trade Builder] Trade builder never went network-idle; continuing once rows load");
+  }
   try {
     await page.waitForSelector(SELECTORS.trade_player_row, { timeout: TRADE_ROWS_TIMEOUT_MS });
   } catch (waitError) {
