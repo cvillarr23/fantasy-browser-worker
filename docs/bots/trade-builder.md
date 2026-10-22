@@ -7,7 +7,7 @@ sidebar_position: 9
 The trade builder fills ESPN's "Propose Trade" form for an offer. It sends the offer only when every lock is open. With any lock closed it ticks the boxes, verifies them, screenshots them and stops.
 
 :::danger[This sends real offers to other managers]
-A live send needs `DRY_RUN=false`, `TRADE_SUBMIT_ENABLED=true`, an approval whose `offer_key` matches the offer, verified selectors, and verified counter linkage for a counter. An approval can't be reused for a different offer.
+A live send needs `TRADE_DRY_RUN=false` (or `DRY_RUN=false` when `TRADE_DRY_RUN` is unset), `TRADE_SUBMIT_ENABLED=true`, an approval whose `offer_key` matches the offer, verified selectors, and verified counter linkage for a counter. An approval can't be reused for a different offer.
 :::
 
 ```mermaid
@@ -51,11 +51,13 @@ League and our team come from `ESPN_LEAGUE_ID` and `ESPN_TEAM_ID`.
 
 | # | Lock | Open when |
 |---|---|---|
-| 1 | `DRY_RUN` | Explicitly `false`. |
+| 1 | `TRADE_DRY_RUN`, falling back to `DRY_RUN` | Explicitly `false` (`0`, `false` or `no`). `TRADE_DRY_RUN` wins when set, so `TRADE_DRY_RUN=true` blocks a send even if `DRY_RUN=false`. When both are unset the lock is closed. |
 | 2 | `TRADE_SUBMIT_ENABLED` | `true`, `1` or `yes`. |
 | 3 | Approval | `offer_key` equals the key recomputed from the offer. |
 | 4 | Selectors | Every submit selector is listed under `_verified` in `espn_selectors.json`. |
 | 5 | Counter linkage | Only for a counter: `COUNTER_LINKAGE_VERIFIED` is set in `espn_api.js`. |
+
+Set `TRADE_DRY_RUN=false` to arm trade submissions without arming the other bots: it affects only the trade builder, while waiver sniper, draft clicker, lineup and trade response keep reading `DRY_RUN`. The other locks still apply. The closed-lock message names the variable that decided: `TRADE_DRY_RUN is not explicitly false`, `DRY_RUN is not explicitly false (TRADE_DRY_RUN unset)`, or `TRADE_DRY_RUN and DRY_RUN are unset (dry run by default)`. The "ready for approval" push notification gets its `[dry run]` prefix from the same trade switch.
 
 The `offer_key` is a SHA-256 over league, season, both teams, the sorted id lists, the note and the related transaction. Reordering ids doesn't change it. Editing the note does.
 

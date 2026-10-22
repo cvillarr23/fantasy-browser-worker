@@ -23,7 +23,7 @@ const { PermanentError, requirePlainObjectPayload, withRetryDelay } = require(".
 const { isNotToggled, buildSelectionRejection } = require("../lib/espn_selection_rejection");
 const { requirePlayerId } = require("../lib/espn_ids");
 const SELECTORS = require("../selectors/espn_selectors.json");
-const { resolveDryRun } = require("../lib/env");
+const { resolveTradeDryRun } = require("../lib/env");
 const { notify } = require("../lib/notify");
 const { tradeAwaitingApproval } = require("../lib/notifications");
 const { logger } = require("../telemetry/logger");
@@ -35,7 +35,10 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * trade_bot.js's counter-offers and, later, #93's generated proposals.
  *
  * THIS SENDS REAL TRADE OFFERS TO OTHER MANAGERS. A real submit needs all four of:
- *   1. DRY_RUN explicitly false   — unset means TRUE (waiver_sniper.js/draft_clicker.js convention).
+ *   1. TRADE_DRY_RUN explicitly false — falls back to DRY_RUN when unset; both unset means TRUE
+ *                                   (waiver_sniper.js/draft_clicker.js convention). TRADE_DRY_RUN
+ *                                   lets trades go live without DRY_RUN=false arming the other
+ *                                   bots that share the worker.
  *   2. TRADE_SUBMIT_ENABLED=true  — trade-specific arming switch, default off, so DRY_RUN=false for
  *                                   lineup/waiver work on the same pod doesn't also arm this.
  *   3. a per-offer approval       — {offer_key, approved_by}; offer_key must equal
@@ -83,6 +86,12 @@ const TRADE_SUBMIT_SELECTOR_KEYS = [
 
 const SOURCES = new Set(["counter_offer", "proposal", "manual"]);
 const SUBMIT_RESPONSE_TIMEOUT_MS = 30000;
+
+function dryRunLockMessage(source) {
+  if (source === "TRADE_DRY_RUN") return "TRADE_DRY_RUN is not explicitly false";
+  if (source === "DRY_RUN") return "DRY_RUN is not explicitly false (TRADE_DRY_RUN unset)";
+  return "TRADE_DRY_RUN and DRY_RUN are unset (dry run by default)";
+}
 
 function isSubmitArmed() {
   return /^(1|true|yes)$/i.test((process.env.TRADE_SUBMIT_ENABLED || "").trim());
@@ -684,7 +693,8 @@ async function submitTradeOffer(
   if (approval !== undefined && approval !== null) requireApproval(approval, offerKey);
 
   const closedLocks = [];
-  if (resolveDryRun(true).dryRun) closedLocks.push("DRY_RUN is not explicitly false");
+  const tradeDryRun = resolveTradeDryRun(true);
+  if (tradeDryRun.dryRun) closedLocks.push(dryRunLockMessage(tradeDryRun.source));
   if (!isSubmitArmed()) closedLocks.push("TRADE_SUBMIT_ENABLED is not true");
   const unverified = unverifiedSubmitSelectors();
   if (unverified.length > 0) {
@@ -1023,7 +1033,7 @@ if (require.main === module) {
   if (!raw) {
     logger.error(
       "Usage: node src/bots/trade_builder.js '<trade_submissions JSON payload>'\n" +
-        "Dry fill (DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1234567890 ESPN_TEAM_ID=8 \\\n" +
+        "Dry fill (TRADE_DRY_RUN and DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1234567890 ESPN_TEAM_ID=8 \\\n" +
         "  node src/bots/trade_builder.js \\\n" +
         `  '{"season":2026,"to_team_id":"3","incoming_player_ids":["4259545"],"outgoing_player_ids":["3139477"]}'`,
     );

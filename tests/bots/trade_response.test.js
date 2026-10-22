@@ -21,7 +21,7 @@ const { PermanentError, SessionExpiredError } = require("../../src/errors");
 
 const NOW = new Date("2026-10-06T18:00:00Z");
 const EXPIRES = Date.parse("2026-10-07T18:00:00Z");
-const ENV_KEYS = ["DRY_RUN", "TRADE_RESPONSE_ENABLED", "ESPN_LEAGUE_ID", "ESPN_TEAM_ID"];
+const ENV_KEYS = ["DRY_RUN", "TRADE_DRY_RUN", "TRADE_RESPONSE_ENABLED", "ESPN_LEAGUE_ID", "ESPN_TEAM_ID"];
 
 function trade(overrides = {}) {
   return {
@@ -176,6 +176,17 @@ describe("executeTradeResponse locks", () => {
     expect(deps.beforeExternalWrite).not.toHaveBeenCalled();
     expect(deps.recordBlocked).toHaveBeenCalledWith(expect.objectContaining({ closedLocks: [lock] }));
     expect(deps.inbox()).toMatchObject({ status: STATUS.OPEN, decision: { outcome: "blocked", closed_locks: [lock] } });
+  });
+
+  it("is not armed by TRADE_DRY_RUN=false", async () => {
+    delete process.env.DRY_RUN;
+    process.env.TRADE_DRY_RUN = "false";
+
+    const result = await executeTradeResponse(payload("decline"), deps);
+
+    expect(result).toMatchObject({ status: "response_blocked", closedLocks: ["dry_run"] });
+    expect(deps.submit).not.toHaveBeenCalled();
+    delete process.env.TRADE_DRY_RUN;
   });
 
   it("ships with every lock closed by default", async () => {
