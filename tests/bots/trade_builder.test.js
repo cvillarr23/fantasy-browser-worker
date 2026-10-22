@@ -1067,7 +1067,15 @@ describe("submitTradeOffer: approval gate", () => {
     // Fire requests through the installed guard as the page loads.
     page.goto.mockImplementation(async () => {
       const [handler] = state.routeHandlers;
-      await handler(fakeRoute("POST", "https://sw88.espn.com/b/ss/analytics"));
+      // Adobe beacons name the trade page in their query string.
+      await handler(
+        fakeRoute(
+          "POST",
+          "https://sw88.espn.com/b/ss/wdgespcom,wdgespge/1/JS-2.27.0/s1?pageName=fantasy%3Afootball%3Aleague%3Ateamtrade" +
+            "&pageUrl=https%3A%2F%2Ffantasy.espn.com%2Ffootball%2Fteam%2Ftrade%3FleagueId%3D1",
+        ),
+      );
+      await handler(fakeRoute("POST", "https://go.web.plus.espn.com/xur/9070"));
     });
 
     await expect(

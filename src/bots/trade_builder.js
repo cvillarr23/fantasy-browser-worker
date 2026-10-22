@@ -284,13 +284,14 @@ async function installWriteGuard(target) {
  * beacon that also happens to POST to an espn.com host. Only these make a live submit refuse.
  */
 function isTradeFlowWrite({ url }) {
-  let host = "";
+  let parsed;
   try {
-    host = new URL(url).hostname;
+    parsed = new URL(url);
   } catch {
     return true; // can't tell, so treat it as the flow's
   }
-  return /^lm-api-writes\./i.test(host) || /trade|transaction/i.test(url);
+  // Match the path, not the query: analytics beacons carry the page URL (…/team/trade) in theirs.
+  return /^lm-api-writes\./i.test(parsed.hostname) || /trade|transaction/i.test(parsed.pathname);
 }
 
 // Same endpoint submitLineup posts to; ESPN's client appends ?platformVersion=<build hash>.
