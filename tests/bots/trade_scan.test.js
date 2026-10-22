@@ -308,3 +308,11 @@ test("a duplicate or check-only scan does not refresh the inbox", async () => {
   await runTradeScan({ stage: true }, deps);
   expect(deps.refreshInbox).not.toHaveBeenCalled();
 });
+
+test("packages skipped as already staged are reported and are not failures", async () => {
+  const skipped = [{ team_id: "3", reason: "already_staged", incoming_player_ids: ["300"], outgoing_player_ids: ["101"] }];
+  deps.generate.mockResolvedValue({ status: "no_offer", reason: "already_staged", skipped });
+  const result = await runTradeScan({ stage: true }, deps);
+  expect(result).toMatchObject({ status: "no_offer", reason: "already_staged", offersStaged: 0, offersFailed: 0 });
+  expect(addSummary).toHaveBeenCalledWith(expect.objectContaining({ skippedPackages: skipped }));
+});

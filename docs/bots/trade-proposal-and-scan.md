@@ -53,6 +53,15 @@ The list’s `computed_at` must be valid and no more than 36 hours old. A 404 (t
 
 Each selected candidate is re-scored through `POST /v1/trade/score` using its ESPN send/receive ids and the scan’s period before any pitch is written or offer is staged. When a counterparty's best stored package fails its live score or gates (an ownership change, an unavailable score or a failed eligibility gate), the worker tries that counterparty's next-best stored packages, in the stored sort order, at most 2 more. The first survivor is the counterparty's one candidate, and the cap of 3 staged alternatives is unchanged. The evaluation's `ranking.candidate_rank` is the survivor's position among that counterparty's stored candidates (1 is the best, 2 and 3 are runner-ups). A counterparty with no survivor is skipped. Nothing triggers LLM package generation or substitutes another counterparty's package, so when nothing survives the result is `no_offer`. On this path, the LLM only writes the grounded pitch.
 
+### Packages that are already staged or committed
+
+The pitch is rewritten on every scan, so the offer key can't tell that a package is a repeat. Before scoring, the worker reads our open outgoing offers from `GET /v1/trade/offers` (`awaiting_approval`, `approval_pending`, `approved`, `submitting` and `submitted`, for the scan's league and season) and drops a package when:
+
+- `already_staged`: an open offer goes to the same counterparty with the same incoming and outgoing players, ignoring the message and the order of the ids.
+- `player_committed`: a player we would send is already in one of our `approval_pending`, `approved`, `submitting` or `submitted` offers. An offer that is only awaiting approval commits nothing, so the same player can still go to another team.
+
+On the candidate path the check runs before each counterparty's best package is chosen, so its next stored package takes the place of a dropped one. On the LLM path the package is simply dropped. A dropped package is not a failure. The run result and run summary list each one under `skipped` / `skippedPackages` (team id, reason and player ids), and each is logged. When every package is dropped the result is `no_offer` with the first reason. If core can't answer the offers read, the scan logs a warning and runs without the check, because a duplicate still needs a person's approval. Once core exposes its committed-player set, the `player_committed` check can read that instead.
+
 ### LLM package fallback
 
 A position counts as weak when a team is short of starters there, or its `net_vorp` is below the league average for it. The worker keeps the worst weakness on each of up to 3 teams. When our bye outlook has crunch weeks, it adds up to 2 more teams with a weakness whose own crunch weeks miss ours, marked `bye_partner`, so the model sees partners that can spare a starter for our empty weeks.
@@ -76,7 +85,7 @@ For either package source, the pitch comes from an LLM call that sees only count
 | Result | Meaning |
 |---|---|
 | `no_target` | No candidate counterparty remains after exclusions, or the fallback finds no weak position to target. |
-| `no_offer` with a `reason` | `no_packages`, `no_valid_packages`, `no_useful_offer`, `pitch_rejected` or `evaluation_too_large` (the first alternative's reason, when every alternative failed). Nothing is staged. |
+| `no_offer` with a `reason` | `no_packages`, `no_valid_packages`, `no_useful_offer`, `pitch_rejected`, `evaluation_too_large`, `already_staged` or `player_committed` (the first alternative's reason, when every alternative failed). Nothing is staged. |
 | Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged` (offers that reached `awaiting_approval`) and `offersFailed`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. |
 | Error | Core couldn't score any package. Nothing is ever staged unscored. |
 
