@@ -8,6 +8,7 @@ const { completeWithFallback } = require("../lib/llm_client");
 const { submitTradeOffer } = require("./trade_builder");
 const { fetchTradeCandidates, selectCandidatePackages } = require("../lib/trade_candidates");
 const { PLAYER_ID_PATTERN } = require("../lib/espn_ids");
+const { fetchOpenOutgoingOffers, pendingOfferConflict } = require("../lib/pending_offers");
 const {
   SCORE_HORIZON_WEEKS,
   packageKey,
@@ -224,8 +225,8 @@ function buildPitchSystemPrompt(evidence) {
   ].join("\n");
 }
 
-function noOffer(reason, target, rejections = []) {
-  return { status: "no_offer", reason, target, rejections };
+function noOffer(reason, target, rejections = [], skipped = []) {
+  return { status: "no_offer", reason, target, rejections, ...(skipped.length ? { skipped } : {}) };
 }
 
 // Pitch and evaluation for one ranked package, or {reason, target} when it can't be staged.
@@ -345,6 +346,18 @@ async function generateTradeProposal(payload) {
   try {
     const excluded = new Set(payload.exclude_team_ids || []);
     const period = { leagueId, season, week, horizon: SCORE_HORIZON_WEEKS };
+    // Packages that repeat an open offer (the pitch differs every scan, so the offer key doesn't
+    // catch them) or send a player already committed elsewhere are dropped before scoring, so the
+    // counterparty's next-best package takes their place. They are not failures.
+    const openOffers = await fetchOpenOutgoingOffers({ leagueId, season, fromTeamId });
+    const skipped = [];
+    const screen = (toTeamId, incomingPlayerIds, outgoingPlayerIds) => {
+      const reason = pendingOfferConflict(openOffers, { toTeamId, incomingPlayerIds, outgoingPlayerIds });
+      if (!reason) return true;
+      skipped.push({ team_id: toTeamId, reason, incoming_player_ids: incomingPlayerIds, outgoing_player_ids: outgoingPlayerIds });
+      logger.info("[Trade Proposal] Skipping a package that conflicts with an open offer", { trackingId, ...skipped.at(-1) });
+      return false;
+    };
     const candidates = await fetchTradeCandidates(period);
     const source = candidates.status === "available" ? "candidates" : "llm";
     logger.info("[Trade Proposal] Selected package source", {
@@ -355,8 +368,13 @@ async function generateTradeProposal(payload) {
     let topTarget;
     if (source === "candidates") {
       const context = await fetchTradeContext(period);
-      packages = selectCandidatePackages(candidates.items, { fromTeamId, excluded, context });
-      if (!packages.length) return { status: "no_target" };
+      const items = candidates.items.filter((item) => screen(
+        item.counterparty.team_id,
+        item.receive.map((player) => player.espn_id),
+        item.send.map((player) => player.espn_id),
+      ));
+      packages = selectCandidatePackages(items, { fromTeamId, excluded, context });
+      if (!packages.length) return skipped.length ? noOffer(skipped[0].reason, { team_id: skipped[0].team_id }, [], skipped) : { status: "no_target" };
       const [bestCandidate] = packages;
       topTarget = bestCandidate.target;
     } else {
@@ -374,9 +392,13 @@ async function generateTradeProposal(payload) {
         { systemPrompt: buildPackageSystemPrompt(grounding), callSite: "trade_proposal_packages" },
       );
       ({ packages, invalid } = parsePackagesResponse(text, grounding));
+      packages = packages.filter(({ package: tradePackage }) =>
+        screen(tradePackage.to_team_id, tradePackage.incoming_player_ids, tradePackage.outgoing_player_ids));
     }
-    if (!packages.length)
-      return noOffer(invalid.length ? "no_valid_packages" : "no_packages", topTarget, invalid);
+    if (!packages.length) {
+      if (skipped.length && !invalid.length) return noOffer(skipped[0].reason, topTarget, [], skipped);
+      return noOffer(invalid.length ? "no_valid_packages" : "no_packages", topTarget, invalid, skipped);
+    }
 
     // Back-to-back, one at a time: each call then reuses core's short-lived context cache rather
     // than having core re-read ESPN.
@@ -416,7 +438,7 @@ async function generateTradeProposal(payload) {
       ranked: ranked.map((entry) => ({ package: entry.package, basis: entry.basis, value: entry.value_per_scored_week })),
       rejections: allRejections,
     });
-    if (!ranked.length) return noOffer("no_useful_offer", topTarget, allRejections);
+    if (!ranked.length) return noOffer("no_useful_offer", topTarget, allRejections, skipped);
 
     const ranking = {
       source,
@@ -431,7 +453,7 @@ async function generateTradeProposal(payload) {
       if (built.reason) firstFailure ??= built;
       else computed.push(built);
     }
-    if (!computed.length) return noOffer(firstFailure.reason, firstFailure.target, allRejections);
+    if (!computed.length) return noOffer(firstFailure.reason, firstFailure.target, allRejections, skipped);
 
     session = (await createSessionFromStoredState()) ?? (await createAuthenticatedSession());
     const offers = [];
@@ -444,7 +466,7 @@ async function generateTradeProposal(payload) {
       }));
     }
     // The best offer's fields stay at the top level for existing callers.
-    return { ...offers[0], offers };
+    return { ...offers[0], offers, ...(skipped.length ? { skipped } : {}) };
   } catch (error) {
     throw withRetryDelay(error);
   } finally {

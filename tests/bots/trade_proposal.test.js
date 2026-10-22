@@ -10,6 +10,10 @@ jest.mock("../../src/lib/trade_candidates", () => ({
   fetchTradeCandidates: jest.fn(),
   selectCandidatePackages: jest.fn(),
 }));
+jest.mock("../../src/lib/pending_offers", () => ({
+  ...jest.requireActual("../../src/lib/pending_offers"),
+  fetchOpenOutgoingOffers: jest.fn(),
+}));
 jest.mock("../../src/lib/llm_client", () => ({
   completeWithFallback: jest.fn(),
 }));
@@ -23,6 +27,7 @@ jest.mock("../../src/lib/trade_scoring", () => ({
 }));
 const { fetchTradeCandidates, selectCandidatePackages } = require("../../src/lib/trade_candidates");
 const actualCandidates = jest.requireActual("../../src/lib/trade_candidates");
+const { fetchOpenOutgoingOffers } = require("../../src/lib/pending_offers");
 const { generateTradeProposal } = require("../../src/bots/trade_proposal");
 const { createSessionFromStoredState } = require("../../src/bots/auth");
 const { fetchRosterDeficits } = require("../../src/bots/trade_bot");
@@ -64,6 +69,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   fetchTradeCandidates.mockResolvedValue({ status: "fallback", reason: "empty" });
   selectCandidatePackages.mockImplementation(actualCandidates.selectCandidatePackages);
+  fetchOpenOutgoingOffers.mockResolvedValue([]);
   process.env.ESPN_LEAGUE_ID = "123";
   process.env.ESPN_TEAM_ID = "1";
   fetchRosterDeficits.mockResolvedValue({
@@ -614,4 +620,65 @@ describe("ESPN refusing a player selection", () => {
     expect(result.offers[0].submission).toMatchObject({ status: "fill_failed", classification: "fill_error" });
     expect(submitTradeOffer).toHaveBeenCalledTimes(2);
   });
+});
+
+const openOffer = (status, to, incoming, outgoing) => ({
+  status, from_team_id: "1", to_team_id: to, incoming_player_ids: incoming, outgoing_player_ids: outgoing,
+  message: "an older pitch",
+});
+
+test("a package already awaiting approval is not staged again, whatever its pitch", async () => {
+  useCandidates();
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "3", ["300"], ["101"])]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(result.skipped).toEqual([
+    { team_id: "3", reason: "already_staged", incoming_player_ids: ["300"], outgoing_player_ids: ["101"] },
+  ]);
+  expect(submitTradeOffer).toHaveBeenCalledTimes(1);
+});
+
+test("a different package to the same team is still staged, as the runner-up", async () => {
+  useCandidates([
+    { counterparty: { team_id: "3" }, receive: [{ espn_id: "300" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },
+    { counterparty: { team_id: "3" }, receive: [{ espn_id: "301" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 8 },
+  ]);
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "3", ["300"], ["101"])]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers).toHaveLength(1);
+  expect(result.offer).toMatchObject({ toTeamId: "3", incomingPlayerIds: ["301"], outgoingPlayerIds: ["101"] });
+});
+
+test("a player committed to an approved offer is not sent again", async () => {
+  useCandidates();
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("submitted", "5", ["500"], ["101"])]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(result.skipped).toMatchObject([{ team_id: "3", reason: "player_committed" }]);
+});
+
+test("a player only in an awaiting offer may still go to another team", async () => {
+  useCandidates();
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "5", ["500"], ["101"])]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers).toHaveLength(2);
+  expect(result.skipped).toBeUndefined();
+});
+
+test("when every package is already staged the run is a no_offer with that reason", async () => {
+  useCandidates();
+  fetchOpenOutgoingOffers.mockResolvedValue([
+    openOffer("awaiting_approval", "3", ["300"], ["101"]),
+    openOffer("awaiting_approval", "2", ["200"], ["100"]),
+  ]);
+  const result = await generateTradeProposal(payload);
+  expect(result).toMatchObject({ status: "no_offer", reason: "already_staged" });
+  expect(submitTradeOffer).not.toHaveBeenCalled();
+});
+
+test("the LLM fallback also drops a package that repeats an open offer", async () => {
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "2", ["200"], ["100"])]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["3"]);
+  expect(result.skipped).toMatchObject([{ team_id: "2", reason: "already_staged" }]);
 });

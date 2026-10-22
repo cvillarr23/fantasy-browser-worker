@@ -185,10 +185,13 @@ async function runTradeScan(
     }
     const rejectedSelections = offers.flatMap((offer) =>
       (offer.rejectedAttempts || []).map((attempt) => ({ team_id: offer.target?.team_id, ...attempt })));
-    if (offers.length) {
+    // Packages dropped for repeating an open offer or sending a committed player are not failures.
+    const skippedPackages = result.skipped || [];
+    if (offers.length || skippedPackages.length) {
       addSummary({
         offersStaged,
         offersFailed,
+        ...(skippedPackages.length ? { skippedPackages } : {}),
         ...(failureSummaries.length ? { failures: failureSummaries } : {}),
         ...(rejectedSelections.length ? { rejectedSelections } : {}),
       });
