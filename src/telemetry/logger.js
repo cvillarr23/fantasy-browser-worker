@@ -4,11 +4,13 @@ const { getContext } = require("./context");
 
 // mixin() runs on every log call and its return value is merged into the line -- this is how
 // MDC context (seeded via AsyncLocalStorage, see context.js) and the active OTel trace/span id
-// reach every log line without every call site threading them through explicitly. traceId is
+// reach every log line without every call site threading them through explicitly. trace_id is
 // what wires up Tempo<->Loki correlation (see homelab-deployment's tracesToLogsV2 datasource
-// config, which keys off this field name).
+// config, which keys off this field name). The container runtime supplies the timestamp.
 const base = pino({
   level: process.env.LOG_LEVEL || "info",
+  formatters: { level: (label) => ({ level: label }) },
+  timestamp: false,
   serializers: { err: pino.stdSerializers.err },
   mixin() {
     const ctx = getContext();
@@ -16,7 +18,7 @@ const base = pino({
     const spanCtx = span && span.spanContext();
     return {
       ...ctx,
-      ...(spanCtx ? { traceId: spanCtx.traceId, spanId: spanCtx.spanId } : {}),
+      ...(spanCtx ? { trace_id: spanCtx.traceId, span_id: spanCtx.spanId } : {}),
     };
   },
 });
