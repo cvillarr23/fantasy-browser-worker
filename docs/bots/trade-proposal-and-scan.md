@@ -10,7 +10,9 @@ The trade scan CronJob runs the proposal generator twice a week. The generator s
 flowchart TD
     cron["trade-scan CronJob\nWed + Fri 13:00 Chicago"] --> gate{"regular season,\nweeks 1-18?"}
     gate -->|no| noop["no-op"]
-    gate -->|yes| claim["claim today's scan\n(advisory lock + execution_log)"]
+    gate -->|yes| trigger{"scheduled run?"}
+    trigger -->|yes| claim["claim today's scan\n(advisory lock + execution_log)"]
+    trigger -->|no| inbox["refresh trade inbox"]
     claim --> inbox["refresh trade inbox"]
     inbox --> candidates["core: GET /v1/trade/candidates\nstatus=proposable, sort=final_score"]
     candidates --> fresh{"available, nonempty,\nat most 36 hours old?"}
@@ -29,6 +31,7 @@ flowchart TD
 | Path | Use |
 |---|---|
 | `trade-scan` CronJob runs `node src/bots/trade_scan.js --stage` | Production. Wednesday and Friday at 13:00 America/Chicago. |
+| Manual `node src/bots/trade_scan.js --stage` | Skips the daily claim and does not pitch a team with a recent staged offer. |
 | `node src/bots/trade_scan.js --check` | Safe check. Reads the calendar only. No claim, database write, browser or LLM. |
 | `trade_proposals` queue | The consumer exists, but there is no KEDA trigger and no producer. Don't use it. |
 
@@ -55,7 +58,7 @@ Each selected candidate is re-scored through `POST /v1/trade/score` using its ES
 
 ### Packages that are already staged or committed
 
-The pitch is rewritten on every scan, so the offer key can't tell that a package is a repeat. Before scoring, the worker reads our open outgoing offers from `GET /v1/trade/offers` (`awaiting_approval`, `approval_pending`, `approved`, `submitting` and `submitted`, for the scan's league and season) and drops a package when:
+Before scoring, the worker reads our open outgoing offers from `GET /v1/trade/offers` (`awaiting_approval`, `approval_pending`, `approved`, `submitting` and `submitted`, for the scan's league and season). A team with a staged or approval-pending pitch from us in the last 7 days is excluded from the scan. The pitch is rewritten on every scan, so the offer key can't tell that a package is a repeat. Other packages are dropped when:
 
 - `already_staged`: an open offer goes to the same counterparty with the same incoming and outgoing players, ignoring the message and the order of the ids.
 - `player_committed`: a player we would send is already in one of our `approval_pending`, `approved`, `submitting` or `submitted` offers. An offer that is only awaiting approval commits nothing, so the same player can still go to another team.
@@ -112,7 +115,7 @@ The screenshot is not persisted. Persisting it would need new storage in the clu
 
 ## How is a repeat run prevented?
 
-An atomic Postgres advisory lock and a durable `trade_scan_claim` row in `execution_log` allow one attempt per league, team and Chicago calendar date. The claim persists on no-target, no-offer, error and timeout. There are no automatic retries, because a different pitch has a different approval key.
+An atomic Postgres advisory lock and a durable `trade_scan_claim` row in `execution_log` allow one scheduled attempt per league, team and Chicago calendar date. Manual scans skip this claim and use the same recent staged-pitch exclusion, so a daily claim does not block an operator run and a second manual scan does not re-pitch a team. The claim persists on no-target, no-offer, error and timeout. There are no automatic retries, because a different pitch has a different approval key.
 
 The CLI has a 15-minute hard deadline. The CronJob uses `backoffLimit: 0`, forbids concurrent runs and bounds runtime to 16 minutes.
 
@@ -125,7 +128,8 @@ The CLI has a 15-minute hard deadline. The CronJob uses `backoffLimit: 0`, forbi
 | Some offers fail to stage, at least one stages | Success. Counts and failures are in the result and run summary. |
 | Every offer fails to stage | `Trade scan staging failed`, CronJob exits non-zero |
 | LLM or core read failure on the queue path | Delayed retry |
-| Same-day second run | Refused by the claim |
+| Same-day scheduled run | Refused by the claim |
+| Manual run after a scheduled run | Runs without changing the claim; skips teams with a recent staged pitch |
 
 ## Related
 

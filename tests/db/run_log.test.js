@@ -30,6 +30,34 @@ describe("triggerFromEnv", () => {
       trigger: { host: "laptop" },
     });
   });
+
+  it("prefers the launcher's explicit trigger", () => {
+    expect(runLog.triggerFromEnv({ RUN_TRIGGER: "schedule", RUN_CRONJOB: "ignored" })).toEqual({
+      triggerType: "schedule",
+      trigger: {},
+    });
+  });
+});
+
+it("adopts a launcher run id and parent", async () => {
+  process.env.RUN_ID = "launcher-run";
+  process.env.RUN_TRIGGER = "schedule";
+  process.env.RUN_PARENT_ID = "launcher-parent";
+  const id = await runLog.startRun({ jobName: "trade_scan" });
+  expect(id).toBe("launcher-run");
+  expect(mockQuery).toHaveBeenCalledWith(
+    expect.stringContaining("summary=summary || jsonb_build_object('entrypoint',$2::text)"),
+    ["schedule", "trade_scan", "launcher-parent", "launcher-run"],
+  );
+  const adoptionSql = mockQuery.mock.calls[0][0];
+  expect(adoptionSql).not.toContain("job_name=");
+  expect(adoptionSql).not.toContain("trigger=$");
+  expect(process.env.RUN_PARENT_ID).toBe("launcher-run");
+  await runLog.finishRun(id, "success");
+  expect(process.env.RUN_PARENT_ID).toBe("launcher-parent");
+  delete process.env.RUN_ID;
+  delete process.env.RUN_TRIGGER;
+  delete process.env.RUN_PARENT_ID;
 });
 
 it("links to the run in the active context", async () => {

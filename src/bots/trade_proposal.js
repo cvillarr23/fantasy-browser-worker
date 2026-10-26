@@ -8,7 +8,7 @@ const { completeWithFallback } = require("../lib/llm_client");
 const { submitTradeOffer } = require("./trade_builder");
 const { fetchTradeCandidates, selectCandidatePackages } = require("../lib/trade_candidates");
 const { PLAYER_ID_PATTERN } = require("../lib/espn_ids");
-const { fetchOpenOutgoingOffers, pendingOfferConflict } = require("../lib/pending_offers");
+const { fetchOpenOutgoingOffers, pendingOfferConflict, recentPitchTeamIds } = require("../lib/pending_offers");
 const {
   SCORE_HORIZON_WEEKS,
   packageKey,
@@ -350,6 +350,14 @@ async function generateTradeProposal(payload) {
     // catch them) or send a player already committed elsewhere are dropped before scoring, so the
     // counterparty's next-best package takes their place. They are not failures.
     const openOffers = await fetchOpenOutgoingOffers({ leagueId, season, fromTeamId });
+    const recentPitchedTeams = recentPitchTeamIds(openOffers);
+    for (const teamId of recentPitchedTeams) excluded.add(teamId);
+    if (recentPitchedTeams.length) {
+      logger.info("[Trade Proposal] Skipping teams with a recent staged pitch", {
+        trackingId,
+        teamIds: recentPitchedTeams,
+      });
+    }
     const skipped = [];
     const screen = (toTeamId, incomingPlayerIds, outgoingPlayerIds) => {
       const reason = pendingOfferConflict(openOffers, { toTeamId, incomingPlayerIds, outgoingPlayerIds });
