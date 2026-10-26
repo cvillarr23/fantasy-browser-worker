@@ -10,12 +10,12 @@ Every bot logs through one logger, runs inside one span wrapper, and leaves rows
 flowchart LR
     msg["queue message"] --> ctx["MDC context\nqueueName, trackingId"]
     ctx --> span["span bot.NAME"]
-    span --> log["pino log lines\n+ traceId, spanId"]
+    span --> log["pino log lines\n+ trace_id, span_id"]
     span --> el[("execution_log")]
     span --> act[("activity_actions\nactivity_events")]
     log --> loki["Loki"]
     span --> tempo["Tempo"]
-    loki <-.->|"traceId"| tempo
+    loki <-.->|"trace_id"| tempo
 ```
 
 ## How do I write a log line?
@@ -35,6 +35,7 @@ logger.info(`Evaluating claim for ${name}`);
 | Never log cookies, tokens or API keys | Logs ship to Loki. |
 
 Levels are `debug`, `info`, `warn` and `error`. Set `LOG_LEVEL` to change the floor. The default is `info`.
+Each line writes its level as a string. The container runtime supplies the timestamp, so pino omits it.
 
 ## What does every log line carry?
 
@@ -43,7 +44,7 @@ Levels are `debug`, `info`, `warn` and `error`. Set `LOG_LEVEL` to change the fl
 | `queueName`, `trackingId` | Seeded by the queue consumer for each message. |
 | `botName` | Set by `withInstrumentation`. |
 | `leagueId`, `teamId` | Added with `updateContext` once a bot knows them. |
-| `traceId`, `spanId` | The active OpenTelemetry span. Tempo and Loki link on `traceId`. |
+| `trace_id`, `span_id` | The active OpenTelemetry span. Loki links to Tempo on `trace_id`. |
 
 ## What does a trace look like?
 
@@ -83,7 +84,7 @@ The service name is `browser-worker` in the cluster, from `OTEL_SERVICE_NAME`. A
 
 1. Take the `tracking_id` from the core API response or the Activity view.
 2. Search Loki for it. Every line for that message carries it.
-3. Open the `traceId` from any line in Tempo.
+3. Open the `trace_id` from any line in Tempo.
 4. Query `execution_log` by `trace_id` for the outcome and duration.
 
 ## Related
