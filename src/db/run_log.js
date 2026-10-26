@@ -9,6 +9,7 @@ const { logger } = require("../telemetry/logger");
 const RUN_LOG_POOL_LIMIT = 2;
 const DATABASE_TIMEOUT_MS = 5000;
 const MAX_ERROR_CHARS = 4000;
+const adoptedParentRunIds = new Map();
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -29,6 +30,7 @@ function escapeRegExp(text) {
 /** Scheduled vs manual comes from the Job name: a CronJob names its Jobs `<cronjob>-<minutes>`,
  * while `kubectl create job --from=cronjob/...` picks any name. */
 function triggerFromEnv(env = process.env) {
+  if (env.RUN_TRIGGER) return { triggerType: env.RUN_TRIGGER, trigger: {} };
   const cronjob = env.RUN_CRONJOB;
   const k8sJob = env.RUN_K8S_JOB || env.HOSTNAME;
   if (cronjob) {
@@ -53,17 +55,33 @@ async function parentForAction(trackingId) {
   }
 }
 
-async function startRun({ jobName, triggerType, trigger, parentRunId = null, traceId = null }) {
-  const id = randomUUID();
+async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = null }) {
+  const adoptedId = process.env.RUN_ID || null;
+  const id = adoptedId || randomUUID();
+  const parent = parentRunId || process.env.RUN_PARENT_ID || null;
+  const resolved = triggerType ? { triggerType, trigger: trigger || {} } : triggerFromEnv();
+  const resolvedTrigger = { ...resolved.trigger, ...(trigger || {}) };
+  if (adoptedId) {
+    adoptedParentRunIds.set(adoptedId, process.env.RUN_PARENT_ID);
+    delete process.env.RUN_ID;
+    process.env.RUN_PARENT_ID = adoptedId;
+  }
   try {
-    await pool.query(
-      "INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,trace_id) VALUES($1,$2,$3,$4,$5,$6)",
-      [id, jobName, triggerType, JSON.stringify(trigger || {}), parentRunId, traceId],
-    );
+    if (adoptedId) {
+      await pool.query(
+        "UPDATE run_log SET status='running',job_name=$1,trigger_type=$2,trigger=$3,parent_run_id=COALESCE(parent_run_id,$4),started_at=now(),finished_at=NULL,error=NULL WHERE id=$5",
+        [jobName, resolved.triggerType, JSON.stringify(resolvedTrigger), parent, id],
+      );
+    } else {
+      await pool.query(
+        "INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,trace_id) VALUES($1,$2,$3,$4,$5,$6)",
+        [id, jobName, resolved.triggerType, JSON.stringify(resolvedTrigger), parent, traceId],
+      );
+    }
     return id;
   } catch (err) {
-    logger.error("Could not record run", { err, jobName });
-    return null;
+    logger.error(adoptedId ? "Could not adopt run" : "Could not record run", { err, jobName });
+    return adoptedId;
   }
 }
 
@@ -76,6 +94,13 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
     );
   } catch (err) {
     logger.error("Could not record run outcome", { err, runId: id });
+  } finally {
+    if (adoptedParentRunIds.has(id)) {
+      const previousParentId = adoptedParentRunIds.get(id);
+      adoptedParentRunIds.delete(id);
+      if (previousParentId === undefined) delete process.env.RUN_PARENT_ID;
+      else process.env.RUN_PARENT_ID = previousParentId;
+    }
   }
 }
 

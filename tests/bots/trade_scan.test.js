@@ -4,7 +4,10 @@ jest.mock("../../src/bots/trade_proposal", () => ({
 jest.mock("../../src/telemetry/logger", () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
-jest.mock("../../src/db/run_log", () => ({ addSummary: jest.fn() }));
+jest.mock("../../src/db/run_log", () => ({
+  addSummary: jest.fn(),
+  triggerFromEnv: jest.fn(() => ({ triggerType: process.env.RUN_TRIGGER || "schedule", trigger: {} })),
+}));
 const { logger } = require("../../src/telemetry/logger");
 const { addSummary } = require("../../src/db/run_log");
 const {
@@ -17,6 +20,7 @@ const state = { season_type: "regular", season: "2026", week: 4 };
 const now = new Date("2026-10-04T12:00:00Z");
 let deps;
 beforeEach(() => {
+  process.env.RUN_TRIGGER = "schedule";
   process.env.ESPN_LEAGUE_ID = "123";
   process.env.ESPN_TEAM_ID = "7";
   deps = {
@@ -85,6 +89,20 @@ test("duplicate run never generates", async () => {
   expect(await runTradeScan({ stage: true }, deps)).toMatchObject({
     status: "duplicate",
   });
+  expect(deps.generate).not.toHaveBeenCalled();
+});
+test("manual scan proceeds when today's scheduled claim already exists", async () => {
+  process.env.RUN_TRIGGER = "manual";
+  deps.claim.mockResolvedValue(false);
+  expect((await runTradeScan({ stage: true }, deps)).status).toBe("no_target");
+  expect(deps.claim).not.toHaveBeenCalled();
+  expect(deps.release).not.toHaveBeenCalled();
+  expect(deps.generate).toHaveBeenCalledTimes(1);
+});
+test("scheduled scan is refused when today's claim already exists", async () => {
+  deps.claim.mockResolvedValue(false);
+  expect((await runTradeScan({ stage: true }, deps)).status).toBe("duplicate");
+  expect(deps.claim).toHaveBeenCalledTimes(1);
   expect(deps.generate).not.toHaveBeenCalled();
 });
 test("claims once and forwards only period/tracking, never approval", async () => {

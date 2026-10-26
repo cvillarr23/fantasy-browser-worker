@@ -638,6 +638,20 @@ test("a package already awaiting approval is not staged again, whatever its pitc
   expect(submitTradeOffer).toHaveBeenCalledTimes(1);
 });
 
+test.each(["awaiting_approval", "approval_pending"])(
+  "a team with a recent %s pitch is excluded even for a different package",
+  async (status) => {
+    useCandidates();
+    fetchOpenOutgoingOffers.mockResolvedValue([{
+      ...openOffer(status, "3", ["other"], ["other-player"]),
+      executed_at: new Date().toISOString(),
+    }]);
+    const result = await generateTradeProposal(payload);
+    expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+    expect(submitTradeOffer).toHaveBeenCalledTimes(1);
+  },
+);
+
 test("a different package to the same team is still staged, as the runner-up", async () => {
   useCandidates([
     { counterparty: { team_id: "3" }, receive: [{ espn_id: "300" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },

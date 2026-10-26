@@ -2,7 +2,7 @@ const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
 const { generateTradeProposal } = require("./trade_proposal");
 const { logger } = require("../telemetry/logger");
-const { addSummary } = require("../db/run_log");
+const { addSummary, triggerFromEnv } = require("../db/run_log");
 
 const NFL_STATE_TIMEOUT_MS = 10_000;
 const MIN_SUPPORTED_SEASON = 2000;
@@ -146,6 +146,7 @@ async function runTradeScan(
     throw new Error("ESPN_LEAGUE_ID and ESPN_TEAM_ID must be positive ids");
   const key = `trade-scan:${league}:${team}:${scanDate(now)}`;
   if (!stage) return { status: "check_only", ...period, scanKey: key };
+  const scheduled = triggerFromEnv().triggerType === "schedule";
   const ownedPool = pool
     ? null
     : new Pool({
@@ -159,11 +160,13 @@ async function runTradeScan(
       });
   let releasable = false;
   try {
-    if (!(await claim(pool || ownedPool, key, trackingId)))
-      return { status: "duplicate", ...period, scanKey: key };
+    if (scheduled) {
+      if (!(await claim(pool || ownedPool, key, trackingId)))
+        return { status: "duplicate", ...period, scanKey: key };
+      releasable = true;
+    }
     // The claim is kept once any offer is staged (a retry would generate a different pitch and
     // offer_key), but released when the scan fails before staging anything.
-    releasable = true;
     const excluded = await openOfferTeams(refreshInbox);
     const result = await generate({
       ...period,
