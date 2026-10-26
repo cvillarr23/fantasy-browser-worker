@@ -85,7 +85,7 @@ function recentPitchTeamIds(openOffers, now = new Date()) {
   return [...new Set(openOffers
     .filter((offer) => {
       if (!PITCH_STATUSES.has(offer.status)) return false;
-      const executedAt = Date.parse(offer.executed_at || offer.created_at || offer.createdAt || "");
+      const executedAt = Date.parse(offer.executed_at || "");
       return Number.isFinite(executedAt) && executedAt >= cutoff && executedAt <= now.getTime();
     })
     .map((offer) => String(offer.to_team_id))

@@ -69,8 +69,8 @@ async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = 
   try {
     if (adoptedId) {
       await pool.query(
-        "UPDATE run_log SET status='running',job_name=$1,trigger_type=$2,trigger=$3,parent_run_id=COALESCE(parent_run_id,$4),started_at=now(),finished_at=NULL,error=NULL WHERE id=$5",
-        [jobName, resolved.triggerType, JSON.stringify(resolvedTrigger), parent, id],
+        "UPDATE run_log SET status='running',trigger_type=$1,summary=summary || jsonb_build_object('entrypoint',$2::text),parent_run_id=COALESCE(parent_run_id,$3),started_at=now(),finished_at=NULL,error=NULL WHERE id=$4",
+        [resolved.triggerType, jobName, parent, id],
       );
     } else {
       await pool.query(
