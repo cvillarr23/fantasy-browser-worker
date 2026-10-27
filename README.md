@@ -11,7 +11,7 @@ This project is unofficial and not affiliated with ESPN or Disney. It is for per
 *   `docs/`: Reverse-engineering notes on ESPN's own (undocumented) draft protocol and auth behavior — see below.
 
 ## Documentation
-[`docs/`](docs/index.md) documents how the bots run, each bot, the queue message contracts and telemetry. It is published on the project docs site.
+[`docs/`](docs/index.md) documents how the bots run, each bot, the queue message contracts and telemetry. It is published on the [project docs site](https://fantasy-docs.roo-net.cc).
 
 [`docs/espn/`](docs/espn/index.md) documents what this project has confirmed about ESPN: the read views, the transactions endpoint, trades, the draft-room WebSocket, error codes, the recon tools, and session and auth (including why scripting the login form is a dead end).
 
