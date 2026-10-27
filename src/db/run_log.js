@@ -10,6 +10,7 @@ const RUN_LOG_POOL_LIMIT = 2;
 const DATABASE_TIMEOUT_MS = 5000;
 const MAX_ERROR_CHARS = 4000;
 const adoptedParentRunIds = new Map();
+const adoptedAttempts = new Map();
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -27,8 +28,9 @@ function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Scheduled vs manual comes from the Job name: a CronJob names its Jobs `<cronjob>-<minutes>`,
- * while `kubectl create job --from=cronjob/...` picks any name. */
+/** The job launcher sets RUN_TRIGGER, which wins. Otherwise scheduled vs manual comes from the
+ * Job name: a CronJob names its Jobs `<cronjob>-<minutes>`, while
+ * `kubectl create job --from=cronjob/...` picks any name. */
 function triggerFromEnv(env = process.env) {
   if (env.RUN_TRIGGER) return { triggerType: env.RUN_TRIGGER, trigger: {} };
   const cronjob = env.RUN_CRONJOB;
@@ -55,52 +57,79 @@ async function parentForAction(trackingId) {
   }
 }
 
+function restoreParentRunId(id) {
+  if (!adoptedParentRunIds.has(id)) return;
+  const previousParentId = adoptedParentRunIds.get(id);
+  adoptedParentRunIds.delete(id);
+  if (previousParentId === undefined) delete process.env.RUN_PARENT_ID;
+  else process.env.RUN_PARENT_ID = previousParentId;
+}
+
+/** Records the run, or adopts the launcher's row when RUN_ID is set. The launcher retries a run
+ * on the same row with the next RUN_ATTEMPT, so adoption only claims the row while it is still
+ * running at this attempt; otherwise this process is a stale attempt and must not run, so this
+ * throws. A database error stays best-effort and still returns the adopted id. */
 async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = null }) {
   const adoptedId = process.env.RUN_ID || null;
+  const attempt = adoptedId && process.env.RUN_ATTEMPT ? Number(process.env.RUN_ATTEMPT) : null;
+  if (attempt !== null && !Number.isInteger(attempt)) {
+    throw new Error(`Run ${adoptedId} has an invalid RUN_ATTEMPT: ${process.env.RUN_ATTEMPT}`);
+  }
   const id = adoptedId || randomUUID();
   const parent = parentRunId || process.env.RUN_PARENT_ID || null;
   const resolved = triggerType ? { triggerType, trigger: trigger || {} } : triggerFromEnv();
   const resolvedTrigger = { ...resolved.trigger, ...(trigger || {}) };
   if (adoptedId) {
     adoptedParentRunIds.set(adoptedId, process.env.RUN_PARENT_ID);
+    adoptedAttempts.set(adoptedId, attempt);
     delete process.env.RUN_ID;
     process.env.RUN_PARENT_ID = adoptedId;
   }
+  let adopted;
   try {
     if (adoptedId) {
-      await pool.query(
-        "UPDATE run_log SET status='running',trigger_type=$1,summary=summary || jsonb_build_object('entrypoint',$2::text),parent_run_id=COALESCE(parent_run_id,$3),started_at=now(),finished_at=NULL,error=NULL WHERE id=$4",
-        [resolved.triggerType, jobName, parent, id],
+      const { rowCount } = await pool.query(
+        "UPDATE run_log SET status='running',trigger_type=$1,summary=summary || jsonb_build_object('entrypoint',$2::text),parent_run_id=COALESCE(parent_run_id,$3),started_at=now(),finished_at=NULL,error=NULL WHERE id=$4 AND status='running' AND attempt=COALESCE($5,attempt)",
+        [resolved.triggerType, jobName, parent, id, attempt],
       );
+      adopted = rowCount === 1;
     } else {
       await pool.query(
         "INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,trace_id) VALUES($1,$2,$3,$4,$5,$6)",
         [id, jobName, resolved.triggerType, JSON.stringify(resolvedTrigger), parent, traceId],
       );
     }
-    return id;
   } catch (err) {
     logger.error(adoptedId ? "Could not adopt run" : "Could not record run", { err, jobName });
     return adoptedId;
   }
+  if (adoptedId && !adopted) {
+    restoreParentRunId(adoptedId);
+    adoptedAttempts.delete(adoptedId);
+    throw new Error(`Run ${adoptedId} attempt ${attempt} is no longer current`);
+  }
+  return id;
 }
 
+/** Never overwrites a cancelled row, nor a newer attempt's when this run was adopted. */
 async function finishRun(id, status, { error = null, summary = {} } = {}) {
   if (!id) return;
   try {
     await pool.query(
-      "UPDATE run_log SET status=$2,finished_at=now(),error=$3,summary=summary || $4::jsonb WHERE id=$1",
-      [id, status, error ? String(error).slice(0, MAX_ERROR_CHARS) : null, JSON.stringify(summary || {})],
+      "UPDATE run_log SET status=$2,finished_at=now(),error=$3,summary=summary || $4::jsonb WHERE id=$1 AND status<>'cancelled' AND attempt=COALESCE($5,attempt)",
+      [
+        id,
+        status,
+        error ? String(error).slice(0, MAX_ERROR_CHARS) : null,
+        JSON.stringify(summary || {}),
+        adoptedAttempts.get(id) ?? null,
+      ],
     );
   } catch (err) {
     logger.error("Could not record run outcome", { err, runId: id });
   } finally {
-    if (adoptedParentRunIds.has(id)) {
-      const previousParentId = adoptedParentRunIds.get(id);
-      adoptedParentRunIds.delete(id);
-      if (previousParentId === undefined) delete process.env.RUN_PARENT_ID;
-      else process.env.RUN_PARENT_ID = previousParentId;
-    }
+    adoptedAttempts.delete(id);
+    restoreParentRunId(id);
   }
 }
 
