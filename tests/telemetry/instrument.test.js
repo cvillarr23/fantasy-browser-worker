@@ -77,3 +77,13 @@ it("sends nothing when the run succeeds", async () => {
   await withInstrumentation("lineup_bot", { trackingId: "t" }, async () => ({ ok: true }));
   expect(notify).not.toHaveBeenCalled();
 });
+
+it("rejects without running the bot when the adopted attempt is stale", async () => {
+  runLog.startRun.mockRejectedValueOnce(new Error("Run r attempt 1 is no longer current"));
+  const handler = jest.fn();
+  await expect(withInstrumentation("lineup_bot", { trackingId: "t" }, handler)).rejects.toThrow(
+    "no longer current",
+  );
+  expect(handler).not.toHaveBeenCalled();
+  expect(runLog.finishRun).not.toHaveBeenCalled();
+});

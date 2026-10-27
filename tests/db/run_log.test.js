@@ -39,15 +39,25 @@ describe("triggerFromEnv", () => {
   });
 });
 
-it("adopts a launcher run id and parent", async () => {
+afterEach(() => {
+  for (const key of ["RUN_ID", "RUN_ATTEMPT", "RUN_TRIGGER", "RUN_PARENT_ID"]) delete process.env[key];
+});
+
+function launcherRun({ attempt } = {}) {
   process.env.RUN_ID = "launcher-run";
   process.env.RUN_TRIGGER = "schedule";
   process.env.RUN_PARENT_ID = "launcher-parent";
+  if (attempt) process.env.RUN_ATTEMPT = attempt;
+}
+
+it("adopts a launcher run id and parent", async () => {
+  launcherRun();
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 1 });
   const id = await runLog.startRun({ jobName: "trade_scan" });
   expect(id).toBe("launcher-run");
   expect(mockQuery).toHaveBeenCalledWith(
     expect.stringContaining("summary=summary || jsonb_build_object('entrypoint',$2::text)"),
-    ["schedule", "trade_scan", "launcher-parent", "launcher-run"],
+    ["schedule", "trade_scan", "launcher-parent", "launcher-run", null],
   );
   const adoptionSql = mockQuery.mock.calls[0][0];
   expect(adoptionSql).not.toContain("job_name=");
@@ -55,9 +65,61 @@ it("adopts a launcher run id and parent", async () => {
   expect(process.env.RUN_PARENT_ID).toBe("launcher-run");
   await runLog.finishRun(id, "success");
   expect(process.env.RUN_PARENT_ID).toBe("launcher-parent");
-  delete process.env.RUN_ID;
-  delete process.env.RUN_TRIGGER;
-  delete process.env.RUN_PARENT_ID;
+});
+
+it("adopts only a row still running at this attempt", async () => {
+  launcherRun({ attempt: "2" });
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+  expect(await runLog.startRun({ jobName: "trade_scan" })).toBe("launcher-run");
+  const [sql, params] = mockQuery.mock.calls[0];
+  expect(sql).toContain("WHERE id=$4 AND status='running' AND attempt=COALESCE($5,attempt)");
+  expect(params).toEqual(["schedule", "trade_scan", "launcher-parent", "launcher-run", 2]);
+  await runLog.finishRun("launcher-run", "success");
+  expect(mockQuery.mock.calls[1][1][4]).toBe(2);
+});
+
+it("fails startup for a stale attempt", async () => {
+  launcherRun({ attempt: "1" });
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+  await expect(runLog.startRun({ jobName: "trade_scan" })).rejects.toThrow(
+    "Run launcher-run attempt 1 is no longer current",
+  );
+  expect(mockQuery).toHaveBeenCalledTimes(1);
+  expect(process.env.RUN_ID).toBeUndefined();
+  expect(process.env.RUN_PARENT_ID).toBe("launcher-parent");
+});
+
+it("fails startup for an unreadable attempt", async () => {
+  launcherRun({ attempt: "two" });
+  await expect(runLog.startRun({ jobName: "trade_scan" })).rejects.toThrow("invalid RUN_ATTEMPT");
+  expect(mockQuery).not.toHaveBeenCalled();
+});
+
+it("keeps running an adopted run when adoption hits a database error", async () => {
+  launcherRun({ attempt: "2" });
+  mockQuery.mockRejectedValueOnce(new Error("db down"));
+  expect(await runLog.startRun({ jobName: "trade_scan" })).toBe("launcher-run");
+});
+
+it("finishes only an uncancelled row at the adopted attempt", async () => {
+  launcherRun({ attempt: "3" });
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+  await runLog.startRun({ jobName: "trade_scan" });
+  // A newer attempt or a cancel since adoption leaves nothing for the finish to match.
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+  await runLog.finishRun("launcher-run", "failure", { error: "boom" });
+  const [sql, params] = mockQuery.mock.calls[1];
+  expect(sql).toContain("WHERE id=$1 AND status<>'cancelled' AND attempt=COALESCE($5,attempt)");
+  expect(params).toEqual(["launcher-run", "failure", "boom", "{}", 3]);
+  expect(process.env.RUN_PARENT_ID).toBe("launcher-parent");
+});
+
+it("never overwrites a cancelled run it did not adopt", async () => {
+  const id = await runLog.startRun({ jobName: "x", triggerType: "manual", trigger: {} });
+  await runLog.finishRun(id, "success");
+  const [sql, params] = mockQuery.mock.calls[1];
+  expect(sql).toContain("status<>'cancelled'");
+  expect(params).toEqual([id, "success", null, "{}", null]);
 });
 
 it("links to the run in the active context", async () => {
