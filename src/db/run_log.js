@@ -57,7 +57,34 @@ async function parentForAction(trackingId) {
   }
 }
 
-function restoreParentRunId(id) {
+/** The launcher's run for this process, if any: RUN_ID, and RUN_ATTEMPT when it retries. */
+function readAdoptedRun(env = process.env) {
+  const id = env.RUN_ID || null;
+  return { id, attempt: id ? parseRunAttempt(id, env.RUN_ATTEMPT) : null };
+}
+
+function parseRunAttempt(runId, value) {
+  if (!value) return null;
+  const attempt = Number(value);
+  if (!Number.isInteger(attempt)) throw new Error(`Run ${runId} has an invalid RUN_ATTEMPT: ${value}`);
+  return attempt;
+}
+
+function resolveTrigger(triggerType, trigger) {
+  const resolved = triggerType ? { triggerType, trigger: trigger || {} } : triggerFromEnv();
+  return { triggerType: resolved.triggerType, trigger: { ...resolved.trigger, ...(trigger || {}) } };
+}
+
+/** Keeps the attempt for the finish, and makes the adopted run the parent of any subprocess. */
+function rememberAdoptedRun(id, attempt) {
+  adoptedParentRunIds.set(id, process.env.RUN_PARENT_ID);
+  adoptedAttempts.set(id, attempt);
+  delete process.env.RUN_ID;
+  process.env.RUN_PARENT_ID = id;
+}
+
+function forgetAdoptedRun(id) {
+  adoptedAttempts.delete(id);
   if (!adoptedParentRunIds.has(id)) return;
   const previousParentId = adoptedParentRunIds.get(id);
   adoptedParentRunIds.delete(id);
@@ -65,50 +92,62 @@ function restoreParentRunId(id) {
   else process.env.RUN_PARENT_ID = previousParentId;
 }
 
-/** Records the run, or adopts the launcher's row when RUN_ID is set. The launcher retries a run
- * on the same row with the next RUN_ATTEMPT, so adoption only claims the row while it is still
- * running at this attempt; otherwise this process is a stale attempt and must not run, so this
- * throws. A database error stays best-effort and still returns the adopted id. */
-async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = null }) {
-  const adoptedId = process.env.RUN_ID || null;
-  const attempt = adoptedId && process.env.RUN_ATTEMPT ? Number(process.env.RUN_ATTEMPT) : null;
-  if (attempt !== null && !Number.isInteger(attempt)) {
-    throw new Error(`Run ${adoptedId} has an invalid RUN_ATTEMPT: ${process.env.RUN_ATTEMPT}`);
-  }
-  const id = adoptedId || randomUUID();
-  const parent = parentRunId || process.env.RUN_PARENT_ID || null;
-  const resolved = triggerType ? { triggerType, trigger: trigger || {} } : triggerFromEnv();
-  const resolvedTrigger = { ...resolved.trigger, ...(trigger || {}) };
-  if (adoptedId) {
-    adoptedParentRunIds.set(adoptedId, process.env.RUN_PARENT_ID);
-    adoptedAttempts.set(adoptedId, attempt);
-    delete process.env.RUN_ID;
-    process.env.RUN_PARENT_ID = adoptedId;
-  }
+/** Claims the launcher's row only while it is still running at this attempt. */
+async function adoptRun({ id, attempt, jobName, triggerType, parentRunId }) {
+  const { rowCount } = await pool.query(
+    "UPDATE run_log SET status='running',trigger_type=$1,summary=summary || jsonb_build_object('entrypoint',$2::text),parent_run_id=COALESCE(parent_run_id,$3),started_at=now(),finished_at=NULL,error=NULL WHERE id=$4 AND status='running' AND attempt=COALESCE($5,attempt)",
+    [triggerType, jobName, parentRunId, id, attempt],
+  );
+  return rowCount === 1;
+}
+
+async function insertRun({ id, jobName, triggerType, trigger, parentRunId, traceId }) {
+  await pool.query(
+    "INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,trace_id) VALUES($1,$2,$3,$4,$5,$6)",
+    [id, jobName, triggerType, JSON.stringify(trigger), parentRunId, traceId],
+  );
+}
+
+/** The launcher retries a run on the same row with the next RUN_ATTEMPT, so a row that is no
+ * longer running at this attempt means this process is stale and must not run: this throws. A
+ * database error stays best-effort and still returns the adopted id. */
+async function startAdoptedRun({ id, attempt }, run) {
+  rememberAdoptedRun(id, attempt);
   let adopted;
   try {
-    if (adoptedId) {
-      const { rowCount } = await pool.query(
-        "UPDATE run_log SET status='running',trigger_type=$1,summary=summary || jsonb_build_object('entrypoint',$2::text),parent_run_id=COALESCE(parent_run_id,$3),started_at=now(),finished_at=NULL,error=NULL WHERE id=$4 AND status='running' AND attempt=COALESCE($5,attempt)",
-        [resolved.triggerType, jobName, parent, id, attempt],
-      );
-      adopted = rowCount === 1;
-    } else {
-      await pool.query(
-        "INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,trace_id) VALUES($1,$2,$3,$4,$5,$6)",
-        [id, jobName, resolved.triggerType, JSON.stringify(resolvedTrigger), parent, traceId],
-      );
-    }
+    adopted = await adoptRun({ id, attempt, ...run });
   } catch (err) {
-    logger.error(adoptedId ? "Could not adopt run" : "Could not record run", { err, jobName });
-    return adoptedId;
+    logger.error("Could not adopt run", { err, jobName: run.jobName });
+    return id;
   }
-  if (adoptedId && !adopted) {
-    restoreParentRunId(adoptedId);
-    adoptedAttempts.delete(adoptedId);
-    throw new Error(`Run ${adoptedId} attempt ${attempt} is no longer current`);
+  if (!adopted) {
+    forgetAdoptedRun(id);
+    throw new Error(`Run ${id} attempt ${attempt} is no longer current`);
   }
   return id;
+}
+
+async function startNewRun(run) {
+  const id = randomUUID();
+  try {
+    await insertRun({ id, ...run });
+    return id;
+  } catch (err) {
+    logger.error("Could not record run", { err, jobName: run.jobName });
+    return null;
+  }
+}
+
+/** Records the run, or adopts the launcher's row when RUN_ID is set. */
+async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = null }) {
+  const adoptedRun = readAdoptedRun();
+  const run = {
+    jobName,
+    ...resolveTrigger(triggerType, trigger),
+    parentRunId: parentRunId || process.env.RUN_PARENT_ID || null,
+    traceId,
+  };
+  return adoptedRun.id ? startAdoptedRun(adoptedRun, run) : startNewRun(run);
 }
 
 /** Never overwrites a cancelled row, nor a newer attempt's when this run was adopted. */
@@ -128,8 +167,7 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
   } catch (err) {
     logger.error("Could not record run outcome", { err, runId: id });
   } finally {
-    adoptedAttempts.delete(id);
-    restoreParentRunId(id);
+    forgetAdoptedRun(id);
   }
 }
 
