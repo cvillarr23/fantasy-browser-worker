@@ -23,6 +23,7 @@ const { readPendingTrades, readTradeHistory } = require("./espn_api");
 const { readSeason, resolvePeriod } = require("./trade_scan");
 const { loadInbox, updateEntry, setTriage } = require("../db/trade_inbox");
 const { notify } = require("../lib/notify");
+const { publishJobEvent } = require("../queue/events");
 const { incomingTradeOffer } = require("../lib/notifications");
 const {
   STATUS,
@@ -58,6 +59,7 @@ const MAX_ERROR_DETAIL_CHARS = 300;
 // Entries a vanished-offer check may move on. Finished entries are history, and an entry being
 // responded to belongs to trade_response.js until it reconciles.
 const RETIRABLE_STATUSES = new Set([STATUS.OPEN, STATUS.UNPARSED, STATUS.ACCEPTED_PENDING_PROCESSING]);
+const OFFER_RECEIVED_EVENT_KEY = "trade.offer_received";
 const MAX_RUNTIME_MINUTES = 10;
 const MILLISECONDS_PER_MINUTE = 60_000;
 const NODE_CLI_ARGUMENT_OFFSET = 2;
@@ -124,6 +126,7 @@ const defaultDeps = () => ({
   score: postTradeScore,
   store: { load: loadInbox, update: updateEntry },
   notify,
+  emitEvent: publishJobEvent,
 });
 
 function requireLeagueAndTeam() {
@@ -170,6 +173,20 @@ async function scoreEntry(entry, { leagueId, season, week, now }, score) {
     score: nextScore,
     evaluation: nextScore.stale ? incomingEvaluationFor({ ...entry, score: nextScore }) : null,
     called: true,
+  };
+}
+
+/** The fact "a new offer reached our inbox", in core's JobEvent shape (minus the envelope fields). */
+function offerReceivedEvent(entry, leagueId) {
+  return {
+    key: OFFER_RECEIVED_EVENT_KEY,
+    subject: `trade_offer:${entry.espn_transaction_id}`,
+    payload: {
+      league_id: leagueId,
+      espn_transaction_id: entry.espn_transaction_id,
+      proposing_team_id: entry.proposing_team_id,
+      expiration_date: entry.expiration_date ? new Date(entry.expiration_date).toISOString() : null,
+    },
   };
 }
 
@@ -276,6 +293,7 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
     };
 
     const entries = [];
+    const newOffers = [];
     for (const freshEntry of fresh) {
       const apply = applyRead(freshEntry);
       if (!persist) {
@@ -287,7 +305,15 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       // First sighting of an offer: the stored snapshot didn't have it.
       if (!storedById.has(freshEntry.espn_transaction_id)) {
         await deps.notify(incomingTradeOffer(saved ?? freshEntry));
+        newOffers.push(saved ?? freshEntry);
       }
+    }
+
+    // Emitted only once the whole batch is stored, so the run an event starts can read every
+    // new offer. A lost event is covered by the next scheduled refresh.
+    let eventsEmitted = 0;
+    for (const offer of newOffers) {
+      if (await deps.emitEvent(offerReceivedEvent(offer, leagueId))) eventsEmitted += 1;
     }
 
     const exits = [];
@@ -334,6 +360,7 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       season,
       week,
       scoreCalls,
+      eventsEmitted,
       exits,
       counterUpdates,
       openOfferTeamIds: [...new Set(incoming.map((t) => t.proposingTeamId))],
@@ -431,6 +458,7 @@ async function main(args = process.argv.slice(NODE_CLI_ARGUMENT_OFFSET)) {
         logger.info("[Trade Inbox] Refreshed", {
           status: result.status,
           scoreCalls: result.scoreCalls,
+          eventsEmitted: result.eventsEmitted,
           exits: result.exits,
           trackingId,
         });

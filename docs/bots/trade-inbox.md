@@ -73,12 +73,19 @@ Nothing queues a counter on its own. A person decides each turn.
 
 `TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE` and `TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE` (both unset by default) record what a score threshold would do with each offer. Nothing acts on it. It abstains for stale scores, unmapped players, non-player items and roster overages.
 
+## What does a refresh emit?
+
+For each offer seen for the first time, `--refresh` publishes a `trade.offer_received` event to core's `job_events` exchange once every new offer is stored. The subject is `trade_offer:<transaction id>`, and the payload carries the league id, transaction id, proposing team and expiration. A launcher job can subscribe to it through the catalog's `on_event`. `--check` emits nothing.
+
+Publishing is best-effort: a broker failure is logged and the refresh still succeeds. If the process stops between storing an offer and publishing, that offer's event is not sent again, so a subscribed job should keep its schedule.
+
 ## What can go wrong?
 
 | Failure | Result |
 |---|---|
 | Pending-offer read fails | It throws before anything is written. Offers are retired only after a successful pending read and a successful history read. |
 | Core is unavailable | Scores are kept, marked stale and retried. |
+| Broker unavailable | Events are skipped with a warning, after one ten-second attempt. |
 | Outside the regular season | Returns `off_season` and writes nothing. |
 
 ## Related

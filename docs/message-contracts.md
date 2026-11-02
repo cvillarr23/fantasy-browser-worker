@@ -97,6 +97,10 @@ Two bots take no queue message.
 
 Draft sync and the draft clicker also talk over Redis. See [Draft sync](bots/draft-sync.md) for those keys.
 
+## `job_events`
+
+Not a queue the worker consumes: `job_events` is core's topic exchange, and the worker publishes facts to it. The trade inbox sends `trade.offer_received` for each new offer, with the event key as the routing key. The message has `event_id`, `key`, `subject`, `payload`, `emitted_by_run_id` and `at`, with the trace context in a `traceparent` header. Core owns the exchange, so the worker only checks that it exists. See core's queue publishing and AsyncAPI docs for the contract.
+
 ## Related
 
 - [How bots run](how-bots-run.md)
