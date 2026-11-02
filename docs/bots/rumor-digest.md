@@ -52,13 +52,20 @@ The parser drops an entry with an unknown player, a duplicate player, or an inva
 
 All of a player's rows stay in one chunk.
 
+## What does it emit?
+
+Once the transaction commits, the digest publishes one `rumor.signal_created` event per stored signal to core's `job_events` exchange, `no_op` verdicts included. The subject is `player:<player_id>` and the payload is `{"signal_id": <rumor_signals.id>}`. A launcher job can subscribe to it through the catalog's `on_event`. The run summary records `events_emitted`.
+
+Publishing is best-effort. After the first event the broker doesn't take, the digest stops emitting and logs a warning, so a down broker costs one ten-second attempt rather than one per signal. The failure never fails the run. A subscribed job should keep its schedule for signals whose event wasn't sent.
+
 ## What can go wrong?
 
 | Failure | Result |
 |---|---|
 | No new rows | Logs and exits without an LLM call. |
 | Any chunk fails | The whole run fails and nothing is stored. The watermark doesn't move, so the next run retries. |
-| Database write fails | The error propagates. The transaction rolls back. |
+| Database write fails | The error propagates. The transaction rolls back, and nothing is emitted. |
+| Broker unavailable | Events are skipped with a warning after one attempt. The signals are still stored. |
 
 ## Related
 
