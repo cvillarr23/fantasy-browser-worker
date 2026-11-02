@@ -6,6 +6,7 @@ const {
 const { completeWithFallback } = require("../lib/llm_client");
 const { logger } = require("../telemetry/logger");
 const runLog = require("../db/run_log");
+const { publishJobEvent } = require("../queue/events");
 
 /**
  * Rumor/news-driven waiver & lineup signal bot -- advisory only, no waiver/lineup execution.
@@ -28,6 +29,8 @@ const DEFAULT_DIGEST_CHUNK_SIZE = 20;
 // Real observed groq TPM limit is 8000; headroom covers completion tokens plus the fixed
 // instructional prompt text, which also counts against the same per-minute budget.
 const DEFAULT_DIGEST_TOKEN_BUDGET = 6000;
+
+const SIGNAL_CREATED_EVENT_KEY = "rumor.signal_created";
 
 function digestChunkSize() {
   return Number(process.env.RUMOR_DIGEST_CHUNK_SIZE) || DEFAULT_DIGEST_CHUNK_SIZE;
@@ -243,6 +246,27 @@ function parseDigestResponse(text, validPlayerIds) {
 /** One LLM call per attempt for one chunk, re-asking (with a strict-JSON reminder) when the
  * response as a whole is unusable. Entry-level problems are already dropped by
  * parseDigestResponse and never retried. Returns the verdicts and how many retries it took. */
+/** The fact "a rumor signal was written", in core's JobEvent shape (minus the envelope fields). */
+function signalCreatedEvent({ id, playerId }) {
+  return {
+    key: SIGNAL_CREATED_EVENT_KEY,
+    subject: `player:${playerId}`,
+    payload: { signal_id: id },
+  };
+}
+
+/** Emits one event per stored signal, in order, and returns how many the broker took. Stops at
+ * the first failure: a down broker would otherwise cost a full publish timeout for every
+ * remaining signal, and the subscriber's schedule covers the ones not sent. */
+async function emitSignalEvents(signals) {
+  let emitted = 0;
+  for (const signal of signals) {
+    if (!(await publishJobEvent(signalCreatedEvent(signal)))) break;
+    emitted += 1;
+  }
+  return emitted;
+}
+
 async function digestChunk(chunk, chunkPlayerIds) {
   const systemPrompt = buildDigestSystemPrompt(chunk);
   let prompt = DIGEST_USER_PROMPT;
@@ -321,8 +345,10 @@ async function runRumorDigest() {
     maxRawSignalId,
   }));
 
-  const rumorSignalIds = await persistRumorSignals(rows);
-  await runLog.link("rumor_signal", rumorSignalIds, "output");
+  const savedSignals = await persistRumorSignals(rows);
+  await runLog.link("rumor_signal", savedSignals.map((signal) => signal.id), "output");
+  // After the commit, so the run an event starts can read every signal.
+  const eventsEmitted = await emitSignalEvents(savedSignals);
 
   const counts = rows.reduce((acc, row) => {
     acc[row.suggestedAction] = (acc[row.suggestedAction] || 0) + 1;
@@ -341,6 +367,7 @@ async function runRumorDigest() {
     chunks: chunks.length,
     written: rows.length,
     parse_retries: parseRetries,
+    events_emitted: eventsEmitted,
   });
   return { processed: rawSignals.length, written: rows.length };
 }

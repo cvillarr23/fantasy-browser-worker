@@ -1,6 +1,7 @@
 jest.mock("../../src/db/rumor_signals");
 jest.mock("../../src/lib/llm_client");
 jest.mock("../../src/db/run_log");
+jest.mock("../../src/queue/events");
 
 const {
   fetchWatermark,
@@ -9,6 +10,7 @@ const {
 } = require("../../src/db/rumor_signals");
 const { completeWithFallback } = require("../../src/lib/llm_client");
 const runLog = require("../../src/db/run_log");
+const { publishJobEvent } = require("../../src/queue/events");
 const {
   runRumorDigest,
   buildDigestSystemPrompt,
@@ -228,7 +230,7 @@ describe("runRumorDigest", () => {
         { player_id: "600", sentiment: "neutral", confidence: 0.1, suggested_action: "no_op" },
       ]),
     });
-    persistRumorSignals.mockResolvedValue();
+    persistRumorSignals.mockResolvedValue([]);
 
     const result = await runRumorDigest();
 
@@ -279,7 +281,7 @@ describe("runRumorDigest", () => {
           { player_id: "500", sentiment: "negative", confidence: 0.9, suggested_action: "bench_watch" },
         ]),
       });
-    persistRumorSignals.mockResolvedValue([77]);
+    persistRumorSignals.mockResolvedValue([{ id: 77, playerId: "500" }]);
 
     const result = await runRumorDigest();
 
@@ -318,7 +320,7 @@ describe("runRumorDigest", () => {
             { player_id: "600", sentiment: "neutral", confidence: 0.1, suggested_action: "no_op" },
           ]),
         });
-      persistRumorSignals.mockResolvedValue();
+      persistRumorSignals.mockResolvedValue([]);
 
       const result = await runRumorDigest();
 
@@ -348,5 +350,71 @@ describe("runRumorDigest", () => {
       if (originalChunkDelay === undefined) delete process.env.RUMOR_DIGEST_CHUNK_DELAY_MS;
       else process.env.RUMOR_DIGEST_CHUNK_DELAY_MS = originalChunkDelay;
     }
+  });
+});
+
+describe("runRumorDigest: job events", () => {
+  const saved = [
+    { id: 71, playerId: "500" },
+    { id: 72, playerId: "600" },
+    { id: 73, playerId: "700" },
+  ];
+
+  function arrangeDigest() {
+    fetchWatermark.mockResolvedValue(null);
+    fetchNewRawSignals.mockResolvedValue(
+      saved.map((s, i) => rawSignal({ id: 10 + i, player_id: s.playerId })),
+    );
+    completeWithFallback.mockResolvedValue({
+      text: JSON.stringify(
+        saved.map((s) => ({
+          player_id: s.playerId,
+          sentiment: "neutral",
+          confidence: 0.5,
+          suggested_action: "no_op",
+        })),
+      ),
+    });
+    persistRumorSignals.mockResolvedValue(saved);
+  }
+
+  beforeEach(() => {
+    publishJobEvent.mockReset();
+    publishJobEvent.mockResolvedValue("event-id");
+    runLog.addSummary.mockClear();
+  });
+
+  it("emits rumor.signal_created per stored signal, no_op included, after persisting", async () => {
+    arrangeDigest();
+    await runRumorDigest();
+
+    expect(publishJobEvent.mock.calls.map(([event]) => event)).toEqual([
+      { key: "rumor.signal_created", subject: "player:500", payload: { signal_id: 71 } },
+      { key: "rumor.signal_created", subject: "player:600", payload: { signal_id: 72 } },
+      { key: "rumor.signal_created", subject: "player:700", payload: { signal_id: 73 } },
+    ]);
+    expect(Math.min(...publishJobEvent.mock.invocationCallOrder)).toBeGreaterThan(
+      persistRumorSignals.mock.invocationCallOrder[0],
+    );
+    expect(runLog.addSummary).toHaveBeenCalledWith(expect.objectContaining({ events_emitted: 3 }));
+  });
+
+  it("stops emitting after the first failed publish and still succeeds", async () => {
+    arrangeDigest();
+    publishJobEvent.mockResolvedValueOnce("event-id").mockResolvedValueOnce(null);
+
+    const result = await runRumorDigest();
+
+    expect(publishJobEvent).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ processed: 3, written: 3 });
+    expect(runLog.addSummary).toHaveBeenCalledWith(expect.objectContaining({ events_emitted: 1 }));
+  });
+
+  it("emits nothing when persisting fails", async () => {
+    arrangeDigest();
+    persistRumorSignals.mockRejectedValue(new Error("db down"));
+
+    await expect(runRumorDigest()).rejects.toThrow("db down");
+    expect(publishJobEvent).not.toHaveBeenCalled();
   });
 });
