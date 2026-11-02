@@ -320,6 +320,7 @@ async function publishToQueue(queueName, payload) {
 }
 
 module.exports = {
+  AMQP_URL,
   initializeQueueConsumer,
   publishToQueue,
   redactAmqpUrl,

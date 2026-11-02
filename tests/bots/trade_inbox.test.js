@@ -640,3 +640,52 @@ describe("CLI", () => {
     );
   });
 });
+
+describe("refreshTradeInbox: job events", () => {
+  beforeEach(() => {
+    deps.emitEvent = jest.fn(async () => "event-id");
+  });
+
+  it("emits trade.offer_received once for a newly stored offer", async () => {
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.emitEvent).toHaveBeenCalledTimes(1);
+    expect(deps.emitEvent).toHaveBeenCalledWith({
+      key: "trade.offer_received",
+      subject: "trade_offer:tx-1",
+      payload: {
+        league_id: "1234567890",
+        espn_transaction_id: "tx-1",
+        proposing_team_id: "3",
+        expiration_date: new Date(EXPIRES).toISOString(),
+      },
+    });
+    expect(result.eventsEmitted).toBe(1);
+  });
+
+  it("does not emit again for an offer already stored", async () => {
+    await refreshTradeInbox({ persist: true }, deps);
+    deps.emitEvent.mockClear();
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.emitEvent).not.toHaveBeenCalled();
+  });
+
+  it("never emits from a read-only check", async () => {
+    await refreshTradeInbox({ persist: false }, deps);
+    expect(deps.emitEvent).not.toHaveBeenCalled();
+  });
+
+  it("emits only after every new offer is stored", async () => {
+    deps.readPending.mockResolvedValue({ trades: [trade(), trade({ id: "tx-2" })] });
+    await refreshTradeInbox({ persist: true }, deps);
+    const lastStore = Math.max(...deps.store.update.mock.invocationCallOrder);
+    expect(Math.min(...deps.emitEvent.mock.invocationCallOrder)).toBeGreaterThan(lastStore);
+    expect(deps.emitEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts only events the broker took", async () => {
+    deps.emitEvent.mockResolvedValue(null);
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(result.status).toBe("refreshed");
+    expect(result.eventsEmitted).toBe(0);
+  });
+});
