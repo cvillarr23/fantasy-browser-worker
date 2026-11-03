@@ -4,13 +4,13 @@ description: What the browser worker does, where each bot is documented, and how
 sidebar_position: 1
 ---
 
-The browser worker turns decisions from the core pipeline into actions on ESPN. It consumes RabbitMQ queues and runs a few scheduled jobs. Start here to find the page you need.
+The browser worker turns decisions from the core pipeline into actions on ESPN. It consumes RabbitMQ queues and runs a few jobs the core job launcher starts. Start here to find the page you need.
 
 ```mermaid
 flowchart LR
     core["core pipeline API"] -->|"queue messages"| mq[("RabbitMQ")]
     mq --> worker["worker Jobs\n(src/index.js)"]
-    cron["CronJobs"] -->|"node src/bots/*.js"| worker
+    launcher["core job launcher"] -->|"k8s Jobs: node src/bots/*.js"| worker
     worker -->|"REST + Playwright"| espn["ESPN"]
     worker --> db[("Postgres\nexecution_log, activity_*")]
     worker --> redis[("Redis\ndraft feed")]
