@@ -13,9 +13,9 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.223.0",
-    "@opentelemetry/instrumentation-amqplib": "^0.44.0",
+    "@opentelemetry/instrumentation-amqplib": "^0.71.0",
     "@opentelemetry/instrumentation-pg": "^0.75.0",
-    "@opentelemetry/resources": "^1.28.0",
+    "@opentelemetry/resources": "^3.0.0",
     "@opentelemetry/sdk-node": "^0.223.0",
     "@opentelemetry/semantic-conventions": "^1.28.0",
     "amqplib": "^0.10.4",
