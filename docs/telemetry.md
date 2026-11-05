@@ -71,7 +71,7 @@ The service name is `browser-worker` in the cluster, from `OTEL_SERVICE_NAME`. A
 | `activity_events` | `activity.event` | Stage history: `running`, `submitted_to_espn`, `verified_complete`, `worker_error` and others. |
 | `activity_sessions` | LLM client | One row per LLM run. |
 | `llm_call_metrics` | LLM client | One row per provider attempt, for the LLM dashboard. |
-| `run_log` | `withInstrumentation` | The run audit log behind the web UI's Runs tab: job, trigger (`schedule`/`manual` from `RUN_CRONJOB`/`RUN_K8S_JOB`, or `queue` with the `tracking_id`), status and a summary. A queue run's parent is the run that queued its action. |
+| `run_log` | `withInstrumentation` | The run audit log behind the web UI's Runs tab: job, trigger (the launcher's `RUN_TRIGGER`, such as `schedule`, `chain`, `event`, `manual`, `cli` or `mcp`, or `queue` with the `tracking_id`), status and a summary. A queue run's parent is the run that queued its action. |
 | `run_links` | `run_log.link` | What a run read and wrote: the digest's raw signal inputs and rumor signal outputs, and each LLM session. |
 
 `execution_log` and `run_log` writes are best-effort. A failed write is logged and never fails or requeues the message. Claims that guard an external write are the exception: they fail closed.

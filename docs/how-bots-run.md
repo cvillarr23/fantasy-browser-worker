@@ -4,7 +4,7 @@ description: How the worker is scaled, how it acknowledges and retries messages,
 sidebar_position: 2
 ---
 
-One container image runs every bot. Queue messages start `src/index.js` through a KEDA `ScaledJob`. Scheduled bots run as Kubernetes CronJobs that call a bot file directly.
+One container image runs every bot. Queue messages start `src/index.js` through a KEDA `ScaledJob`. Scheduled and on-demand bots run as Kubernetes Jobs that the core [job launcher](/overview/job-launcher) creates. Each calls a bot file directly.
 
 :::tip[The short version]
 - One message per Job pod, three pods at most, and the pod exits after 120 s idle.
@@ -17,7 +17,7 @@ One container image runs every bot. Queue messages start `src/index.js` through 
 | Style | Started by | Entrypoint | Bots |
 |---|---|---|---|
 | Queue consumer | KEDA `ScaledJob` `fantasy-browser-worker-scaler` | `src/index.js` | Lineup, waiver sniper, draft clicker, trade evaluation, trade negotiation, trade builder, trade response, async LLM |
-| Scheduled | Kubernetes CronJob | `node src/bots/<file>.js` | Trade inbox, trade scan, rumor digest, ESPN session check |
+| Launcher job | Core job launcher: schedule, chain, event, Jobs page, CLI or MCP | `node src/bots/<file>.js` | Trade inbox, trade scan, rumor digest, ESPN session check |
 | Long-running Job | The core API creates it for a draft | `node src/bots/draft_sync.js` | Draft sync |
 
 ```mermaid
@@ -37,6 +37,8 @@ sequenceDiagram
     Note over W: exits after IDLE_EXIT_SECONDS with no message
 ```
 
+The launcher passes `RUN_ID`, `RUN_TRIGGER` and `RUN_PARENT_ID` to each launcher job. The worker's `src/db/run_log.js` adopts `RUN_ID` as the run's `run_log` row, so the launcher's row and the bot's outcome are one record. See [Job launcher](/overview/job-launcher).
+
 ## How is the worker scaled?
 
 | Setting | Value | Why |
@@ -51,7 +53,7 @@ sequenceDiagram
 Queues with a KEDA trigger: `lineup_updates`, `waiver_actions`, `draft_targets`, `trade_evaluations`, `trade_negotiations`, `llm_requests`, `trade_submissions`, `trade_responses`.
 
 :::warning[`trade_proposals` has no trigger]
-The worker still consumes `trade_proposals`, but an idle worker never wakes for it. Don't publish scans to that queue. Use the [trade scan](bots/trade-proposal-and-scan.md) CronJob or CLI.
+The worker still consumes `trade_proposals`, but an idle worker never wakes for it. Don't publish scans to that queue. Run the `trade-scan` launcher job from the Jobs page, the CLI or an MCP tool, or use the [trade scan](bots/trade-proposal-and-scan.md) CLI.
 :::
 
 ## How are messages acknowledged and retried?

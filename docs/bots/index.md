@@ -15,13 +15,13 @@ Each bot has its own page covering its trigger, message schema, ESPN reads and w
 | [Draft clicker](draft-clicker.md) | `draft_targets` | `draft_clicker.js` | Yes |
 | [Draft sync](draft-sync.md) | A Job the core API creates | `draft_sync.js` | No |
 | [Trade evaluation and negotiation](trade-evaluation-and-negotiation.md) | `trade_evaluations`, `trade_negotiations` | `trade_bot.js` | Staging only |
-| [Trade proposal and scan](trade-proposal-and-scan.md) | `trade_proposals`, `trade-scan` CronJob | `trade_proposal.js`, `trade_scan.js` | Staging only |
+| [Trade proposal and scan](trade-proposal-and-scan.md) | `trade_proposals`, `trade-scan` launcher job | `trade_proposal.js`, `trade_scan.js` | Staging only |
 | [Trade builder](trade-builder.md) | `trade_submissions` | `trade_builder.js` | Yes, with approval |
-| [Trade inbox](trade-inbox.md) | `trade-inbox` CronJob | `trade_inbox.js` | No |
+| [Trade inbox](trade-inbox.md) | `trade-inbox` launcher job | `trade_inbox.js` | No |
 | [Trade response](trade-response.md) | `trade_responses` | `trade_response.js` | Yes, with approval |
-| [Rumor digest](rumor-digest.md) | `rumor-digest-bot` CronJob | `rumor_digest_bot.js` | No |
+| [Rumor digest](rumor-digest.md) | `rumor-digest-bot` launcher job | `rumor_digest_bot.js` | No |
 | [Async LLM requests](async-llm-requests.md) | `llm_requests` | `llm_async_queue.js` | No |
-| [Session health check](session-health.md) | `espn-session-healthcheck` CronJob | `check_espn_session.js` | No |
+| [Session health check](session-health.md) | `espn-session-healthcheck` launcher job | `check_espn_session.js` | No |
 | [Mock draft helper](mock-draft.md) | Called by draft sync | `mock_draft.js` | No |
 
 ## How do the trade bots fit together?
@@ -30,8 +30,8 @@ Offers move from generation through human approval to ESPN. No LLM output reache
 
 ```mermaid
 flowchart LR
-    scan["trade scan\n(CronJob)"] --> prop["trade proposal\n(LLM + core score)"]
-    inbox["trade inbox\n(CronJob)"] -->|"counter payload"| neg["trade negotiation"]
+    scan["trade scan\n(launcher job)"] --> prop["trade proposal\n(LLM + core score)"]
+    inbox["trade inbox\n(launcher job)"] -->|"counter payload"| neg["trade negotiation"]
     prop -->|"stage offer"| build["trade builder"]
     neg -->|"stage offer"| build
     build -->|"awaiting_approval"| human{{"human approval"}}
