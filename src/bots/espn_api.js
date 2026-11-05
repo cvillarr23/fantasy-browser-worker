@@ -367,42 +367,61 @@ async function submitLineup(
 }
 
 /**
- * Submits a free-agent/waiver claim (add, optionally paired with a drop) to ESPN.
+ * One player's acquisition status in a league: "FREEAGENT", "WAIVERS" or "ONTEAM" (ESPN's own
+ * values), plus `onTeamId` (0 unless rostered) and, for a player on waivers, `waiverProcessDate`
+ * (epoch ms). Read via the same kona_player_info view + x-fantasy-filter the Players page uses
+ * (verified live 2026-11-04: Braelon Allen read as WAIVERS the day his FREEAGENT add got a 409).
+ */
+async function readPlayerStatus(context, { leagueId, seasonId, playerId }) {
+  const url = buildLeagueReadUrl(leagueId, seasonId, ["kona_player_info"]);
+  const filter = { players: { filterIds: { value: [Number(playerId)] } } };
+  const response = await context.request.get(url, {
+    headers: { "x-fantasy-filter": JSON.stringify(filter) },
+  });
+  if (!response.ok()) {
+    throw readFailure("Player status", response.status(), await response.text());
+  }
+  const body = await response.json();
+  // Filtered again here, same as readLeagueChat: the server honoring x-fantasy-filter isn't
+  // something to rely on.
+  const entry = (body.players || []).find((p) => String(p.id) === String(playerId));
+  if (!entry) {
+    throw new PermanentError(`[ESPN API] Player ${playerId} not found in league ${leagueId}.`);
+  }
+  return {
+    status: entry.status,
+    onTeamId: entry.onTeamId ?? 0,
+    name: entry.player?.fullName ?? null,
+    waiverProcessDate: entry.waiverProcessDate ?? null,
+  };
+}
+
+/**
+ * Submits an add (optionally paired with a drop) to ESPN, as an instant free-agent pickup or a
+ * queued waiver claim.
  *
- * PARTIALLY VERIFIED: the shared envelope (host, URL, isLeagueManager/teamId/memberId/
- * scoringPeriodId/executionType, and both headers — `x-fantasy-platform` is now
- * `"espn-fantasy-web"`, confirmed via submitLineup()'s real 2026-09-12 capture) is confirmed by
- * inheritance from that same `transactions/` endpoint. A live web-UI claim on 2026-10-07 was
- * rejected with HTTP 409 TRAN_ITEM_TO_TEAM_ID_MISSING ("Required field toTeamId missing from ADD
- * TransactionItem"), so ADD items name the receiving team and DROP items the releasing team.
- * STILL UNVERIFIED: that this corrected item shape and the top-level `type: "FREEAGENT"` are
- * accepted — no successful free-agent/waiver capture has been taken yet. `waiver_recon.js
- * --watch-save` exists for that; treat it as a fast-follow.
+ * VERIFIED (live web-UI capture 2026-11-04, league 1248158344 team 8, fixtures in
+ * tests/bots/fixtures/espn/): a claim for a player on waivers is this same envelope with
+ * `type: "WAIVER"` and `bidAmount: null` (no FAAB in that league), still `executionType: "EXECUTE"`.
+ * ESPN answers 200 with `status: "PENDING"`/`isPending: true`; the claim then appears under
+ * `pendingTransactions` (view=mPendingTransactions) with a `processDate`, not on the roster.
+ * Sending `type: "FREEAGENT"` for that same player is rejected with HTTP 409
+ * TRAN_PLAYER_NOT_FREEAGENT. ADD items name the receiving team and DROP items the releasing team
+ * (an ADD without `toTeamId` is a 409 TRAN_ITEM_TO_TEAM_ID_MISSING).
  *
- * One thing this does NOT attempt to distinguish, open until a real capture exists: an immediate
- * free-agent pickup (outside the waiver period, processed instantly — what `executionType:
- * "EXECUTE"` implies) vs an actual waiver claim (inside the waiver period, queued and processed
- * later, e.g. overnight, possibly needing a `type: "WAIVER"` and a FAAB `bidAmount` instead). This
- * always sends "FREEAGENT"/"EXECUTE"; if the league is mid-waiver period, ESPN's real behavior
- * here is unknown — it may reject this outright, or silently queue it under a shape this function
- * didn't send.
+ * STILL UNVERIFIED: a successful `type: "FREEAGENT"` pickup (no capture yet), and a FAAB league's
+ * `bidAmount`. Callers pick `claimType` from readPlayerStatus: "WAIVER" for a WAIVERS player,
+ * otherwise "FREEAGENT".
  *
  * `addPlayerId`/`dropPlayerId` are each independently optional (though at least one must be set) —
  * a caller that already knows one half of a claim landed (e.g. re-processing a redelivered queue
  * message) can submit just the remaining item instead of resending a half that's already applied.
  *
- * Failure classification: a non-2xx response in the 4xx range (except 429, a rate limit) is
- * treated as a PermanentError — a rejected claim (player already taken, claim window closed,
- * malformed request) will keep failing identically on retry, and requeuing it forever under
- * connection.js's channel-wide prefetch(1) would starve every other queue. 429/5xx/network
- * failures stay ordinary Errors so connection.js retries them. 401/403 instead raise
- * SessionExpiredError so the claim can retry after credentials are refreshed. This is a coarse
- * HTTP-status-only heuristic, not a parse of ESPN's actual rejection reason (its exact error
- * body shape is still unconfirmed) — re-verify against a real rejection once one's been captured.
- *
- * Re-verify by running `node src/bots/waiver_recon.js --watch-save` against a real free-agent add
- * (or an actual waiver claim, to observe whether the shape differs) and diffing the captured body
- * against this one — same recon workflow lineup_recon.js established for submitLineup.
+ * Failure classification: a 4xx (except 429) is a PermanentError, since the same payload will
+ * fail identically on retry and requeuing it under connection.js's channel-wide prefetch(1) would
+ * starve every other queue. TRAN_PLAYER_NOT_FREEAGENT gets a plain-language message (the player
+ * went to waivers or another team between the status read and the write). 429/5xx/network
+ * failures stay ordinary Errors so connection.js retries them; 401/403 raise SessionExpiredError.
  */
 async function submitWaiverClaim(
   context,
@@ -414,6 +433,7 @@ async function submitWaiverClaim(
     scoringPeriodId,
     addPlayerId,
     dropPlayerId,
+    claimType = "FREEAGENT",
     trackingId,
   },
 ) {
@@ -428,11 +448,12 @@ async function submitWaiverClaim(
   const payload = {
     isLeagueManager: false,
     teamId: ourTeamId,
-    type: "FREEAGENT",
+    type: claimType,
     memberId,
     scoringPeriodId,
     executionType: "EXECUTE",
     items,
+    ...(claimType === "WAIVER" ? { bidAmount: null } : {}),
   };
   const headers = {
     "Content-Type": "application/json",
@@ -463,6 +484,18 @@ async function submitWaiverClaim(
     const message = `[ESPN API] Waiver claim submit failed with HTTP ${status} — ${text.slice(0, 500)}`;
     if (status === HTTP_UNAUTHORIZED || status === HTTP_FORBIDDEN) {
       throw new SessionExpiredError(message);
+    }
+    const details = parseRejectionDetails(text);
+    if (
+      details.some((d) => d?.type === "TRAN_PLAYER_NOT_FREEAGENT") ||
+      text.includes("TRAN_PLAYER_NOT_FREEAGENT")
+    ) {
+      const error = new PermanentError(
+        `[ESPN API] Player ${addPlayerId} is on waivers or owned by another team, so ESPN refused a ` +
+          `${claimType} add (TRAN_PLAYER_NOT_FREEAGENT) — ${text.slice(0, 300)}`,
+      );
+      error.details = details;
+      throw error;
     }
     throw classifyHttpStatusError(status, message);
   }
@@ -798,6 +831,7 @@ module.exports = {
   readLeagueChat,
   submitLineup,
   submitWaiverClaim,
+  readPlayerStatus,
   buildTradeProposalBody,
   readDraftPicks,
   submitDraftPick,

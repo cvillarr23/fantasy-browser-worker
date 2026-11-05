@@ -2,7 +2,7 @@ const activity = require("../db/activity");
 const fs = require("fs");
 const path = require("path");
 const { createAuthenticatedSession } = require("./auth");
-const { readRoster, submitWaiverClaim } = require("./espn_api");
+const { readRoster, readPlayerStatus, submitWaiverClaim } = require("./espn_api");
 const { PermanentError, requirePlainObjectPayload } = require("../errors");
 const { requirePlayerId } = require("../lib/espn_ids");
 const { resolveDryRun: resolveEnvDryRun } = require("../lib/env");
@@ -160,39 +160,61 @@ async function executeInstantWaiverClaim(payload) {
       );
     }
 
+    // ESPN refuses a FREEAGENT add for a player on waivers (409 TRAN_PLAYER_NOT_FREEAGENT), so the
+    // add's shape follows the player's current status. A drop on its own needs no status.
+    let claimType = "FREEAGENT";
+    if (needsAdd) {
+      const player = await readPlayerStatus(session.context, { ...target, playerId: addPlayerId });
+      if (player.status === "ONTEAM") {
+        throw new PermanentError(
+          `[Sniper Bot][${tracking}] ${player.name || addPlayerId} is already on team ` +
+            `${player.onTeamId}'s roster, so it can't be claimed.`,
+        );
+      }
+      if (player.status === "WAIVERS") claimType = "WAIVER";
+    }
+
     const describeItems = () =>
       `${needsAdd ? ` add=${addPlayerId}` : ""}${needsDrop ? ` drop=${dropPlayerId}` : ""}`;
 
     if (dryRun) {
-      await activity.event("dry_run", { addPlayerId, dropPlayerId }, "skipped", "unknown");
+      await activity.event("dry_run", { addPlayerId, dropPlayerId, claimType }, "skipped", "unknown");
       log(
-        `DRY_RUN set — would submit${describeItems()} (scoringPeriodId ${roster.scoringPeriodId}).`,
+        `DRY_RUN set — would submit ${claimType}${describeItems()} ` +
+          `(scoringPeriodId ${roster.scoringPeriodId}).`,
       );
       return;
     }
 
-    log(`Submitting claim:${describeItems()}...`);
+    log(`Submitting ${claimType} claim:${describeItems()}...`);
     await activity.beforeExternalWrite();
-    await submitWaiverClaim(session.context, {
+    const result = await submitWaiverClaim(session.context, {
       ...target,
       memberId: session.swid,
       scoringPeriodId: roster.scoringPeriodId,
       addPlayerId: needsAdd ? addPlayerId : null,
       dropPlayerId: needsDrop ? dropPlayerId : null,
+      claimType,
       trackingId: tracking,
     });
 
     await activity.event(
       "submitted_to_espn",
-      { addPlayerId, dropPlayerId },
+      { addPlayerId, dropPlayerId, claimType, transactionId: result?.id ?? null },
       "submitted",
       "awaiting_processing",
     );
 
-    // Best-effort only: if this league is mid-waiver-period, a genuine waiver claim (as opposed to
-    // an immediate free-agent pickup) is queued and processed later — the roster read right after
-    // submit legitimately won't show it yet. So this only confirms the fast path; it does not fail
-    // the run when it can't.
+    // A waiver claim comes back PENDING and stays off the roster until ESPN processes waivers, so a
+    // roster read now can't confirm it. awaiting_processing is its outcome until then.
+    if (result?.status === "PENDING" || result?.isPending === true) {
+      log(
+        `Waiver claim ${result.id ?? ""} queued on ESPN; awaiting waiver processing for ${addPlayerId}.`,
+      );
+      return;
+    }
+
+    // Best-effort only: a free-agent add should land at once, but a slow roster read isn't a failure.
     const confirmed = (await readRoster(session.context, target)).slotByPlayerId.has(addPlayerId);
     if (confirmed && !dropPlayerId)
       await activity.event(
