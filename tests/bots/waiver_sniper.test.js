@@ -2,7 +2,10 @@ jest.mock("../../src/bots/auth");
 jest.mock("../../src/bots/espn_api");
 
 const { createAuthenticatedSession } = require("../../src/bots/auth");
-const { readRoster, submitWaiverClaim } = require("../../src/bots/espn_api");
+const fs = require("fs");
+const path = require("path");
+const activity = require("../../src/db/activity");
+const { readRoster, readPlayerStatus, submitWaiverClaim } = require("../../src/bots/espn_api");
 const { executeInstantWaiverClaim } = require("../../src/bots/waiver_sniper");
 
 const ENV_KEYS = ["DRY_RUN", "ESPN_LEAGUE_ID", "ESPN_TEAM_ID"];
@@ -18,6 +21,7 @@ beforeEach(() => {
     browser: { close: jest.fn() },
     swid: "{TEST-SWID}",
   });
+  readPlayerStatus.mockResolvedValue({ status: "FREEAGENT", onTeamId: 0, name: null });
 });
 
 afterEach(() => {
@@ -231,5 +235,90 @@ describe("per-request dry_run override", () => {
     await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200", dry_run: value });
 
     expect(submitWaiverClaim).not.toHaveBeenCalled();
+  });
+
+  describe("player on waivers", () => {
+    const pendingBody = () =>
+      JSON.parse(
+        fs.readFileSync(path.join(__dirname, "fixtures", "espn", "waiver-claim-response.json"), "utf8"),
+      ).body;
+
+    it("submits a WAIVER claim and records awaiting_processing, not a failure", async () => {
+      const event = jest.spyOn(activity, "event").mockResolvedValue(undefined);
+      readRoster.mockResolvedValueOnce(roster({ "3916148": 20 }, 9));
+      readPlayerStatus.mockResolvedValueOnce({
+        status: "WAIVERS",
+        onTeamId: 0,
+        name: "Braelon Allen",
+        waiverProcessDate: 1793952000000,
+      });
+      submitWaiverClaim.mockResolvedValue(pendingBody());
+      process.env.DRY_RUN = "false";
+
+      await executeInstantWaiverClaim({ player_id: "4685247", drop_player_id: "3916148" });
+
+      expect(submitWaiverClaim).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({
+          addPlayerId: "4685247",
+          dropPlayerId: "3916148",
+          claimType: "WAIVER",
+        }),
+      );
+      expect(event).toHaveBeenCalledWith(
+        "submitted_to_espn",
+        expect.objectContaining({ claimType: "WAIVER", transactionId: "2c75754e-d19d-4a1b-853f-89d8945f6f2a" }),
+        "submitted",
+        "awaiting_processing",
+      );
+      expect(event).not.toHaveBeenCalledWith(
+        "verified_complete",
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      // Queued claims aren't on the roster yet, so there's no post-submit roster read.
+      expect(readRoster).toHaveBeenCalledTimes(1);
+    });
+
+    it("sends FREEAGENT for a free agent", async () => {
+      readRoster.mockResolvedValueOnce(roster({ "200": 20 }));
+      readRoster.mockResolvedValueOnce(roster({ "100": 20 }));
+      submitWaiverClaim.mockResolvedValue({ id: "x", status: "EXECUTED" });
+      process.env.DRY_RUN = "false";
+
+      await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200" });
+
+      expect(submitWaiverClaim).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ claimType: "FREEAGENT" }),
+      );
+    });
+
+    it("rejects a player already on another team without submitting", async () => {
+      readRoster.mockResolvedValueOnce(roster({ "200": 20 }));
+      readPlayerStatus.mockResolvedValueOnce({ status: "ONTEAM", onTeamId: 3, name: "Someone" });
+      process.env.DRY_RUN = "false";
+
+      await expect(
+        executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200" }),
+      ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/team 3's roster/) });
+      expect(submitWaiverClaim).not.toHaveBeenCalled();
+    });
+
+    it("skips the status read when only the drop is left", async () => {
+      readRoster.mockResolvedValueOnce(roster({ "100": 20, "200": 20 }));
+      readRoster.mockResolvedValueOnce(roster({ "100": 20 }));
+      submitWaiverClaim.mockResolvedValue({});
+      process.env.DRY_RUN = "false";
+
+      await executeInstantWaiverClaim({ player_id: "100", drop_player_id: "200" });
+
+      expect(readPlayerStatus).not.toHaveBeenCalled();
+      expect(submitWaiverClaim).toHaveBeenCalledWith(
+        {},
+        expect.objectContaining({ addPlayerId: null, dropPlayerId: "200", claimType: "FREEAGENT" }),
+      );
+    });
   });
 });

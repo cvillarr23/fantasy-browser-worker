@@ -1,0 +1,5 @@
+{
+  "_note": "GET lm-api-reads .../leagues/1248158344?view=kona_player_info with x-fantasy-filter {players:{filterIds:{value:[4685247,3916148]}}}, captured 2026-11-04. Trimmed to the fields readPlayerStatus uses.",
+  "status": 200,
+  "body": {"players":[{"id":3916148,"status":"ONTEAM","onTeamId":8,"player":{"fullName":"Tony Pollard"}},{"id":4685247,"status":"WAIVERS","onTeamId":0,"waiverProcessDate":1793952000000,"player":{"fullName":"Braelon Allen"}}]}
+}
