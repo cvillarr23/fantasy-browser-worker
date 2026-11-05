@@ -13,6 +13,7 @@ const {
   readRosters,
   submitLineup,
   submitWaiverClaim,
+  readPlayerStatus,
   buildTradeProposalBody,
   readPendingTrades,
   readLeagueChat,
@@ -22,6 +23,9 @@ const {
   VERIFIED_TRADE_RESPONSE_ACTIONS,
 } = require("../../src/bots/espn_api");
 const { SessionExpiredError } = require("../../src/errors");
+
+const FIXTURES = path.join(__dirname, "fixtures", "espn");
+const fixture = (name) => JSON.parse(fs.readFileSync(path.join(FIXTURES, name), "utf8"));
 
 afterAll(() => {
   fs.rmSync(MODULE_TMP_DIR, { recursive: true, force: true });
@@ -291,6 +295,64 @@ describe("submitLineup", () => {
 });
 
 describe("submitWaiverClaim", () => {
+  // Live web-UI claim for a player on waivers, 2026-11-04 (tests/bots/fixtures/espn/).
+  it("sends the captured WAIVER shape for a player on waivers", async () => {
+    const captured = fixture("waiver-claim-request.json");
+    const response = fixture("waiver-claim-response.json");
+    const context = fakeContext(response.body);
+
+    const result = await submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: captured.body.memberId,
+      scoringPeriodId: 9,
+      addPlayerId: "4685247",
+      dropPlayerId: "3916148",
+      claimType: "WAIVER",
+    });
+
+    const [url, { headers, data }] = context.request.post.mock.calls[0];
+    expect(captured.url.startsWith(url)).toBe(true);
+    expect(data).toEqual(captured.body);
+    const lower = (h) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(lower(captured.headers)).toMatchObject(lower(headers));
+    expect(result).toMatchObject({ status: "PENDING", isPending: true, type: "WAIVER" });
+  });
+
+  it("leaves bidAmount off the FREEAGENT shape", async () => {
+    const context = fakeContext({ id: "abc" });
+    await submitWaiverClaim(context, {
+      leagueId: "1",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 9,
+      addPlayerId: "111",
+    });
+    expect(context.request.post.mock.calls[0][1].data).not.toHaveProperty("bidAmount");
+  });
+
+  it("explains TRAN_PLAYER_NOT_FREEAGENT as a player on waivers or owned", async () => {
+    const context = fakeContext(
+      { details: [{ type: "TRAN_PLAYER_NOT_FREEAGENT", message: "Braelon Allen is not a free agent" }] },
+      409,
+    );
+    const error = await submitWaiverClaim(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      teamId: "8",
+      memberId: "x",
+      scoringPeriodId: 9,
+      addPlayerId: "4685247",
+      dropPlayerId: "3916148",
+    }).catch((err) => err);
+
+    expect(error.permanent).toBe(true);
+    expect(error.message).toMatch(/4685247 is on waivers or owned by another team/);
+    expect(error.details[0].type).toBe("TRAN_PLAYER_NOT_FREEAGENT");
+  });
+
   it("sends the shared envelope with FREEAGENT/ADD+DROP items", async () => {
     const context = fakeContext({ id: "abc" });
 
@@ -910,5 +972,59 @@ describe("trade responses", () => {
       status: 503,
       outcomeUnknown: true,
     });
+  });
+});
+
+describe("readPlayerStatus", () => {
+  function getContext(body, status = 200) {
+    return {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => status >= 200 && status < 300,
+          status: () => status,
+          json: async () => body,
+          text: async () => JSON.stringify(body),
+        }),
+      },
+    };
+  }
+
+  it("reads a player on waivers from the captured kona_player_info response", async () => {
+    const context = getContext(fixture("player-status-waivers.json").body);
+
+    const player = await readPlayerStatus(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      playerId: "4685247",
+    });
+
+    expect(player).toEqual({
+      status: "WAIVERS",
+      onTeamId: 0,
+      name: "Braelon Allen",
+      waiverProcessDate: 1793952000000,
+    });
+    const [url, { headers }] = context.request.get.mock.calls[0];
+    expect(url).toContain("view=kona_player_info");
+    expect(JSON.parse(headers["x-fantasy-filter"])).toEqual({
+      players: { filterIds: { value: [4685247] } },
+    });
+  });
+
+  it("reads a rostered player as ONTEAM with its team", async () => {
+    const context = getContext(fixture("player-status-waivers.json").body);
+    const player = await readPlayerStatus(context, {
+      leagueId: "1248158344",
+      seasonId: "2026",
+      playerId: "3916148",
+    });
+    expect(player).toMatchObject({ status: "ONTEAM", onTeamId: 8 });
+  });
+
+  it("is permanent when ESPN doesn't return the player", async () => {
+    const context = getContext({ players: [] });
+    await expect(
+      readPlayerStatus(context, { leagueId: "1", seasonId: "2026", playerId: "999" }),
+    ).rejects.toMatchObject({ permanent: true });
   });
 });

@@ -1,0 +1,4 @@
+{
+  "status": 200,
+  "body": {"bidAmount":0,"executionType":"EXECUTE","id":"2c75754e-d19d-4a1b-853f-89d8945f6f2a","isActingAsTeamOwner":false,"isLeagueManager":false,"isPending":true,"items":[{"fromLineupSlotId":-1,"fromTeamId":0,"isKeeper":false,"overallPickNumber":0,"playerId":4685247,"toLineupSlotId":-1,"toTeamId":8,"type":"ADD"},{"fromLineupSlotId":20,"fromTeamId":8,"isKeeper":false,"overallPickNumber":0,"playerId":3916148,"toLineupSlotId":-1,"toTeamId":0,"type":"DROP"}],"memberId":"{00000000-0000-0000-0000-000000000000}","proposedDate":1793843298990,"rating":0,"scoringPeriodId":9,"skipTransactionCounters":false,"status":"PENDING","subOrder":1,"teamId":8,"type":"WAIVER"}
+}

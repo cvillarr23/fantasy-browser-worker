@@ -1,0 +1,24 @@
+{
+  "_note": "Live ESPN web-UI waiver claim captured 2026-11-04 (league 1248158344, team 8): add Braelon Allen (status WAIVERS), drop Tony Pollard. memberId replaced; cookies were never in the request headers.",
+  "method": "POST",
+  "url": "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/1248158344/transactions/?platformVersion=49f1381346a2251888995687e94f505b9dbff1e7",
+  "headers": {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "X-Fantasy-Source": "kona",
+    "X-Fantasy-Platform": "espn-fantasy-web"
+  },
+  "body": {
+    "isLeagueManager": false,
+    "teamId": 8,
+    "type": "WAIVER",
+    "memberId": "{00000000-0000-0000-0000-000000000000}",
+    "scoringPeriodId": 9,
+    "executionType": "EXECUTE",
+    "items": [
+      { "playerId": 4685247, "type": "ADD", "toTeamId": 8 },
+      { "playerId": 3916148, "type": "DROP", "fromTeamId": 8 }
+    ],
+    "bidAmount": null
+  }
+}
