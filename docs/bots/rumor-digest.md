@@ -8,18 +8,18 @@ The rumor digest reads new `raw_signals` rows, asks an LLM for one verdict per p
 
 ```mermaid
 flowchart LR
-    cron["rumor-digest-bot CronJob\n11:00 Chicago daily"] --> wm["watermark:\nMAX(max_raw_signal_id)"]
+    cron["rumor-digest-bot launcher job\n11:00 Chicago daily"] --> wm["watermark:\nMAX(max_raw_signal_id)"]
     wm --> raw[("raw_signals\nid > watermark")]
     raw --> chunk["chunk by player"]
     chunk --> llm["completeWithFallback\nper chunk, 60 s apart"]
     llm --> parse["validate verdicts"]
     parse --> out[("rumor_signals\none transaction")]
-    out --> trig["core rumor-action trigger\n12:00"]
+    out --> trig["core rumor-action-trigger\nrumor.signal_created event"]
 ```
 
 ## What starts it?
 
-The `rumor-digest-bot` CronJob runs `node src/bots/rumor_digest_bot.js` daily at 11:00 America/Chicago, an hour before core's rumor-action trigger. It needs the database and LLM keys but no ESPN cookies.
+The `rumor-digest-bot` [launcher job](/overview/job-launcher) runs `node src/bots/rumor_digest_bot.js` daily at 11:00 America/Chicago. Its `rumor.signal_created` events start core's `rumor-action-trigger`, which keeps a 21:45 schedule as a fallback. It needs the database and LLM keys but no ESPN cookies.
 
 ## What does it read and write?
 

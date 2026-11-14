@@ -1,6 +1,6 @@
 ---
 title: Session health check
-description: How the weekly check_espn_session.js CronJob confirms your stored ESPN cookies still work, and the shared checks other bots run.
+description: How the weekly check_espn_session.js launcher job confirms your stored ESPN cookies still work, and the shared checks other bots run.
 sidebar_position: 14
 ---
 
@@ -8,7 +8,7 @@ ESPN cookies expire, and the login form can't be scripted. The session health ch
 
 ```mermaid
 flowchart LR
-    cron["CronJob\nMonday 06:00 UTC"] --> auth["inject stored cookies"]
+    cron["launcher job\nMonday 06:00 UTC"] --> auth["inject stored cookies"]
     auth --> page["open roster page"]
     page --> ok{"roster table\nrendered?"}
     ok -->|yes| pass["exit 0"]
@@ -17,14 +17,14 @@ flowchart LR
 
 ## What starts it?
 
-The `espn-session-healthcheck` CronJob runs `node src/bots/check_espn_session.js` every Monday at 06:00 UTC. A failed Job is the alert. The deadline is 3600 s and `backoffLimit` is 1.
+The `espn-session-healthcheck` [launcher job](/overview/job-launcher) runs `node src/bots/check_espn_session.js` every Monday at 06:00 UTC. A failed run fires a Grafana [job alert](/infra/cronjob-alerts). The deadline is 1 hour and `max_attempts` is 2, so one retry.
 
 ## What does it check?
 
 | Tier | Function | Needs a browser? | Used by |
 |---|---|---|---|
 | Cookie and REST | `assertCookieSessionValid` | No | Draft clicker, before any authenticated call. |
-| Rendered page | `assertRenderedSessionValid` | Yes | This CronJob. |
+| Rendered page | `assertRenderedSessionValid` | Yes | This launcher job. |
 
 ## What does each failure mean?
 

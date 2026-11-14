@@ -4,11 +4,11 @@ description: How the worker reads scored trade candidates, re-scores them live a
 sidebar_position: 8
 ---
 
-The trade scan CronJob runs the proposal generator twice a week. The generator starts from core’s precomputed proposable candidates, re-scores the selected packages live, and stages the best package for each of up to 3 teams, best first. When candidate data is unavailable, empty or stale, it asks an LLM for packages and scores them with core. A person must approve each one before anything is sent.
+The `trade-scan` launcher job runs the proposal generator twice a week. The generator starts from core’s precomputed proposable candidates, re-scores the selected packages live, and stages the best package for each of up to 3 teams, best first. When candidate data is unavailable, empty or stale, it asks an LLM for packages and scores them with core. A person must approve each one before anything is sent.
 
 ```mermaid
 flowchart TD
-    cron["trade-scan CronJob\nWed + Fri 13:00 Chicago"] --> gate{"regular season,\nweeks 1-18?"}
+    cron["trade-scan launcher job\nWed + Fri 13:00 Chicago"] --> gate{"regular season,\nweeks 1-18?"}
     gate -->|no| noop["no-op"]
     gate -->|yes| trigger{"scheduled run?"}
     trigger -->|yes| claim["claim today's scan\n(advisory lock + execution_log)"]
@@ -30,12 +30,12 @@ flowchart TD
 
 | Path | Use |
 |---|---|
-| `trade-scan` CronJob runs `node src/bots/trade_scan.js --stage` | Production. Wednesday and Friday at 13:00 America/Chicago. |
-| Manual `node src/bots/trade_scan.js --stage` | Skips the daily claim and does not pitch a team with a recent staged offer. |
+| `trade-scan` [launcher job](/overview/job-launcher) runs `node src/bots/trade_scan.js --stage` | Production. Wednesday and Friday at 13:00 America/Chicago. |
+| Manual `trade-scan` run from the Jobs page, `python -m src.cli jobs run trade-scan --yes` or the `run_job` MCP tool, or `node src/bots/trade_scan.js --stage` | Skips the daily claim and does not pitch a team with a recent staged offer. |
 | `node src/bots/trade_scan.js --check` | Safe check. Reads the calendar only. No claim, database write, browser or LLM. |
 | `trade_proposals` queue | The consumer exists, but there is no KEDA trigger and no producer. Don't use it. |
 
-The Sleeper NFL state API supplies `season` and `week`. Preseason, postseason, week 0 and February to August are successful no-ops. Stale or invalid season data fails closed. This is a calendar gate, not an ESPN trade-deadline check, so suspend the CronJob when trading closes.
+The Sleeper NFL state API supplies `season` and `week`. Preseason, postseason, week 0 and February to August are successful no-ops. Stale or invalid season data fails closed. This is a calendar gate, not an ESPN trade-deadline check, so pause the `trade-scan` job when trading closes, from the Jobs page or with `python -m src.cli jobs pause trade-scan --reason <why>`.
 
 ## What does the message contain?
 
@@ -96,7 +96,7 @@ For either package source, the pitch comes from an LLM call that sees only count
 
 Each offer is staged on its own. A failure is recorded on that offer's `submission` (`status: fill_failed`, `error`, a `classification` and, for a refusal, the `reason`), a warning is logged, and the scan carries on with the remaining offers. The computed offer is never regenerated because staging failed.
 
-The scan's result and run summary show `offersStaged`, `offersFailed` and, when any failed, `failures` (team id, classification, reason). The CronJob exits non-zero only when nothing staged and at least one offer failed, so a partial success doesn't fire the pod failure alert. `no_target` and `no_offer` are unchanged and never a failure.
+The scan's result and run summary show `offersStaged`, `offersFailed` and, when any failed, `failures` (team id, classification, reason). The scan exits non-zero only when nothing staged and at least one offer failed, so a partial success doesn't fire the failed-run job alert. `no_target` and `no_offer` are unchanged and never a failure.
 
 ### ESPN refusing a selection
 
@@ -117,16 +117,16 @@ The screenshot is not persisted. Persisting it would need new storage in the clu
 
 An atomic Postgres advisory lock and a durable `trade_scan_claim` row in `execution_log` allow one scheduled attempt per league, team and Chicago calendar date. Manual scans skip this claim and use the same recent staged-pitch exclusion, so a daily claim does not block an operator run and a second manual scan does not re-pitch a team. The claim persists on no-target, no-offer, error and timeout. There are no automatic retries, because a different pitch has a different approval key.
 
-The CLI has a 15-minute hard deadline. The CronJob uses `backoffLimit: 0`, forbids concurrent runs and bounds runtime to 16 minutes.
+The CLI has a 15-minute hard deadline. The launcher job has one attempt, forbids concurrent runs (`overlap: forbid`) and bounds runtime to a 16-minute `deadline`.
 
 ## What can go wrong?
 
 | Failure | Result |
 |---|---|
 | Invalid `season`/`week`, or `ESPN_LEAGUE_ID`/`ESPN_TEAM_ID` not a positive id | `PermanentError` |
-| Core can't score any package | Error, nothing staged, CronJob exits non-zero |
+| Core can't score any package | Error, nothing staged, the run exits non-zero |
 | Some offers fail to stage, at least one stages | Success. Counts and failures are in the result and run summary. |
-| Every offer fails to stage | `Trade scan staging failed`, CronJob exits non-zero |
+| Every offer fails to stage | `Trade scan staging failed`, the run exits non-zero |
 | LLM or core read failure on the queue path | Delayed retry |
 | Same-day scheduled run | Refused by the claim |
 | Manual run after a scheduled run | Runs without changing the claim; skips teams with a recent staged pitch |
