@@ -166,9 +166,9 @@ sequenceDiagram
 | Check | Surface | Runs in |
 |---|---|---|
 | `assertCookieSessionValid` | An authenticated `mTeam` REST read. No navigation. | Draft clicker before submitting. Draft sync at start and every 15 s REST reconcile. |
-| `assertRenderedSessionValid` | Opens the roster page and waits for the roster table | The weekly `check_espn_session.js` CronJob. Draft sync at start when `DRAFT_MODE=mock`. |
+| `assertRenderedSessionValid` | Opens the roster page and waits for the roster table | The weekly `espn-session-healthcheck` launcher job. Draft sync at start when `DRAFT_MODE=mock`. |
 
-The [Session health check](../bots/session-health.md) page covers the CronJob schedule.
+The [Session health check](../bots/session-health.md) page covers the job's schedule.
 
 ## When cookies expire
 
@@ -184,7 +184,7 @@ To fix an expired session:
 
 1. **Cookies:** copy `espn_s2` and `SWID` from a logged-in browser and run `bao kv put secret/fantasy/espn espn_s2=<espn_s2> swid=<SWID>`. The ExternalSecret syncs it to the cluster. Never commit the values.
 2. **Saved session** (needed for rendered pages): run the [remote login Job](#refreshing-the-login-remotely).
-3. **Verify:** re-run the `espn-session-healthcheck` CronJob by hand, or wait for the next Monday run, and check it exits 0.
+3. **Verify:** start an `espn-session-healthcheck` run from the Jobs page or with `python -m src.cli jobs run espn-session-healthcheck`, or wait for the next Monday run, and check the run ends `success`.
 
 The cookie pair and the saved session are refreshed separately. Refresh both before a draft.
 

@@ -8,7 +8,7 @@ The trade inbox reads every pending offer sent to your team, scores each with co
 
 ```mermaid
 flowchart LR
-    cron["trade-inbox CronJob\nevery 2 h, 08:00-22:00 Chicago"] --> refresh["--refresh"]
+    cron["trade-inbox launcher job\nevery 2 h, 08:00-22:00 Chicago"] --> refresh["--refresh"]
     refresh --> espn["ESPN: pending offers\n+ trade history (GET)"]
     refresh --> score["core: POST /v1/trade/score\n(max 10 per refresh)"]
     refresh --> db[("execution_log\n1 row per transaction id")]
@@ -19,7 +19,7 @@ flowchart LR
 
 ## What starts it?
 
-The `trade-inbox` CronJob runs `node src/bots/trade_inbox.js --refresh` every two hours from 08:00 to 22:00 America/Chicago. It has a 660 s deadline and no retries.
+The `trade-inbox` [launcher job](/overview/job-launcher) runs `node src/bots/trade_inbox.js --refresh` every two hours from 08:00 to 22:00 America/Chicago. It has an 11-minute deadline and one attempt, so no retries.
 
 ## What are the CLI modes?
 
