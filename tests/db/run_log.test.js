@@ -3,12 +3,16 @@ jest.mock("pg", () => ({
   Pool: jest.fn(() => ({ on: jest.fn(), query: (...args) => mockQuery(...args) })),
 }));
 jest.mock("../../src/telemetry/logger", () => ({ logger: { error: jest.fn() } }));
+const mockMeasure = jest.fn(() => null);
+jest.mock("../../src/db/run_usage", () => ({ measureRunUsage: (...args) => mockMeasure(...args) }));
 const mockContext = {};
 jest.mock("../../src/telemetry/context", () => ({ getContext: () => mockContext }));
 const runLog = require("../../src/db/run_log");
 
 beforeEach(() => {
   mockQuery.mockReset();
+  mockMeasure.mockReset();
+  mockMeasure.mockReturnValue(null);
   mockQuery.mockResolvedValue({ rows: [] });
   for (const key of Object.keys(mockContext)) delete mockContext[key];
 });
@@ -157,4 +161,24 @@ it("collects summary fields on the active run", () => {
   mockContext.runSummary = {};
   runLog.addSummary({ written: 2 });
   expect(mockContext.runSummary).toEqual({ written: 2 });
+});
+
+it("records an adopted run's own resource usage at its attempt", async () => {
+  launcherRun({ attempt: "3" });
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+  mockMeasure.mockReturnValue({ source: "cgroup", cpu_seconds: 1.5, attempt: 3 });
+  const id = await runLog.startRun({ jobName: "trade_scan" });
+  await runLog.finishRun(id, "success", { summary: { scanned: 4 } });
+  expect(mockMeasure).toHaveBeenCalledWith(3, expect.any(Number));
+  expect(JSON.parse(mockQuery.mock.calls[1][1][3])).toEqual({
+    scanned: 4,
+    resources: { source: "cgroup", cpu_seconds: 1.5, attempt: 3 },
+  });
+});
+
+it("records no usage for a run it started itself", async () => {
+  const id = await runLog.startRun({ jobName: "trade_scan" });
+  await runLog.finishRun(id, "success");
+  expect(mockMeasure).not.toHaveBeenCalled();
+  expect(JSON.parse(mockQuery.mock.calls[1][1][3])).toEqual({});
 });

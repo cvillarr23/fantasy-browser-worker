@@ -37,7 +37,7 @@ sequenceDiagram
     Note over W: exits after IDLE_EXIT_SECONDS with no message
 ```
 
-The launcher passes `RUN_ID`, `RUN_TRIGGER` and `RUN_PARENT_ID` to each launcher job. The worker's `src/db/run_log.js` adopts `RUN_ID` as the run's `run_log` row, so the launcher's row and the bot's outcome are one record. See [Job launcher](/overview/job-launcher).
+The launcher passes `RUN_ID`, `RUN_TRIGGER` and `RUN_PARENT_ID` to each launcher job. The worker's `src/db/run_log.js` adopts `RUN_ID` as the run's `run_log` row, so the launcher's row and the bot's outcome are one record. See [Job launcher](/overview/job-launcher). When an adopted run finishes, it records its own CPU and peak memory as `summary.resources` (`src/db/run_usage.js`), read from its container's cgroup, and core suggests catalog resources from those figures.
 
 ## How is the worker scaled?
 
