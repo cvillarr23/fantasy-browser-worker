@@ -12,8 +12,8 @@ const DATABASE_TIMEOUT_MS = 5000;
 const MAX_ERROR_CHARS = 4000;
 const adoptedParentRunIds = new Map();
 const adoptedAttempts = new Map();
-// When each adopted run started (process.hrtime.bigint()), for its usage's wall_seconds.
-const adoptedStarts = new Map();
+// Adopted runs, which own their pod (or, inline, their process) and so record its usage.
+const adoptedRuns = new Set();
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -85,7 +85,7 @@ async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = 
   if (adoptedId) {
     adoptedParentRunIds.set(adoptedId, process.env.RUN_PARENT_ID);
     adoptedAttempts.set(adoptedId, attempt);
-    adoptedStarts.set(adoptedId, process.hrtime.bigint());
+    adoptedRuns.add(adoptedId);
     delete process.env.RUN_ID;
     process.env.RUN_PARENT_ID = adoptedId;
   }
@@ -110,7 +110,7 @@ async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = 
   if (adoptedId && !adopted) {
     restoreParentRunId(adoptedId);
     adoptedAttempts.delete(adoptedId);
-    adoptedStarts.delete(adoptedId);
+    adoptedRuns.delete(adoptedId);
     throw new Error(`Run ${adoptedId} attempt ${attempt} is no longer current`);
   }
   return id;
@@ -134,7 +134,7 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
     logger.error("Could not record run outcome", { err, runId: id });
   } finally {
     adoptedAttempts.delete(id);
-    adoptedStarts.delete(id);
+    adoptedRuns.delete(id);
     restoreParentRunId(id);
   }
 }
@@ -143,10 +143,10 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
 /** { resources } for a launcher-adopted run, which owns its pod (or, inline, its process). A
  * run this process started itself shares the process, so it records nothing. */
 function launcherRunUsage(id) {
-  const started = adoptedStarts.get(id);
-  if (started === undefined) return {};
-  const wallSeconds = Number(process.hrtime.bigint() - started) / 1e9;
-  const usage = measureRunUsage(adoptedAttempts.get(id) ?? 1, wallSeconds);
+  if (!adoptedRuns.has(id)) return {};
+  // The CPU counters include node's start-up and requires, so the wall time is the process's
+  // whole lifetime, not just the time since startRun.
+  const usage = measureRunUsage(adoptedAttempts.get(id) ?? 1, process.uptime());
   return usage ? { resources: usage } : {};
 }
 
