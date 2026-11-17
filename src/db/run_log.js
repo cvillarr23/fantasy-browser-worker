@@ -5,12 +5,15 @@ const { Pool } = require("pg");
 const { randomUUID } = require("crypto");
 const { getContext } = require("../telemetry/context");
 const { logger } = require("../telemetry/logger");
+const { measureRunUsage } = require("./run_usage");
 
 const RUN_LOG_POOL_LIMIT = 2;
 const DATABASE_TIMEOUT_MS = 5000;
 const MAX_ERROR_CHARS = 4000;
 const adoptedParentRunIds = new Map();
 const adoptedAttempts = new Map();
+// When each adopted run started (process.hrtime.bigint()), for its usage's wall_seconds.
+const adoptedStarts = new Map();
 
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -82,6 +85,7 @@ async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = 
   if (adoptedId) {
     adoptedParentRunIds.set(adoptedId, process.env.RUN_PARENT_ID);
     adoptedAttempts.set(adoptedId, attempt);
+    adoptedStarts.set(adoptedId, process.hrtime.bigint());
     delete process.env.RUN_ID;
     process.env.RUN_PARENT_ID = adoptedId;
   }
@@ -106,6 +110,7 @@ async function startRun({ jobName, triggerType, trigger, parentRunId, traceId = 
   if (adoptedId && !adopted) {
     restoreParentRunId(adoptedId);
     adoptedAttempts.delete(adoptedId);
+    adoptedStarts.delete(adoptedId);
     throw new Error(`Run ${adoptedId} attempt ${attempt} is no longer current`);
   }
   return id;
@@ -121,7 +126,7 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
         id,
         status,
         error ? String(error).slice(0, MAX_ERROR_CHARS) : null,
-        JSON.stringify(summary || {}),
+        JSON.stringify({ ...(summary || {}), ...launcherRunUsage(id) }),
         adoptedAttempts.get(id) ?? null,
       ],
     );
@@ -129,11 +134,22 @@ async function finishRun(id, status, { error = null, summary = {} } = {}) {
     logger.error("Could not record run outcome", { err, runId: id });
   } finally {
     adoptedAttempts.delete(id);
+    adoptedStarts.delete(id);
     restoreParentRunId(id);
   }
 }
 
 /** Links rows to the given run, else the run active in this async context; a no-op outside one. */
+/** { resources } for a launcher-adopted run, which owns its pod (or, inline, its process). A
+ * run this process started itself shares the process, so it records nothing. */
+function launcherRunUsage(id) {
+  const started = adoptedStarts.get(id);
+  if (started === undefined) return {};
+  const wallSeconds = Number(process.hrtime.bigint() - started) / 1e9;
+  const usage = measureRunUsage(adoptedAttempts.get(id) ?? 1, wallSeconds);
+  return usage ? { resources: usage } : {};
+}
+
 async function link(refType, ids, role, runId = getContext().runId) {
   const refIds = (ids || []).filter((id) => id !== null && id !== undefined).map(String);
   if (!runId || refIds.length === 0) return;
