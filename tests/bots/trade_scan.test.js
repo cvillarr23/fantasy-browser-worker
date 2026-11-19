@@ -14,6 +14,7 @@ const {
   resolvePeriod,
   runTradeScan,
   claimScan,
+  retireReplacedProposals,
   main,
 } = require("../../src/bots/trade_scan");
 const state = { season_type: "regular", season: "2026", week: 4 };
@@ -28,6 +29,7 @@ beforeEach(() => {
     readState: jest.fn().mockResolvedValue(state),
     claim: jest.fn().mockResolvedValue(true),
     release: jest.fn().mockResolvedValue(undefined),
+    retire: jest.fn().mockResolvedValue(0),
     generate: jest.fn().mockResolvedValue({ status: "no_target" }),
     refreshInbox: jest.fn().mockResolvedValue({ status: "refreshed", openOfferTeamIds: [] }),
     pool: {},
@@ -215,6 +217,80 @@ test("generation failure is not retried", async () => {
   deps.generate.mockRejectedValue(new Error("LLM"));
   await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow("LLM");
   expect(deps.generate).toHaveBeenCalledTimes(1);
+});
+test.each([
+  ["a staged batch", { offers: [stagedOffer("3")], submission: { status: "awaiting_approval" } }],
+  ["no offer", { status: "no_offer", reason: "no_useful_offer" }],
+])("a scan that finishes with %s retires the earlier unapproved proposals", async (_, generated) => {
+  deps.generate.mockResolvedValue(generated);
+  deps.retire.mockResolvedValue(2);
+  const result = await runTradeScan({ stage: true, trackingId: "scan-1" }, deps);
+  expect(deps.retire).toHaveBeenCalledWith(deps.pool, {
+    leagueId: "123", season: 2026, fromTeamId: "7", before: now, trackingId: "scan-1",
+  });
+  expect(result.proposalsRetired).toBe(2);
+  expect(addSummary).toHaveBeenCalledWith({ proposalsRetired: 2 });
+});
+test.each([
+  ["generation throws", (d) => d.generate.mockRejectedValue(new Error("ESPN down"))],
+  ["every offer fails to stage", (d) => d.generate.mockResolvedValue(failedOffer("3"))],
+])("a scan where %s keeps the earlier proposals", async (_, arrange) => {
+  arrange(deps);
+  await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow();
+  expect(deps.retire).not.toHaveBeenCalled();
+});
+test("a duplicate scan retires nothing", async () => {
+  deps.claim.mockResolvedValue(false);
+  await runTradeScan({ stage: true }, deps);
+  expect(deps.retire).not.toHaveBeenCalled();
+});
+test("a retire failure is a warning, not a failed scan", async () => {
+  deps.generate.mockResolvedValue({ offers: [stagedOffer("3")], submission: { status: "awaiting_approval" } });
+  deps.retire.mockRejectedValue(new Error("db gone"));
+  const result = await runTradeScan({ stage: true }, deps);
+  expect(result).toMatchObject({ offersStaged: 1, proposalsRetired: 0 });
+  expect(logger.warn).toHaveBeenCalledWith(
+    "[Trade Scan] Could not retire the previous scan's proposals", expect.anything());
+});
+describe("retireReplacedProposals", () => {
+  const before = new Date("2026-10-04T12:00:00Z");
+  const scope = { leagueId: "123", season: 2026, fromTeamId: 7, before, trackingId: "scan-1" };
+  const fakePool = (updatedCounts) => {
+    const clients = updatedCounts.map((rowCount) => ({
+      query: jest.fn(async (sql) => (sql.startsWith("UPDATE") ? { rowCount } : {})),
+      release: jest.fn(),
+    }));
+    const keys = updatedCounts.map((_, i) => ({ offer_key: `key-${i}` }));
+    return {
+      clients,
+      query: jest.fn().mockResolvedValue({ rows: keys }),
+      connect: jest.fn().mockImplementation(async () => clients.shift()),
+    };
+  };
+
+  test("dismisses each earlier proposal under its offer lock and counts only real updates", async () => {
+    const pool = fakePool([1, 0]);
+    const [first, second] = pool.clients;
+    expect(await retireReplacedProposals(pool, scope)).toBe(1);
+    expect(pool.query).toHaveBeenCalledWith(expect.stringContaining("'proposal'"), ["123", 2026, "7", before]);
+    const sql = first.query.mock.calls.map(([q]) => q);
+    expect(sql[0]).toBe("BEGIN");
+    expect(first.query.mock.calls[1]).toEqual(["SELECT pg_advisory_xact_lock(hashtext($1))", ["key-0"]]);
+    expect(sql[2]).toContain("status = 'dismissed'");
+    expect(sql[2]).toContain("NOT EXISTS");
+    expect(sql.at(-1)).toBe("COMMIT");
+    const [, , audit] = first.query.mock.calls[2][1];
+    expect(JSON.parse(audit)).toMatchObject({ reason: "replaced_by_scan", tracking_id: "scan-1" });
+    expect(second.release).toHaveBeenCalled();
+  });
+
+  test("rolls back and releases the client when an update fails", async () => {
+    const client = { query: jest.fn(async (sql) => { if (sql.startsWith("UPDATE")) throw new Error("boom"); return {}; }), release: jest.fn() };
+    const pool = { query: jest.fn().mockResolvedValue({ rows: [{ offer_key: "k" }] }), connect: jest.fn().mockResolvedValue(client) };
+    await expect(retireReplacedProposals(pool, scope)).rejects.toThrow("boom");
+    expect(client.query).toHaveBeenCalledWith("ROLLBACK");
+    expect(client.release).toHaveBeenCalled();
+  });
 });
 test.each([0, 1])(
   "transaction serializes durable claim; existing rows=%i",
