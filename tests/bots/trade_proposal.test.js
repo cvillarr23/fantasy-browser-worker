@@ -627,9 +627,9 @@ const openOffer = (status, to, incoming, outgoing) => ({
   message: "an older pitch",
 });
 
-test("a package already awaiting approval is not staged again, whatever its pitch", async () => {
+test("a package already approved is not staged again, whatever its pitch", async () => {
   useCandidates();
-  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "3", ["300"], ["101"])]);
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("approved", "3", ["300"], ["101"])]);
   const result = await generateTradeProposal(payload);
   expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
   expect(result.skipped).toEqual([
@@ -638,29 +638,26 @@ test("a package already awaiting approval is not staged again, whatever its pitc
   expect(submitTradeOffer).toHaveBeenCalledTimes(1);
 });
 
-test.each(["awaiting_approval", "approval_pending"])(
-  "a team with a recent %s pitch is excluded even for a different package",
-  async (status) => {
-    useCandidates();
-    fetchOpenOutgoingOffers.mockResolvedValue([{
-      ...openOffer(status, "3", ["other"], ["other-player"]),
-      executed_at: new Date().toISOString(),
-    }]);
-    const result = await generateTradeProposal(payload);
-    expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
-    expect(submitTradeOffer).toHaveBeenCalledTimes(1);
-  },
-);
+test("a team with a recent approval_pending pitch is excluded even for a different package", async () => {
+  useCandidates();
+  fetchOpenOutgoingOffers.mockResolvedValue([{
+    ...openOffer("approval_pending", "3", ["other"], ["other-player"]),
+    executed_at: new Date().toISOString(),
+  }]);
+  const result = await generateTradeProposal(payload);
+  expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["2"]);
+  expect(submitTradeOffer).toHaveBeenCalledTimes(1);
+});
 
 test("a different package to the same team is still staged, as the runner-up", async () => {
   useCandidates([
     { counterparty: { team_id: "3" }, receive: [{ espn_id: "300" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },
-    { counterparty: { team_id: "3" }, receive: [{ espn_id: "301" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 8 },
+    { counterparty: { team_id: "3" }, receive: [{ espn_id: "301" }], send: [{ espn_id: "102" }], status: "proposable", final_score: 8 },
   ]);
-  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "3", ["300"], ["101"])]);
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("approved", "3", ["300"], ["101"])]);
   const result = await generateTradeProposal(payload);
   expect(result.offers).toHaveLength(1);
-  expect(result.offer).toMatchObject({ toTeamId: "3", incomingPlayerIds: ["301"], outgoingPlayerIds: ["101"] });
+  expect(result.offer).toMatchObject({ toTeamId: "3", incomingPlayerIds: ["301"], outgoingPlayerIds: ["102"] });
 });
 
 test("a player committed to an approved offer is not sent again", async () => {
@@ -671,19 +668,11 @@ test("a player committed to an approved offer is not sent again", async () => {
   expect(result.skipped).toMatchObject([{ team_id: "3", reason: "player_committed" }]);
 });
 
-test("a player only in an awaiting offer may still go to another team", async () => {
-  useCandidates();
-  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "5", ["500"], ["101"])]);
-  const result = await generateTradeProposal(payload);
-  expect(result.offers).toHaveLength(2);
-  expect(result.skipped).toBeUndefined();
-});
-
 test("when every package is already staged the run is a no_offer with that reason", async () => {
   useCandidates();
   fetchOpenOutgoingOffers.mockResolvedValue([
-    openOffer("awaiting_approval", "3", ["300"], ["101"]),
-    openOffer("awaiting_approval", "2", ["200"], ["100"]),
+    openOffer("approved", "3", ["300"], ["101"]),
+    openOffer("approved", "2", ["200"], ["100"]),
   ]);
   const result = await generateTradeProposal(payload);
   expect(result).toMatchObject({ status: "no_offer", reason: "already_staged" });
@@ -691,7 +680,7 @@ test("when every package is already staged the run is a no_offer with that reaso
 });
 
 test("the LLM fallback also drops a package that repeats an open offer", async () => {
-  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("awaiting_approval", "2", ["200"], ["100"])]);
+  fetchOpenOutgoingOffers.mockResolvedValue([openOffer("approved", "2", ["200"], ["100"])]);
   const result = await generateTradeProposal(payload);
   expect(result.offers.map(({ offer }) => offer.toTeamId)).toEqual(["3"]);
   expect(result.skipped).toMatchObject([{ team_id: "2", reason: "already_staged" }]);

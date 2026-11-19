@@ -9,12 +9,13 @@ const MINUTES_PER_HOUR = 60;
 const SECONDS_PER_MINUTE = 60;
 const MILLISECONDS_PER_SECOND = 1000;
 const MILLISECONDS_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINUTE * MILLISECONDS_PER_SECOND;
-// Offers a person is still deciding on, or that are already on their way to the other manager.
-const OPEN_OFFER_STATUSES = ["awaiting_approval", "approval_pending", "approved", "submitting", "submitted"];
-// Once a person has approved an offer its outgoing players are spoken for. An offer that is only
-// awaiting approval commits nothing: the same player may still be offered to another team.
-const COMMITTED_OFFER_STATUSES = new Set(["approval_pending", "approved", "submitting", "submitted"]);
-const PITCH_STATUSES = new Set(["awaiting_approval", "approval_pending"]);
+// Offers a person has approved, which are on their way to the other manager. An offer that is
+// only awaiting approval is left out: each scan replaces those, so it neither blocks its team nor
+// its package, and the replacement gets a fresh score and pitch.
+const OPEN_OFFER_STATUSES = ["approval_pending", "approved", "submitting", "submitted"];
+// Once a person has approved an offer its outgoing players are spoken for.
+const COMMITTED_OFFER_STATUSES = new Set(OPEN_OFFER_STATUSES);
+const PITCH_STATUSES = new Set(["approval_pending"]);
 const ALREADY_STAGED = "already_staged";
 const PLAYER_COMMITTED = "player_committed";
 

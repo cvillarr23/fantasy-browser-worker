@@ -112,6 +112,72 @@ async function releaseClaim(pool, key) {
   );
 }
 
+// Proposals still awaiting approval that an earlier scan staged for us. A counter-offer is not a
+// proposal: it answers an incoming offer, so a new scan does not replace it.
+const REPLACED_PROPOSAL_KEYS_SQL = `SELECT DISTINCT counter_offer->>'offer_key' AS offer_key FROM execution_log
+       WHERE transaction_type = 'trade_offer_submit' AND status = 'awaiting_approval'
+         AND counter_offer->>'source' = 'proposal' AND league_id = $1 AND season = $2
+         AND counter_offer->>'from_team_id' = $3 AND executed_at < $4`;
+
+// Every awaiting copy goes, because core's approval falls back to any awaiting row. A key that
+// was approved in the meantime is left alone so its latest row keeps showing its real state.
+const DISMISS_REPLACED_SQL = `UPDATE execution_log SET status = 'dismissed', outcome_details =
+         COALESCE(outcome_details, '{}'::jsonb) || jsonb_build_object('dismissal', $3::jsonb)
+       WHERE transaction_type = 'trade_offer_submit' AND counter_offer->>'offer_key' = $1
+         AND status = 'awaiting_approval' AND executed_at < $2
+         AND NOT EXISTS (SELECT 1 FROM execution_log approved
+           WHERE approved.transaction_type = 'trade_offer_submit'
+             AND approved.counter_offer->>'offer_key' = $1
+             AND approved.status IN ('approval_pending', 'approved', 'submitting', 'submitted'))`;
+
+function scanDismissal(trackingId) {
+  return { reason: "replaced_by_scan", dismissed_by: "trade_scan", dismissed_at: new Date().toISOString(), tracking_id: trackingId };
+}
+
+// One key at a time under the same advisory lock core's approval takes, so an approval that
+// lands mid-scan either wins outright or finds the offer already dismissed.
+async function dismissReplacedProposal(pool, offerKey, before, dismissal) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [offerKey]);
+    const updated = await client.query(DISMISS_REPLACED_SQL, [offerKey, before, JSON.stringify(dismissal)]);
+    await client.query("COMMIT");
+    return updated.rowCount > 0;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Retires the unapproved proposals earlier scans staged, so the approval list shows only the
+ * latest scan's. Anything staged at or after `before` belongs to this scan and stays. Returns
+ * how many offers were dismissed.
+ */
+async function retireReplacedProposals(pool, { leagueId, season, fromTeamId, before, trackingId }) {
+  const { rows } = await pool.query(REPLACED_PROPOSAL_KEYS_SQL, [leagueId, season, String(fromTeamId), before]);
+  const dismissal = scanDismissal(trackingId);
+  let retired = 0;
+  for (const { offer_key: offerKey } of rows) {
+    if (await dismissReplacedProposal(pool, offerKey, before, dismissal)) retired += 1;
+  }
+  return retired;
+}
+
+// Best-effort: the new batch is already staged, so a failure here only leaves old proposals
+// listed until the next scan.
+async function retireQuietly(retire, pool, scope) {
+  try {
+    return await retire(pool, scope);
+  } catch (error) {
+    logger.warn("[Trade Scan] Could not retire the previous scan's proposals", { err: error });
+    return 0;
+  }
+}
+
 // The scan refreshes the inbox first so a new pitch never crosses an offer from that same manager
 // that we haven't answered yet. Best-effort: the inbox has its own schedule, so an ESPN or core
 // hiccup here shouldn't cost the twice-weekly pitch.
@@ -132,6 +198,7 @@ async function runTradeScan(
     now = new Date(),
     claim = claimScan,
     release = releaseClaim,
+    retire = retireReplacedProposals,
     generate = generateTradeProposal,
     // Required lazily: trade_inbox.js reads this module's period helpers.
     refreshInbox = (options) => require("./trade_inbox").refreshTradeInbox(options),
@@ -204,6 +271,10 @@ async function runTradeScan(
     if (offersFailed && !offersStaged) {
       throw new Error(`Trade scan staging failed: ${failureSummaries.map((f) => `team ${f.team_id}: ${f.reason}`).join("; ")}`);
     }
+    const proposalsRetired = await retireQuietly(retire, pool || ownedPool, {
+      leagueId: league, season: period.season, fromTeamId: team, before: now, trackingId,
+    });
+    if (proposalsRetired) addSummary({ proposalsRetired });
     return {
       status: result.status || "proposal",
       ...(result.reason ? { reason: result.reason } : {}),
@@ -212,6 +283,7 @@ async function runTradeScan(
       submissionStatus: result.submission?.status,
       offersStaged,
       offersFailed,
+      proposalsRetired,
       ...(failureSummaries.length ? { failures: failureSummaries } : {}),
     };
   } catch (error) {
@@ -267,4 +339,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { readSeason, resolvePeriod, claimScan, runTradeScan, main };
+module.exports = { readSeason, resolvePeriod, claimScan, retireReplacedProposals, runTradeScan, main };
