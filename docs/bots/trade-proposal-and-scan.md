@@ -44,6 +44,7 @@ The Sleeper NFL state API supplies `season` and `week`. Preseason, postseason, w
 | `season` | Yes | Integer, 2000 or later. |
 | `week` | Yes | Integer, 1 to 18. |
 | `exclude_team_ids` | No | Array of ESPN team ids to skip. |
+| `scan_run_id` | No | The scan's own run id. Each staged offer records it. |
 | `tracking_id` | No | |
 
 ## How is a package chosen?
@@ -89,8 +90,12 @@ For either package source, the pitch comes from an LLM call that sees only count
 |---|---|
 | `no_target` | No candidate counterparty remains after exclusions, or the fallback finds no weak position to target. |
 | `no_offer` with a `reason` | `no_packages`, `no_valid_packages`, `no_useful_offer`, `pitch_rejected`, `evaluation_too_large`, `already_staged` or `player_committed` (the first alternative's reason, when every alternative failed). Nothing is staged. |
-| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged` (offers that reached `awaiting_approval`) and `offersFailed`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. |
+| Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged` (offers that reached `awaiting_approval`) and `offersFailed`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. Each row also carries `counter_offer.scan_run_id`, the `run_log` id of the scan that staged it. |
 | Error | Core couldn't score any package. Nothing is ever staged unscored. |
+
+## What happens after a person approves an offer?
+
+Core starts the `trade-submit` launcher job with the offer's `offer_key`, parented to the scan run in `counter_offer.scan_run_id`, so the send shows as the scan's child on the Runs tab. The job runs the [trade builder](trade-builder.md) with `--offer-key`. Until core switches over, the approval is still published to `trade_submissions`.
 
 ## What happens when an offer fails to stage?
 

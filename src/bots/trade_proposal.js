@@ -279,7 +279,7 @@ const FIRST_CANDIDATE_RANK = 1;
 // just because staging failed. The one exception is ESPN refusing a player's selection: the same
 // counterparty's next stored package (never another counterparty's, never an LLM one) is scored
 // and staged instead, within the same per-counterparty cap used for live-score fallbacks.
-async function stageWithRunnerUps(first, { rank, runnerUps, period, leagueId, season, fromTeamId, trackingId, ranking, session }) {
+async function stageWithRunnerUps(first, { rank, runnerUps, period, leagueId, season, fromTeamId, trackingId, scanRunId, ranking, session }) {
   let current = first;
   let currentRank = first.evaluation.ranking.candidate_rank ?? FIRST_CANDIDATE_RANK;
   const pending = runnerUps.filter((runnerUp) => runnerUp.candidateRank > currentRank);
@@ -289,7 +289,7 @@ async function stageWithRunnerUps(first, { rank, runnerUps, period, leagueId, se
     logger.info("[Trade Proposal] Computed offer for approval", { target, offer, trackingId });
     let submission;
     try {
-      submission = await submitTradeOffer(offer, { source: "proposal", trackingId, session, evaluation });
+      submission = await submitTradeOffer(offer, { source: "proposal", trackingId, scanRunId, session, evaluation });
     } catch (error) {
       logger.warn("[Trade Proposal] Could not stage computed offer", { err: error, target, offer });
       submission = {
@@ -342,6 +342,7 @@ async function generateTradeProposal(payload) {
   const leagueId = process.env.ESPN_LEAGUE_ID;
   const fromTeamId = process.env.ESPN_TEAM_ID;
   const trackingId = payload.tracking_id ?? "no-tracking-id";
+  const scanRunId = payload.scan_run_id;
   let session;
   try {
     const excluded = new Set(payload.exclude_team_ids || []);
@@ -470,7 +471,7 @@ async function generateTradeProposal(payload) {
       offers.push(await stageWithRunnerUps(built, {
         rank: index + 1,
         runnerUps: runnerUpsByTeam.get(built.offer.toTeamId) || [],
-        period, leagueId, season, fromTeamId, trackingId, ranking, session,
+        period, leagueId, season, fromTeamId, trackingId, scanRunId, ranking, session,
       }));
     }
     // The best offer's fields stay at the top level for existing callers.

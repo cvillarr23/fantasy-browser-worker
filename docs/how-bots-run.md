@@ -17,7 +17,7 @@ One container image runs every bot. Queue messages start `src/index.js` through 
 | Style | Started by | Entrypoint | Bots |
 |---|---|---|---|
 | Queue consumer | KEDA `ScaledJob` `fantasy-browser-worker-scaler` | `src/index.js` | Lineup, waiver sniper, draft clicker, trade evaluation, trade negotiation, trade builder, trade response, async LLM |
-| Launcher job | Core job launcher: schedule, chain, event, Jobs page, CLI or MCP | `node src/bots/<file>.js` | Trade inbox, trade scan, rumor digest, ESPN session check |
+| Launcher job | Core job launcher: schedule, chain, event, Jobs page, CLI or MCP | `node src/bots/<file>.js` | Trade inbox, trade scan, trade submit, rumor digest, ESPN session check |
 | Long-running Job | The core API creates it for a draft | `node src/bots/draft_sync.js` | Draft sync |
 
 ```mermaid

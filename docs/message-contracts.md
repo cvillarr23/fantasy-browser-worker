@@ -40,7 +40,7 @@ flowchart LR
 | `trade_evaluations` | None scheduled | [Trade evaluation](bots/trade-evaluation-and-negotiation.md) | Worker | Yes |
 | `trade_negotiations` | Core trade inbox service | [Trade negotiation](bots/trade-evaluation-and-negotiation.md) | Worker | Yes |
 | `trade_proposals` | None | [Trade proposal](bots/trade-proposal-and-scan.md) | Worker | **No** |
-| `trade_submissions` | Core trade offer service | [Trade builder](bots/trade-builder.md) | Worker | Yes |
+| `trade_submissions` | Core trade offer service, until it starts the `trade-submit` launcher job instead | [Trade builder](bots/trade-builder.md) | Worker | Yes |
 | `trade_responses` | Core trade inbox service | [Trade response](bots/trade-response.md) | Worker | Yes |
 | `llm_requests` | The worker (`requestLlmAsync`) | [Async LLM](bots/async-llm-requests.md) | Worker | Yes |
 

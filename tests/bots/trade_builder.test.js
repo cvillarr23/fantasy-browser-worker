@@ -5,6 +5,10 @@ jest.mock("../../src/bots/auth");
 jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/debug_capture");
 jest.mock("../../src/db/execution_log");
+jest.mock("../../src/db/run_log", () => ({ addSummary: jest.fn() }));
+jest.mock("../../src/telemetry/instrument", () => ({
+  withInstrumentation: jest.fn((_botName, _context, handler) => handler()),
+}));
 jest.mock("../../src/lib/notify", () => ({
   ...jest.requireActual("../../src/lib/notify"),
   notify: jest.fn(async () => "sent"),
@@ -39,8 +43,12 @@ const {
   fillTradeBuilder,
   submitTradeOffer,
   executeTradeSubmission,
+  executeApprovedOffer,
+  main,
   TRADE_SUBMIT_SELECTOR_KEYS,
 } = require("../../src/bots/trade_builder");
+const { addSummary } = require("../../src/db/run_log");
+const { withInstrumentation } = require("../../src/telemetry/instrument");
 
 const ENV_KEYS = [
   "DRY_RUN",
@@ -1564,4 +1572,181 @@ describe("executeTradeSubmission payload validation", () => {
       executeTradeSubmission({ season: 2026, to_team_id: "3", incoming_player_ids: ["1"], outgoing_player_ids: ["2"] }),
     ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/ESPN_TEAM_ID/) });
   });
+});
+
+describe("submitTradeOffer: scan run", () => {
+  it("records the scan run that staged an offer on its fill row", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+
+    await submitTradeOffer(offerFixture(), { source: "proposal", scanRunId: "scan-run-1" });
+
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "awaiting_approval", scanRunId: "scan-run-1" }),
+    );
+  });
+});
+
+// An offer as core's GET /v1/trade/offers lists it.
+function coreOffer(offer, status, overrides = {}) {
+  const offerKey = computeOfferKey(offer);
+  return {
+    id: 11,
+    status,
+    league_id: offer.leagueId,
+    season: Number(offer.seasonId),
+    offer_key: offerKey,
+    source: "proposal",
+    from_team_id: offer.fromTeamId,
+    to_team_id: offer.toTeamId,
+    incoming_player_ids: offer.incomingPlayerIds,
+    outgoing_player_ids: offer.outgoingPlayerIds,
+    message: offer.message ?? null,
+    related_transaction_id: offer.relatedTransactionId ?? null,
+    thread_root_id: offer.threadRootId ?? null,
+    approval: { offer_key: offerKey, approved_by: "conor", approved_at: "2026-10-04T12:00:00Z", tracking_id: "t-core" },
+    ...overrides,
+  };
+}
+
+describe("executeApprovedOffer", () => {
+  it("sends an approved offer through the full submit path", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture({ message: "Your RB room needs this." });
+    const offerKey = computeOfferKey(offer);
+    const fetchOffer = jest.fn(async () => coreOffer(offer, "approved"));
+
+    const result = await executeApprovedOffer(offerKey, { fetchOffer });
+
+    expect(result).toMatchObject({ status: "submitted", offerKey, dryRun: false });
+    expect(fetchOffer).toHaveBeenCalledWith(offerKey);
+    expect(state.clicks.filter((c) => c === "submit")).toHaveLength(1);
+    expect(claimTradeSubmission).toHaveBeenCalledWith(
+      offerKey,
+      expect.objectContaining({ approvedBy: "conor", source: "proposal", message: "Your RB room needs this." }),
+    );
+    expect(addSummary).toHaveBeenCalledWith({ offerKey });
+  });
+
+  it("accepts an offer core still lists as approval_pending", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    const result = await executeApprovedOffer(computeOfferKey(offer), {
+      fetchOffer: async () => coreOffer(offer, "approval_pending"),
+    });
+
+    // The approval passed; the closed dry-run locks are what stop the send.
+    expect(result).toMatchObject({ status: "submit_blocked", dryRun: true });
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(expect.objectContaining({ approvedBy: "conor" }));
+  });
+
+  it("carries a counter's linkage, so its key and ESPN link survive", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture({ relatedTransactionId: "tx-3", threadRootId: "tx-1" });
+
+    const result = await executeApprovedOffer(computeOfferKey(offer), {
+      fetchOffer: async () => coreOffer(offer, "approved", { source: "counter_offer" }),
+    });
+
+    expect(result).toMatchObject({ status: "submit_blocked", offerKey: computeOfferKey(offer) });
+    expect(recordTradeOfferFill).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "counter_offer", relatedTransactionId: "tx-3", threadRootId: "tx-1" }),
+    );
+  });
+
+  it.each(["awaiting_approval", "dismissed", "superseded", "submitted", "failure"])(
+    "refuses an offer that is %s, opening no session",
+    async (status) => {
+      const offer = offerFixture();
+      await expect(
+        executeApprovedOffer(computeOfferKey(offer), { fetchOffer: async () => coreOffer(offer, status) }),
+      ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(new RegExp(`is ${status}, not approved`)) });
+      expect(createAuthenticatedSession).not.toHaveBeenCalled();
+      expect(createSessionFromStoredState).not.toHaveBeenCalled();
+      expect(recordTradeOfferFill).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses an unknown offer_key", async () => {
+    await expect(
+      executeApprovedOffer("a".repeat(64), { fetchOffer: async () => null }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/no offer/) });
+    expect(createAuthenticatedSession).not.toHaveBeenCalled();
+  });
+
+  it.each([["too short", "abc"], ["uppercase", "A".repeat(64)], ["missing", undefined]])(
+    "rejects a %s offer_key without asking core",
+    async (_label, key) => {
+      const fetchOffer = jest.fn();
+      await expect(executeApprovedOffer(key, { fetchOffer })).rejects.toMatchObject({ permanent: true });
+      expect(fetchOffer).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses an approved offer with no recorded approver", async () => {
+    const offer = offerFixture();
+    await expect(
+      executeApprovedOffer(computeOfferKey(offer), {
+        fetchOffer: async () => coreOffer(offer, "approved", { approval: null }),
+      }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/approver/) });
+  });
+
+  it("refuses an offer whose stored fields no longer hash to its key", async () => {
+    armForLiveSubmit();
+    const { page, state } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+
+    await expect(
+      executeApprovedOffer(computeOfferKey(offer), {
+        fetchOffer: async () => coreOffer(offer, "approved", { outgoing_player_ids: ["3139477"] }),
+      }),
+    ).rejects.toMatchObject({ permanent: true, message: expect.stringMatching(/offer_key/) });
+    expect(state.clicks).toEqual([]);
+  });
+});
+
+describe("main", () => {
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  it("runs --offer-key as an instrumented trade_builder run, reading the offer from core", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const offer = offerFixture();
+    const offerKey = computeOfferKey(offer);
+    global.fetch = jest.fn(async (url) => {
+      const query = new URL(url).searchParams;
+      const offers = query.get("status") === "approved" ? [coreOffer(offer, "approved")] : [];
+      return { ok: true, json: async () => ({ offers }) };
+    });
+
+    await expect(main(["--offer-key", offerKey])).resolves.toMatchObject({ status: "submit_blocked", offerKey });
+    expect(withInstrumentation).toHaveBeenCalledWith("trade_builder", expect.any(Object), expect.any(Function));
+    expect(new URL(global.fetch.mock.calls[0][0]).searchParams.get("offer_key")).toBe(offerKey);
+  });
+
+  it("still takes a trade_submissions JSON payload", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    const payload = { tracking_id: "t-cli", season: 2026, to_team_id: "3", incoming_player_ids: ["4259545"], outgoing_player_ids: ["3139477"] };
+
+    await expect(main([JSON.stringify(payload)])).resolves.toMatchObject({ status: "awaiting_approval" });
+    expect(withInstrumentation).toHaveBeenCalledWith("trade_builder", { trackingId: "t-cli" }, expect.any(Function));
+  });
+
+  it.each([[[]], [["--offer-key"]], [["--offer-key", "a", "b"]], [["--stage"]]])(
+    "rejects the command line %j with usage",
+    async (args) => {
+      await expect(main(args)).rejects.toThrow(/Usage/);
+      expect(withInstrumentation).not.toHaveBeenCalled();
+    },
+  );
 });
