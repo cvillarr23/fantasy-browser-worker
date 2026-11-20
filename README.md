@@ -171,8 +171,9 @@ The evaluation is not part of the `offer_key`.
 
 Offers are staged with `source: "proposal"`, never with an approval from the
 request. `trade_builder` records the offer and pitch in `execution_log`; this
-worker does not write `bot_decisions`. The existing separate approval and
-`trade_submissions` flow is required to send. The pitch is part of the approval's
+worker does not write `bot_decisions`. A separate approval is required to send:
+it starts the `trade-submit` launcher job (`trade_builder.js --offer-key`), or
+publishes to `trade_submissions` until core switches over. The pitch is part of the approval's
 `offer_key`. Check `messageAttached`: if ESPN has no note field, the pitch is not
 sent; this generator does not automatically post it to league chat. Staging
 failures return `fill_failed` with the computed offer rather than regenerating

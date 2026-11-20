@@ -119,6 +119,11 @@ afterAll(() => {
 const systemPrompt = (callSite) =>
   completeWithFallback.mock.calls.find(([, options]) => options.callSite === callSite)?.[1].systemPrompt;
 
+test("stages each offer with the scan run that asked for it", async () => {
+  await generateTradeProposal({ ...payload, scan_run_id: "scan-run-1" });
+  expect(submitTradeOffer.mock.calls[0][1]).toMatchObject({ source: "proposal", scanRunId: "scan-run-1" });
+});
+
 test("stages the top-ranked scored package with a grounded pitch and never an approval", async () => {
   const result = await generateTradeProposal(payload);
   expect(result.submission.status).toBe("awaiting_approval");

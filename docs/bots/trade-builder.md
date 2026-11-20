@@ -28,8 +28,21 @@ stateDiagram-v2
 | Source | Route |
 |---|---|
 | A generated proposal or counter | The worker calls `submitTradeOffer` itself and stages with no approval. |
-| A human approves a staged offer | The core API publishes `trade_submissions` with the approval. |
-| A manual run | `node src/bots/trade_builder.js '<json>'` |
+| A human approves a staged offer | The `trade-submit` [launcher job](/overview/job-launcher) runs `node src/bots/trade_builder.js --offer-key <offer_key>`. |
+| A human approves a staged offer, before core starts `trade-submit` | The core API publishes `trade_submissions` with the approval. The queue form keeps working until core switches over. |
+| A manual run | `node src/bots/trade_builder.js --offer-key <offer_key>`, or `node src/bots/trade_builder.js '<json>'` |
+
+## How does `--offer-key` find the offer?
+
+The run reads the offer from core's `GET /v1/trade/offers`, looking for that exact `offer_key` (it sends `offer_key` as a filter and checks the match itself). Core lists each offer's latest status:
+
+- `approval_pending` or `approved`: a person approved this key. The run rebuilds the `trade_submissions` payload core's approve route sends (`season`, `to_team_id`, both player lists, `source`, `message`, a counter's `related_transaction_id` and `thread_root_id`, and `approval: {offer_key, approved_by}`), then takes the same path as a queue message. The five locks, the `offer_key` recompute, the submitting claim and the pending-trades confirmation all apply.
+- Any other status, such as `awaiting_approval`, `dismissed`, `superseded` or `submitted`: refused with a `PermanentError`. No ESPN session is opened.
+- No offer with that key: refused the same way.
+
+If core can't answer, the run fails and sends nothing. Counter-offers go through the same path, and their `related_transaction_id` keeps the recomputed key and ESPN's link to the incoming offer.
+
+The run reports through `run_log` like the other launcher jobs. It adopts the launcher's `RUN_ID`, its parent is the scan that staged the offer, its summary records `offerKey` and the result, and a failure raises the failed-run alert. The launcher makes one attempt, because a send is never retried automatically.
 
 ## What does the message contain?
 
@@ -85,6 +98,7 @@ A browser-wide guard aborts every non-GET ESPN request until the instant before 
 | Failure | Result |
 |---|---|
 | Malformed offer, own team as target, approval for a different offer | `PermanentError` |
+| `--offer-key` names an unknown offer or one that isn't approved | `PermanentError`, nothing opened or sent |
 | A row doesn't resolve to exactly one player, or a box doesn't stay ticked | `PermanentError` |
 | A box doesn't toggle after the click, on every one of 3 attempts (300 ms apart), on every one of 4 full fills (initial plus reloads after 5 s, 10 s and 15 s backoffs, each retry logging a warning with the session's age) | `PermanentError` classified `espn_selection_rejected`, with ESPN's reason or `unknown`. The row's HTML and the reason are logged at error level and stored in the failure row. See [Trade proposal and scan](trade-proposal-and-scan.md). |
 | ESPN rejects with 4xx | `PermanentError`, claim marked `failure` |

@@ -161,6 +161,15 @@ describe("recordTradeOfferFill", () => {
     expect(counterOffer).toMatchObject({ offer_key: OFFER_KEY, source: "proposal", message: "pitch", evaluation });
   });
 
+  it("records the scan run that staged the offer as scan_run_id", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    const fill = { offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true };
+    await recordTradeOfferFill({ ...ROW, ...fill, scanRunId: "scan-run-1" });
+    await recordTradeOfferFill({ ...ROW, ...fill });
+    expect(JSON.parse(pool.query.mock.calls[0][1][7])).toMatchObject({ scan_run_id: "scan-run-1" });
+    expect(JSON.parse(pool.query.mock.calls[1][1][7])).not.toHaveProperty("scan_run_id");
+  });
+
   it("omits evaluation for offers that have none", async () => {
     pool.query.mockResolvedValue({ rowCount: 1 });
     await recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true });

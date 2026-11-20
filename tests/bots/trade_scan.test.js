@@ -120,6 +120,11 @@ test("claims once and forwards only period/tracking, never approval", async () =
     tracking_id: "scan",
   });
 });
+test("passes its own run id on, so each staged offer records the scan that made it", async () => {
+  const { runWithContext } = require("../../src/telemetry/context");
+  await runWithContext({ runId: "scan-run-1" }, () => runTradeScan({ stage: true, trackingId: "scan" }, deps));
+  expect(deps.generate).toHaveBeenCalledWith({ season: 2026, week: 4, tracking_id: "scan", scan_run_id: "scan-run-1" });
+});
 test("claim failure prevents generation", async () => {
   deps.claim.mockRejectedValue(new Error("database unavailable"));
   await expect(runTradeScan({ stage: true }, deps)).rejects.toThrow(

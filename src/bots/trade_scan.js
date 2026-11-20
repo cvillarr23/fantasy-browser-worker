@@ -3,6 +3,7 @@ const { Pool } = require("pg");
 const { generateTradeProposal } = require("./trade_proposal");
 const { logger } = require("../telemetry/logger");
 const { addSummary, triggerFromEnv } = require("../db/run_log");
+const { getContext } = require("../telemetry/context");
 
 const NFL_STATE_TIMEOUT_MS = 10_000;
 const MIN_SUPPORTED_SEASON = 2000;
@@ -235,9 +236,12 @@ async function runTradeScan(
     // The claim is kept once any offer is staged (a retry would generate a different pitch and
     // offer_key), but released when the scan fails before staging anything.
     const excluded = await openOfferTeams(refreshInbox);
+    const scanRunId = getContext().runId;
     const result = await generate({
       ...period,
       tracking_id: trackingId,
+      // This scan's run, recorded on each staged offer so the send it leads to is its child.
+      ...(scanRunId ? { scan_run_id: scanRunId } : {}),
       ...(excluded.length ? { exclude_team_ids: excluded } : {}),
     });
     const offers = result.offers ?? (result.submission ? [result] : []);

@@ -181,6 +181,8 @@ function tradeOfferJson(offerKey, row) {
     failure: row.failure || undefined,
     // A generated proposal's score evidence, read by core's offer list for the reviewer UI.
     evaluation: row.evaluation || undefined,
+    // The trade-scan run that staged the offer; core parents the approved send's run to it.
+    scan_run_id: row.scanRunId || undefined,
   });
 }
 

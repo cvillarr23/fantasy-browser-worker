@@ -25,6 +25,8 @@ const { requirePlayerId } = require("../lib/espn_ids");
 const SELECTORS = require("../selectors/espn_selectors.json");
 const { resolveTradeDryRun } = require("../lib/env");
 const { notify } = require("../lib/notify");
+const { APPROVED_OFFER_STATUSES, fetchOfferByKey } = require("../lib/pending_offers");
+const { addSummary } = require("../db/run_log");
 const { tradeAwaitingApproval } = require("../lib/notifications");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
@@ -691,6 +693,7 @@ async function submitTradeOffer(
     trackingId = "no-tracking-id",
     session: providedSession,
     evaluation,
+    scanRunId,
   } = {},
 ) {
   const offer = normalizeTradeOffer(rawOffer);
@@ -730,6 +733,8 @@ async function submitTradeOffer(
     // Score evidence for the reviewer. Only generated proposals are scored, and it is never part
     // of the offer_key: approval binds what the other manager receives, not our reasoning.
     ...(source === "proposal" && evaluation ? { evaluation } : {}),
+    // The scan run that staged this offer, so the send it leads to can be shown as its child.
+    ...(scanRunId ? { scanRunId } : {}),
   };
 
   logger.info(
@@ -1036,25 +1041,101 @@ async function executeTradeSubmission(payload) {
   );
 }
 
-// Local/manual runs: node src/bots/trade_builder.js '<trade_submissions JSON payload>'
-if (require.main === module) {
-  const raw = process.argv[2];
-  if (!raw) {
-    logger.error(
-      "Usage: node src/bots/trade_builder.js '<trade_submissions JSON payload>'\n" +
-        "Dry fill (TRADE_DRY_RUN and DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1234567890 ESPN_TEAM_ID=8 \\\n" +
-        "  node src/bots/trade_builder.js \\\n" +
-        `  '{"season":2026,"to_team_id":"3","incoming_player_ids":["4259545"],"outgoing_player_ids":["3139477"]}'`,
-    );
-    process.exit(1);
-  }
+// core's offer routes take the same form: a lowercase sha256 hex digest.
+const OFFER_KEY_PATTERN = /^[0-9a-f]{64}$/;
 
-  const payload = JSON.parse(raw);
-  withInstrumentation(
-    "trade_builder",
-    { trackingId: payload.tracking_id || crypto.randomUUID() },
-    () => executeTradeSubmission(payload),
-  )
+function requireOfferKey(raw) {
+  if (typeof raw !== "string" || !OFFER_KEY_PATTERN.test(raw)) {
+    throw new PermanentError("[Trade Builder] --offer-key must be a 64-character lowercase hex offer_key.");
+  }
+  return raw;
+}
+
+/** Throws unless core lists the offer as approved by a person. */
+function requireApprovedOffer(offer, offerKey) {
+  if (!offer) {
+    throw new PermanentError(`[Trade Builder] Core has no offer ${offerKey}; nothing sent.`);
+  }
+  if (!APPROVED_OFFER_STATUSES.includes(offer.status)) {
+    throw new PermanentError(
+      `[Trade Builder] Offer ${offerKey} is ${offer.status}, not approved; nothing sent.`,
+    );
+  }
+  if (typeof offer.approval?.approved_by !== "string" || offer.approval.approved_by.trim() === "") {
+    throw new PermanentError(`[Trade Builder] Offer ${offerKey} has no recorded approver; nothing sent.`);
+  }
+}
+
+/**
+ * The trade_submissions payload core's approve route publishes for this offer, rebuilt from core's
+ * offer list. The approval names the requested key, so submitTradeOffer's offer_key recompute still
+ * refuses an offer whose stored fields don't hash to it.
+ */
+function submissionPayload(offer, offerKey) {
+  const payload = {
+    tracking_id: offer.approval.tracking_id,
+    season: offer.season,
+    to_team_id: offer.to_team_id,
+    incoming_player_ids: offer.incoming_player_ids,
+    outgoing_player_ids: offer.outgoing_player_ids,
+    source: offer.source,
+    approval: { offer_key: offerKey, approved_by: offer.approval.approved_by },
+  };
+  for (const field of ["message", "related_transaction_id", "thread_root_id"]) {
+    if (offer[field] !== undefined && offer[field] !== null) payload[field] = offer[field];
+  }
+  return payload;
+}
+
+/**
+ * The trade-submit launcher job's entrypoint: sends the offer a person approved, by key. Reads it
+ * from core, refuses anything not approved, and otherwise runs the same submit path as a
+ * trade_submissions message.
+ */
+async function executeApprovedOffer(rawOfferKey, { fetchOffer = fetchOfferByKey } = {}) {
+  const offerKey = requireOfferKey(rawOfferKey);
+  addSummary({ offerKey });
+  const offer = await fetchOffer(offerKey);
+  requireApprovedOffer(offer, offerKey);
+  return executeTradeSubmission(submissionPayload(offer, offerKey));
+}
+
+const NODE_CLI_ARGUMENT_OFFSET = 2;
+const CLI_MODE_INDEX = 0;
+const CLI_OFFER_KEY_INDEX = 1;
+const OFFER_KEY_ARGUMENT_COUNT = 2;
+const PAYLOAD_ARGUMENT_COUNT = 1;
+const EXIT_FAILURE = 1;
+
+const USAGE =
+  "Usage: node src/bots/trade_builder.js --offer-key <offer_key>\n" +
+  "   or: node src/bots/trade_builder.js '<trade_submissions JSON payload>'\n" +
+  "Dry fill (TRADE_DRY_RUN and DRY_RUN unset = no submit): ESPN_LEAGUE_ID=1234567890 ESPN_TEAM_ID=8 \\\n" +
+  "  node src/bots/trade_builder.js \\\n" +
+  `  '{"season":2026,"to_team_id":"3","incoming_player_ids":["4259545"],"outgoing_player_ids":["3139477"]}'`;
+
+function isOfferKeyCommand(args) {
+  return args[CLI_MODE_INDEX] === "--offer-key" && args.length === OFFER_KEY_ARGUMENT_COUNT;
+}
+
+/** The run's tracking id and handler for `--offer-key <key>` or a JSON payload; null for a bad command line. */
+function cliCommand(args) {
+  if (isOfferKeyCommand(args)) {
+    return { trackingId: crypto.randomUUID(), run: () => executeApprovedOffer(args[CLI_OFFER_KEY_INDEX]) };
+  }
+  if (args.length !== PAYLOAD_ARGUMENT_COUNT || args[CLI_MODE_INDEX].startsWith("--")) return null;
+  const payload = JSON.parse(args[CLI_MODE_INDEX]);
+  return { trackingId: payload.tracking_id || crypto.randomUUID(), run: () => executeTradeSubmission(payload) };
+}
+
+async function main(args = process.argv.slice(NODE_CLI_ARGUMENT_OFFSET)) {
+  const command = cliCommand(args);
+  if (!command) throw new Error(USAGE);
+  return withInstrumentation("trade_builder", { trackingId: command.trackingId }, command.run);
+}
+
+if (require.main === module) {
+  main()
     .then((result) => logger.info(`[Trade Builder] Result: ${JSON.stringify(result)}`))
     .catch(async (error) => {
       logger.error(`[Trade Builder] Run failed: ${error.message}`, { err: error });
@@ -1062,7 +1143,7 @@ if (require.main === module) {
       try {
         await shutdownTelemetry();
       } finally {
-        process.exit(1);
+        process.exit(EXIT_FAILURE);
       }
     });
 }
@@ -1077,4 +1158,6 @@ module.exports = {
   fillTradeBuilder,
   submitTradeOffer,
   executeTradeSubmission,
+  executeApprovedOffer,
+  main,
 };

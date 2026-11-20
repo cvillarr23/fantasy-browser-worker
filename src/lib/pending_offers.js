@@ -16,6 +16,13 @@ const OPEN_OFFER_STATUSES = ["approval_pending", "approved", "submitting", "subm
 // Once a person has approved an offer its outgoing players are spoken for.
 const COMMITTED_OFFER_STATUSES = new Set(OPEN_OFFER_STATUSES);
 const PITCH_STATUSES = new Set(["approval_pending"]);
+// A person approved the offer. Core commits approval_pending before it starts the send and flips
+// it to approved after, so a send run can find either one.
+const APPROVED_OFFER_STATUSES = ["approval_pending", "approved"];
+// Core's other offer statuses, read only to say why a key isn't approved.
+const UNAPPROVED_OFFER_STATUSES = [
+  "awaiting_approval", "superseded", "dismissed", "submit_blocked", "dry_run_filled", "submitting", "submitted", "failure",
+];
 const ALREADY_STAGED = "already_staged";
 const PLAYER_COMMITTED = "player_committed";
 
@@ -60,6 +67,39 @@ async function fetchOpenOutgoingOffers({ leagueId, season, fromTeamId }) {
   return offers;
 }
 
+/**
+ * The offer with this key under one status, or null. Core lists only each offer's latest row, so a
+ * key appears under exactly one status. offer_key is also sent as a filter, but the match is checked
+ * here, since a core that ignores the parameter returns every offer in that status.
+ */
+async function findOfferWithStatus(offerKey, status) {
+  let offset = 0;
+  let pageOffers;
+  do {
+    const query = new URLSearchParams({
+      status, offer_key: offerKey, limit: String(OFFERS_PAGE_SIZE), offset: String(offset),
+    });
+    pageOffers = await fetchStatusPage(query);
+    const match = pageOffers.find((offer) => offer.offer_key === offerKey);
+    if (match) return match;
+    offset += pageOffers.length;
+  } while (pageOffers.length === OFFERS_PAGE_SIZE);
+  return null;
+}
+
+/**
+ * The offer with this key in its latest status, or null when core has no such key. Approved
+ * statuses are read first; the rest only when it isn't approved. Throws when core can't answer,
+ * because a send must not go ahead on a guess.
+ */
+async function fetchOfferByKey(offerKey) {
+  for (const status of [...APPROVED_OFFER_STATUSES, ...UNAPPROVED_OFFER_STATUSES]) {
+    const offer = await findOfferWithStatus(offerKey, status);
+    if (offer) return offer;
+  }
+  return null;
+}
+
 const idSet = (ids) => [...new Set(ids || [])].sort().join(",");
 
 /**
@@ -93,4 +133,12 @@ function recentPitchTeamIds(openOffers, now = new Date()) {
     .filter((teamId) => teamId !== "undefined" && teamId !== "null"))];
 }
 
-module.exports = { fetchOpenOutgoingOffers, pendingOfferConflict, recentPitchTeamIds, ALREADY_STAGED, PLAYER_COMMITTED };
+module.exports = {
+  APPROVED_OFFER_STATUSES,
+  fetchOfferByKey,
+  fetchOpenOutgoingOffers,
+  pendingOfferConflict,
+  recentPitchTeamIds,
+  ALREADY_STAGED,
+  PLAYER_COMMITTED,
+};
