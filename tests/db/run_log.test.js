@@ -217,7 +217,8 @@ describe("approval runs", () => {
     await expect(runLog.supersedeApprovals(client, "key-1", before)).resolves.toBe(2);
     const [sql, params] = client.query.mock.calls[0];
     expect(sql).toContain("status='skipped', end_reason='superseded'");
-    expect(sql).toContain("executor='approval' AND status='waiting' AND trigger->>'key'=$1 AND started_at<$2");
+    expect(sql).toContain("executor='approval' AND status='waiting' AND trigger->'then'->>'job'='trade-submit'");
+    expect(sql).toContain("AND trigger->>'key'=$1 AND started_at<$2");
     expect(params).toEqual(["key-1", before]);
     expect(mockQuery).not.toHaveBeenCalled();
   });

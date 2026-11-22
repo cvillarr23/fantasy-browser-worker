@@ -189,11 +189,12 @@ const OPEN_APPROVAL_SQL = `INSERT INTO run_log(id,job_name,trigger_type,trigger,
   VALUES ($1,'approval','approval',$2::jsonb,$3,'waiting','approval',$4,now(),$5)
   ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id`;
 
-// Only approvals opened before `before` (an earlier scan's): this scan's own, for an offer it
-// staged again, stays waiting.
+// Only trade-offer approvals opened before `before` (an earlier scan's): this scan's own, for an
+// offer it staged again, stays waiting.
 const SUPERSEDE_APPROVALS_SQL = `UPDATE run_log SET status='skipped', end_reason='superseded',
     requested_by='trade_scan', finished_at=now()
-  WHERE executor='approval' AND status='waiting' AND trigger->>'key'=$1 AND started_at<$2
+  WHERE executor='approval' AND status='waiting' AND trigger->'then'->>'job'='trade-submit'
+    AND trigger->>'key'=$1 AND started_at<$2
   RETURNING id`;
 
 /** core's approval_service.approval_dedupe_key. */
