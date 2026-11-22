@@ -139,10 +139,17 @@ describe("recordTradeOfferFill", () => {
     pool.query.mockRejectedValue(new Error("boom"));
     await expect(
       recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/INSERT INTO execution_log/);
     expect(params).toEqual(expect.arrayContaining(["trade_offer_submit", "trade_builder", "awaiting_approval", true]));
+  });
+
+  it("says whether the row was written", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    await expect(
+      recordTradeOfferFill({ ...ROW, offerKey: OFFER_KEY, status: "awaiting_approval", dryRun: true }),
+    ).resolves.toBe(true);
   });
 
   it("stores a proposal's evaluation alongside the offer fields core reads", async () => {

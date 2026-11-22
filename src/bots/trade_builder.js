@@ -28,6 +28,7 @@ const { notify } = require("../lib/notify");
 const { APPROVED_OFFER_STATUSES, fetchOfferByKey } = require("../lib/pending_offers");
 const { addSummary } = require("../db/run_log");
 const { tradeAwaitingApproval } = require("../lib/notifications");
+const { openOfferApproval } = require("../lib/offer_approvals");
 const { logger } = require("../telemetry/logger");
 const { withInstrumentation } = require("../telemetry/instrument");
 
@@ -800,7 +801,7 @@ async function submitTradeOffer(
     if (!live) {
       const status = approval ? "submit_blocked" : "awaiting_approval";
       logger.info(`${label} Dry fill complete — ${status}. Nothing was sent.`);
-      await recordTradeOfferFill({
+      const recorded = await recordTradeOfferFill({
         ...record,
         offerKey,
         status,
@@ -808,7 +809,10 @@ async function submitTradeOffer(
         screenshotPath,
         reasons: closedLocks,
       });
-      if (status === "awaiting_approval") await notify(tradeAwaitingApproval({ offerKey, offer, source }));
+      if (status === "awaiting_approval") {
+        if (recorded) await openOfferApproval({ scanRunId, offerKey, offer });
+        await notify(tradeAwaitingApproval({ offerKey, offer, source }));
+      }
       return {
         status,
         offerKey,

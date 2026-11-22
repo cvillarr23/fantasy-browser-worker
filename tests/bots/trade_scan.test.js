@@ -6,10 +6,11 @@ jest.mock("../../src/telemetry/logger", () => ({
 }));
 jest.mock("../../src/db/run_log", () => ({
   addSummary: jest.fn(),
+  supersedeApprovals: jest.fn(async () => 1),
   triggerFromEnv: jest.fn(() => ({ triggerType: process.env.RUN_TRIGGER || "schedule", trigger: {} })),
 }));
 const { logger } = require("../../src/telemetry/logger");
-const { addSummary } = require("../../src/db/run_log");
+const { addSummary, supersedeApprovals } = require("../../src/db/run_log");
 const {
   resolvePeriod,
   runTradeScan,
@@ -287,6 +288,11 @@ describe("retireReplacedProposals", () => {
     const [, , audit] = first.query.mock.calls[2][1];
     expect(JSON.parse(audit)).toMatchObject({ reason: "replaced_by_scan", tracking_id: "scan-1" });
     expect(second.release).toHaveBeenCalled();
+    // Only the dismissed key's earlier approvals are superseded, inside its transaction.
+    expect(supersedeApprovals.mock.calls).toEqual([[first, "key-0", before]]);
+    expect(supersedeApprovals.mock.invocationCallOrder[0]).toBeLessThan(
+      first.query.mock.invocationCallOrder.at(-1),
+    );
   });
 
   test("rolls back and releases the client when an update fails", async () => {

@@ -6,6 +6,8 @@ jest.mock("../../src/bots/espn_api");
 jest.mock("../../src/bots/debug_capture");
 jest.mock("../../src/db/execution_log");
 jest.mock("../../src/db/run_log", () => ({ addSummary: jest.fn() }));
+jest.mock("../../src/lib/offer_approvals", () => ({ openOfferApproval: jest.fn() }));
+const { openOfferApproval } = require("../../src/lib/offer_approvals");
 jest.mock("../../src/telemetry/instrument", () => ({
   withInstrumentation: jest.fn((_botName, _context, handler) => handler()),
 }));
@@ -1584,6 +1586,30 @@ describe("submitTradeOffer: scan run", () => {
     expect(recordTradeOfferFill).toHaveBeenCalledWith(
       expect.objectContaining({ status: "awaiting_approval", scanRunId: "scan-run-1" }),
     );
+  });
+
+  it("opens the offer's approval run once its row is recorded", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    recordTradeOfferFill.mockResolvedValueOnce(true);
+
+    await submitTradeOffer(offerFixture(), { source: "proposal", scanRunId: "scan-run-1" });
+
+    expect(openOfferApproval).toHaveBeenCalledWith({
+      scanRunId: "scan-run-1",
+      offerKey: computeOfferKey(offerFixture()),
+      offer: expect.objectContaining({ toTeamId: offerFixture().toTeamId }),
+    });
+  });
+
+  it("opens no approval run when the offer's row wasn't recorded", async () => {
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    recordTradeOfferFill.mockResolvedValueOnce(false);
+
+    await submitTradeOffer(offerFixture(), { source: "proposal", scanRunId: "scan-run-1" });
+
+    expect(openOfferApproval).not.toHaveBeenCalled();
   });
 });
 
