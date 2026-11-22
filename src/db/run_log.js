@@ -170,4 +170,80 @@ function addSummary(fields) {
   if (summary) Object.assign(summary, fields);
 }
 
-module.exports = { triggerFromEnv, parentForAction, startRun, finishRun, link, addSummary };
+/** Whether `id` is a launcher run this process adopted (RUN_ID), not one it recorded itself. */
+function isLauncherRun(id) {
+  return adoptedRuns.has(id);
+}
+
+// --- Trade-offer approval runs ---------------------------------------------------------------
+//
+// An approval run waits for a person: a run_log row with executor 'approval' and status 'waiting'.
+// Core owns them (approval_service; Runs.insert_approval names this file as a second writer). The
+// trade scan opens one per staged offer here, because worker pods have no API key for core's
+// POST /v1/runs/{run_id}/approvals, and only ever moves one waiting -> superseded. Core does every
+// other transition: approve, dismiss, expiry and starting `then`. core's
+// tests/test_trade_approval_postgres.py pins these statements.
+
+const OPEN_APPROVAL_SQL = `INSERT INTO run_log(id,job_name,trigger_type,trigger,parent_run_id,status,
+    executor,dedupe_key,scheduled_for,expires_at)
+  VALUES ($1,'approval','approval',$2::jsonb,$3,'waiting','approval',$4,now(),$5)
+  ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING RETURNING id`;
+
+// Only approvals opened before `before` (an earlier scan's): this scan's own, for an offer it
+// staged again, stays waiting.
+const SUPERSEDE_APPROVALS_SQL = `UPDATE run_log SET status='skipped', end_reason='superseded',
+    requested_by='trade_scan', finished_at=now()
+  WHERE executor='approval' AND status='waiting' AND trigger->>'key'=$1 AND started_at<$2
+  RETURNING id`;
+
+/** core's approval_service.approval_dedupe_key. */
+function approvalDedupeKey(runId, key) {
+  return `approval@${runId}#${key}`;
+}
+
+/**
+ * Opens a waiting approval run for `key`, parented to the run that asks for it. Returns
+ * { id, opened } -- `opened: false` when that run already opened one for `key` (the dedupe key),
+ * which counts as success -- or null when the write failed. Best-effort, like every write here.
+ */
+async function openApproval({ runId, key, title, link, then, expiresAt }) {
+  const trigger = { key, title, ...(link ? { link } : {}), ...(then ? { then } : {}) };
+  const dedupeKey = approvalDedupeKey(runId, key);
+  try {
+    const { rows } = await pool.query(OPEN_APPROVAL_SQL, [
+      randomUUID(),
+      JSON.stringify(trigger),
+      runId,
+      dedupeKey,
+      expiresAt,
+    ]);
+    if (rows.length > 0) return { id: rows[0].id, opened: true };
+    const existing = await pool.query("SELECT id FROM run_log WHERE dedupe_key=$1", [dedupeKey]);
+    return { id: existing.rows[0]?.id || null, opened: false };
+  } catch (err) {
+    logger.error("Could not open approval run", { err, runId, key });
+    return null;
+  }
+}
+
+/** Supersedes the waiting approvals earlier runs opened for `key`, on the caller's client so it
+ * commits with the offer's retirement. Throws, unlike the best-effort writes above. */
+async function supersedeApprovals(client, key, before) {
+  const { rowCount } = await client.query(SUPERSEDE_APPROVALS_SQL, [key, before]);
+  return rowCount;
+}
+
+module.exports = {
+  triggerFromEnv,
+  parentForAction,
+  startRun,
+  finishRun,
+  link,
+  addSummary,
+  isLauncherRun,
+  approvalDedupeKey,
+  openApproval,
+  supersedeApprovals,
+  OPEN_APPROVAL_SQL,
+  SUPERSEDE_APPROVALS_SQL,
+};

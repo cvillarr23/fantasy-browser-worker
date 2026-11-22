@@ -262,7 +262,8 @@ async function finalizeTradeSubmission(id, status, errorMessage) {
   }
 }
 
-/** Best-effort record of a dry fill, same never-throw contract as recordTradeNegotiation. */
+/** Best-effort record of a dry fill, same never-throw contract as recordTradeNegotiation.
+ * Returns whether the row was written. */
 async function recordTradeOfferFill({ offerKey, status, dryRun, errorMessage, ...row }) {
   await activity.event(
     status,
@@ -286,8 +287,10 @@ async function recordTradeOfferFill({ offerKey, status, dryRun, errorMessage, ..
         dryRun,
       ],
     );
+    return true;
   } catch (err) {
     logger.error("[Execution Log] Failed to record trade offer fill", { err });
+    return false;
   }
 }
 

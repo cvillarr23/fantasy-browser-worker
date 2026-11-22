@@ -93,9 +93,36 @@ For either package source, the pitch comes from an LLM call that sees only count
 | Staged offers | The result keeps the best offer's `target`, `offer`, `evaluation` and `submission` at the top level, and lists every staged one in `offers`. The scan reports `offersStaged` (offers that reached `awaiting_approval`) and `offersFailed`. Each row carries `counter_offer.evaluation` (version `proposal-evaluation-v1`) with the exact live score request, the verbatim live score, the ranking (including `source` and, for candidates, `candidate_rank`) and the pitch. Each row also carries `counter_offer.scan_run_id`, the `run_log` id of the scan that staged it. |
 | Error | Core couldn't score any package. Nothing is ever staged unscored. |
 
+## How does a staged offer wait for approval?
+
+Right after the trade builder records an offer as `awaiting_approval`, it opens the offer's *approval run*: a `run_log` row with executor `approval` and status `waiting`, parented to the scan's run, which the Runs tab shows as "waiting for you".
+
+| Field | Value |
+|---|---|
+| Dedupe key | `approval@<scan run id>#<offer_key>`, so staging the same offer twice in one scan opens one approval |
+| `trigger.then` | `{job: trade-submit, params: {offer_key}}`, the run approving it starts |
+| `trigger.link` | `/trades?offer=<offer_key>`; the Trades page is where it is approved |
+| `trigger.title` | `Send trade to team <id>: give <n>, get <m>` |
+| `expires_at` | The next scheduled `trade-scan` (`next_run_at` from core's `GET /v1/jobs`, read once per scan) or 72h after staging, whichever is sooner. If core can't say, 72h. |
+
+The worker writes the row itself (`db/run_log.js` `openApproval`), because worker pods have no API key for core's `POST /v1/runs/{run_id}/approvals`. Core's `tests/test_trade_approval_postgres.py` pins the statement. The only other change the worker makes to an approval is superseding it (below). Core does the rest:
+
+| Event | Approval run | Offer |
+|---|---|---|
+| Approved on the Trades page | `success` / `approved`; the launcher starts `trade-submit` | `approved` |
+| Dismissed on the Trades page | `skipped` / `dismissed` | `dismissed` |
+| The next scan replaces it | `skipped` / `superseded` | `dismissed` (`replaced_by_scan`) |
+| Past `expires_at` | `skipped` / `expired` | `dismissed` (`dismissed_by: "expired"`) |
+
+A scan outside the launcher (no `RUN_ID`, such as `node src/bots/trade_scan.js --stage` on a laptop) opens no approval runs and logs that once. Its offers, like offers staged before approval runs existed, are approved on the Trades page as before, and core starts `trade-submit` for them directly. Opening is best-effort: if it fails, the offer still stages and is approved the same way.
+
+## What happens to the previous scan's offers?
+
+After a scan stages its offers, it dismisses the `awaiting_approval` proposals earlier scans staged for our team (`status: dismissed`, `outcome_details.dismissal.reason: replaced_by_scan`) and, in the same transaction, supersedes their waiting approval runs. Each key is retired under the same advisory lock core's approval takes, so an approval that lands mid-scan either wins outright or finds the offer already dismissed. A key approved in the meantime is left alone. Counter-offers are not proposals and are never retired. The run summary reports `proposalsRetired`. A failure here is logged and doesn't fail the scan: the old offers stay listed until the next scan, or until they expire.
+
 ## What happens after a person approves an offer?
 
-Core starts the `trade-submit` launcher job with the offer's `offer_key`, parented to the scan run in `counter_offer.scan_run_id`, so the send shows as the scan's child on the Runs tab. The job runs the [trade builder](trade-builder.md) with `--offer-key`. Until core switches over, the approval is still published to `trade_submissions`.
+Core starts the `trade-submit` launcher job with the offer's `offer_key`, from the offer's approval run, so the send shows under the scan on the Runs tab. The job runs the [trade builder](trade-builder.md) with `--offer-key`.
 
 ## What happens when an offer fails to stage?
 

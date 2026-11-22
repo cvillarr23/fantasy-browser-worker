@@ -182,3 +182,53 @@ it("records no usage for a run it started itself", async () => {
   expect(mockMeasure).not.toHaveBeenCalled();
   expect(JSON.parse(mockQuery.mock.calls[1][1][3])).toEqual({});
 });
+
+// The contract core's tests/test_trade_approval_postgres.py pins for this second writer.
+describe("approval runs", () => {
+  const then = { job: "trade-submit", params: { offer_key: "key-1" } };
+  const opening = { runId: "scan-1", key: "key-1", title: "Send?", link: "/trades?offer=key-1", then, expiresAt: new Date("2026-11-25T19:00:00Z") };
+
+  it("inserts a waiting approval parented to the asking run", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: "approval-1" }] });
+    await expect(runLog.openApproval(opening)).resolves.toEqual({ id: "approval-1", opened: true });
+    const [sql, [id, trigger, parent, dedupeKey, expiresAt]] = mockQuery.mock.calls[0];
+    expect(sql).toBe(runLog.OPEN_APPROVAL_SQL);
+    expect(sql).toContain("'approval','approval',$2::jsonb,$3,'waiting','approval',$4");
+    expect(sql).toContain("ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING");
+    expect(id).toEqual(expect.any(String));
+    expect(JSON.parse(trigger)).toEqual({ key: "key-1", title: "Send?", link: "/trades?offer=key-1", then });
+    expect([parent, dedupeKey, expiresAt]).toEqual(["scan-1", "approval@scan-1#key-1", opening.expiresAt]);
+  });
+
+  it("treats an approval the run already opened for the key as success", async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [{ id: "approval-1" }] });
+    await expect(runLog.openApproval(opening)).resolves.toEqual({ id: "approval-1", opened: false });
+    expect(mockQuery.mock.calls[1]).toEqual(["SELECT id FROM run_log WHERE dedupe_key=$1", ["approval@scan-1#key-1"]]);
+  });
+
+  it("is best-effort when the database is unavailable", async () => {
+    mockQuery.mockRejectedValueOnce(new Error("down"));
+    await expect(runLog.openApproval(opening)).resolves.toBeNull();
+  });
+
+  it("supersedes only earlier waiting approvals for the key, on the caller's client", async () => {
+    const client = { query: jest.fn().mockResolvedValue({ rowCount: 2 }) };
+    const before = new Date("2026-11-20T19:00:00Z");
+    await expect(runLog.supersedeApprovals(client, "key-1", before)).resolves.toBe(2);
+    const [sql, params] = client.query.mock.calls[0];
+    expect(sql).toContain("status='skipped', end_reason='superseded'");
+    expect(sql).toContain("executor='approval' AND status='waiting' AND trigger->>'key'=$1 AND started_at<$2");
+    expect(params).toEqual(["key-1", before]);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  it("knows only adopted launcher runs", async () => {
+    launcherRun();
+    mockQuery.mockResolvedValue({ rows: [], rowCount: 1 });
+    const id = await runLog.startRun({ jobName: "trade_scan" });
+    expect(runLog.isLauncherRun(id)).toBe(true);
+    expect(runLog.isLauncherRun("some-other-run")).toBe(false);
+    await runLog.finishRun(id, "success");
+    expect(runLog.isLauncherRun(id)).toBe(false);
+  });
+});

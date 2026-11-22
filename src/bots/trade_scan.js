@@ -2,7 +2,7 @@ const { randomUUID } = require("crypto");
 const { Pool } = require("pg");
 const { generateTradeProposal } = require("./trade_proposal");
 const { logger } = require("../telemetry/logger");
-const { addSummary, triggerFromEnv } = require("../db/run_log");
+const { addSummary, supersedeApprovals, triggerFromEnv } = require("../db/run_log");
 const { getContext } = require("../telemetry/context");
 
 const NFL_STATE_TIMEOUT_MS = 10_000;
@@ -136,13 +136,16 @@ function scanDismissal(trackingId) {
 }
 
 // One key at a time under the same advisory lock core's approval takes, so an approval that
-// lands mid-scan either wins outright or finds the offer already dismissed.
+// lands mid-scan either wins outright or finds the offer already dismissed. The earlier scans'
+// approval runs for the key are superseded in the same transaction, so the Runs tab stops
+// showing them as waiting; a key approved meanwhile has no waiting approval left to supersede.
 async function dismissReplacedProposal(pool, offerKey, before, dismissal) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [offerKey]);
     const updated = await client.query(DISMISS_REPLACED_SQL, [offerKey, before, JSON.stringify(dismissal)]);
+    if (updated.rowCount > 0) await supersedeApprovals(client, offerKey, before);
     await client.query("COMMIT");
     return updated.rowCount > 0;
   } catch (error) {

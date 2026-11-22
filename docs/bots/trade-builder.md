@@ -27,7 +27,7 @@ stateDiagram-v2
 
 | Source | Route |
 |---|---|
-| A generated proposal or counter | The worker calls `submitTradeOffer` itself and stages with no approval. |
+| A generated proposal or counter | The worker calls `submitTradeOffer` itself and stages with no approval. A scan running under the launcher also opens the offer's [approval run](trade-proposal-and-scan.md#how-does-a-staged-offer-wait-for-approval). |
 | A human approves a staged offer | The `trade-submit` [launcher job](/overview/job-launcher) runs `node src/bots/trade_builder.js --offer-key <offer_key>`. |
 | A human approves a staged offer, before core starts `trade-submit` | The core API publishes `trade_submissions` with the approval. The queue form keeps working until core switches over. |
 | A manual run | `node src/bots/trade_builder.js --offer-key <offer_key>`, or `node src/bots/trade_builder.js '<json>'` |
@@ -42,7 +42,7 @@ The run reads the offer from core's `GET /v1/trade/offers`, looking for that exa
 
 If core can't answer, the run fails and sends nothing. Counter-offers go through the same path, and their `related_transaction_id` keeps the recomputed key and ESPN's link to the incoming offer.
 
-The run reports through `run_log` like the other launcher jobs. It adopts the launcher's `RUN_ID`, its parent is the scan that staged the offer, its summary records `offerKey` and the result, and a failure raises the failed-run alert. The launcher makes one attempt, because a send is never retried automatically.
+The run reports through `run_log` like the other launcher jobs. It adopts the launcher's `RUN_ID`, its parent is the offer's approval run (itself the child of the scan that staged the offer), or the scan directly for an offer staged without one, its summary records `offerKey` and the result, and a failure raises the failed-run alert. The launcher makes one attempt, because a send is never retried automatically.
 
 ## What does the message contain?
 
