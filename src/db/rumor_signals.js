@@ -32,16 +32,24 @@ async function fetchWatermark() {
   return watermark === null || watermark === undefined ? null : Number(watermark);
 }
 
-/** New raw_signals rows to interpret this run. Skips rows the upstream fuzzy matcher couldn't
- * resolve to a player -- nothing to attach a per-player signal to. player_id is the internal
- * (Sleeper) id space, same as raw_signals/players -- not an ESPN id. */
+/** The raw_signals sources whose items may drive automation. Core also stores display-only news
+ * (espn_news, bluesky) in raw_signals for the player news feed. A verdict here can lead to a
+ * waiver or lineup move, so a source is left out until someone decides to add it here; a new
+ * source in core never reaches the digest by default. */
+const AUTOMATION_SOURCES = Object.freeze(["rotowire_rss", "reddit_fantasyfootball"]);
+
+/** New raw_signals rows to interpret this run, from AUTOMATION_SOURCES only. Skips rows the
+ * upstream matcher couldn't resolve to a player -- nothing to attach a per-player signal to.
+ * player_id is the internal (Sleeper) id space, same as raw_signals/players -- not an ESPN id.
+ * Rows from other sources may sit above the watermark for good; the source filter keeps them out
+ * of every run. */
 async function fetchNewRawSignals(sinceId) {
   const { rows } = await pool.query(
     `SELECT id, player_id, source, raw_text, published_at
        FROM raw_signals
-      WHERE id > $1 AND player_id IS NOT NULL
+      WHERE id > $1 AND player_id IS NOT NULL AND source = ANY($2::text[])
       ORDER BY id`,
-    [sinceId || 0],
+    [sinceId || 0, [...AUTOMATION_SOURCES]],
   );
   return rows;
 }
@@ -85,4 +93,4 @@ async function persistRumorSignals(rows) {
   }
 }
 
-module.exports = { fetchWatermark, fetchNewRawSignals, persistRumorSignals };
+module.exports = { AUTOMATION_SOURCES, fetchWatermark, fetchNewRawSignals, persistRumorSignals };
