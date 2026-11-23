@@ -25,8 +25,10 @@ The `rumor-digest-bot` [launcher job](/overview/job-launcher) runs `node src/bot
 
 | Direction | Table | Detail |
 |---|---|---|
-| Read | `raw_signals` | Rows with `id` above the watermark and a matched `player_id`. The id is core's internal (Sleeper) id, not ESPN's. |
+| Read | `raw_signals` | Rows with `id` above the watermark, a matched `player_id`, and a `source` in `AUTOMATION_SOURCES` (`rotowire_rss`, `reddit_fantasyfootball`). The id is core's internal (Sleeper) id, not ESPN's. |
 | Write | `rumor_signals` | `player_id`, `sentiment`, `confidence`, `suggested_action`, `source_raw_signal_ids`, `max_raw_signal_id`. |
+
+Core also stores display-only news in `raw_signals` (`espn_news`, `bluesky`) for the player news feed. The digest never reads those rows, so they can't drive a waiver or lineup move. A new source stays out until someone adds it to `AUTOMATION_SOURCES` in `src/db/rumor_signals.js`.
 
 The watermark is the highest `max_raw_signal_id` already stored. Every verdict in a run, including `no_op`, carries that run's maximum id, so the watermark advances without a separate state table.
 
