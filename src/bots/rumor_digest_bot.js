@@ -380,7 +380,7 @@ if (require.main === module) {
     runRumorDigest,
   )
     .catch(() => {
-      // Non-zero exit is the alert this CronJob relies on -- withInstrumentation's own catch has
+      // Non-zero exit is the alert this job relies on -- withInstrumentation's own catch has
       // already recorded the failed span/execution_log row before this runs.
       process.exitCode = 1;
     })

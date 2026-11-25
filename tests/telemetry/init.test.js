@@ -1,4 +1,4 @@
-// Regression guard for the espn-session-healthcheck CronJob failing AFTER its check passed.
+// Regression guard for the espn-session-healthcheck job failing AFTER its check passed.
 //
 // Every shutdown path in this repo calls the flush from inside a `finally` block or a signal
 // handler, where a rejection is unhandled and therefore fatal to the process. When the OTLP

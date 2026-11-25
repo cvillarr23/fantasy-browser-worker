@@ -28,7 +28,7 @@ async function withInstrumentation(botName, contextFields, handler) {
     contextFields = { ...contextFields, trackingId: trackingId || contextFields.trackingId };
   }
   // A queue message's run is a child of the run that queued its action; a standalone job's
-  // trigger (scheduled vs manual) comes from its CronJob env.
+  // trigger (scheduled vs manual) comes from its job env.
   const { triggerType, trigger } = contextFields.queueName
     ? {
         triggerType: "queue",
