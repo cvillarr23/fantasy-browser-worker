@@ -17,8 +17,8 @@ const { withInstrumentation } = require("../telemetry/instrument");
  * it only reuses the same cookie-injection auth.js already does for every other bot, so there's
  * nothing for anti-automation controls to catch.
  *
- * Exits non-zero on any auth failure so this can run as a Kubernetes CronJob whose failure state
- * *is* the alert (visible via `kubectl get cronjob`/job history, or wired into whatever the
+ * Exits non-zero on any auth failure so this can run as a scheduled job whose failure state
+ * *is* the alert (visible in the launcher's run history, or wired into whatever the
  * cluster's existing Prometheus/Grafana/Loki stack already alerts on for failed Jobs).
  */
 async function checkEspnSession() {
@@ -64,16 +64,16 @@ if (require.main === module) {
     checkEspnSession,
   )
     .catch(() => {
-      // Non-zero exit is the alert this CronJob relies on (see header comment) -- set it here,
+      // Non-zero exit is the alert this job relies on (see header comment) -- set it here,
       // after withInstrumentation's own catch has already recorded the failed span/execution_log
       // row, rather than swallowing the error inside checkEspnSession itself.
       process.exitCode = 1;
     })
     .finally(async () => {
-      // Flush any buffered spans before this short-lived CronJob pod's event loop drains --
+      // Flush any buffered spans before this short-lived job pod's event loop drains --
       // not guaranteed to happen on its own before exit. shutdownTelemetry never rejects: a
       // rejection here is unhandled (this is a `finally`) and would kill the pod AFTER the check
-      // already passed, reporting a healthy session as a failed CronJob.
+      // already passed, reporting a healthy session as a failed job.
       const { shutdownTelemetry } = require("../telemetry/init");
       await shutdownTelemetry();
     });

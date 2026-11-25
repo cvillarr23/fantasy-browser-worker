@@ -62,7 +62,7 @@ function resolvePeriod(state, now = new Date()) {
   return week === PRESEASON_WEEK ? null : { season, week };
 }
 
-// Use the CronJob timezone, including DST, so manual and scheduled runs share
+// Use the scheduled job's timezone, including DST, so manual and scheduled runs share
 // one daily claim even across UTC midnight. Week changes cannot bypass this cap.
 function scanDate(now) {
   const parts = new Intl.DateTimeFormat("en-US", {

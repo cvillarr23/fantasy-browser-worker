@@ -2,7 +2,7 @@
 # tree, so it never auto-deploys via Argo CD. Apply/delete this by hand to exercise the digest
 # against the real fantasy-db.
 #
-# The production CronJob lives in fantasy-infra (base/browser-worker/rumor-digest-bot-cronjob.yaml,
+# The production scheduled job lives in fantasy-infra (base/browser-worker/rumor-digest-bot-cronjob.yaml,
 # daily not RUMOR_DIGEST_INTERVAL-driven) - this manual Job stays for on-demand runs/debugging.
 #
 # Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
@@ -51,7 +51,7 @@ spec:
           imagePullPolicy: Always # always pull latest for a test run, don't reuse a stale cached image
           command: ["node", "src/bots/rumor_digest_bot.js"]
           env:
-            # Same fantasy-db credentials every other CronJob/Job in this repo uses (see
+            # Same fantasy-db credentials every other scheduled job in this repo uses (see
             # base/browser-worker/espn-session-healthcheck-cronjob.yaml in fantasy-infra) — this
             # is the shared instance both raw_signals and rumor_signals live in.
             - name: DB_HOST

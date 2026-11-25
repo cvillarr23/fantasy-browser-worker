@@ -13,8 +13,8 @@ const { PermanentError, SessionExpiredError } = require("../errors");
  *      draft_clicker.js's WS-only primary path, which never renders a page at all.
  *   2. Rendered-page/BAM-SDK-layer (needs an existing page) — what matters for
  *      draft_room_dom.js's fallback tier and mock_draft.js's lobby-join flow. This tier's logic
- *      was originally check_espn_session.js's inline CronJob body; it now lives here so both the
- *      scheduled CronJob and an in-draft pre-flight/periodic check share one implementation.
+ *      was originally check_espn_session.js's inline scheduled-job body; it now lives here so both the
+ *      scheduled job and an in-draft pre-flight/periodic check share one implementation.
  *
  * Both throw SessionExpiredError (src/errors.js) on failure — deliberately not PermanentError,
  * since a refreshed session can make a redelivered pick succeed; this is an infra condition, not

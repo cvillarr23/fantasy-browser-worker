@@ -42,7 +42,7 @@ COPY . .
 RUN chmod +x scripts/start-vnc.sh
 
 # Applies to every `node <file>.js` invocation of this image, not just src/index.js's default CMD
-# below -- k8s Jobs/CronJobs override the container command to run bot files directly
+# below -- scheduled jobs override the container command to run bot files directly
 # (e.g. `node src/bots/draft_sync.js`), bypassing index.js entirely. Bootstrapping OTel here
 # instead of via a per-file require() means every entrypoint gets tracing automatically, with
 # nothing to remember to wire up when a new one is added. Also applies to ad-hoc

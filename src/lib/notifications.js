@@ -6,7 +6,7 @@ const { resolveDryRun, resolveTradeDryRun } = require("./env");
 const { PRIORITY_HIGH, PRIORITY_URGENT, truncate } = require("./notify");
 
 const MS_PER_HOUR = 60 * 60 * 1000;
-// A failing bot is retried by the queue and rerun by its CronJob; one ping per hour per distinct
+// A failing bot is retried by the queue and rerun by its schedule; one ping per hour per distinct
 // error is enough to know it's broken.
 const RUN_FAILURE_DEDUPE_TTL_MS = MS_PER_HOUR;
 // A staged or incoming offer is announced once; ESPN trade offers expire within a couple of days.
