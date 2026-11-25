@@ -16,7 +16,7 @@ GET https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/seasons/{seasonId}/s
 
 | View | Returns | Used by | Confidence |
 |---|---|---|---|
-| `mRoster` | `teams[].roster.entries[]`: `playerId`, `lineupSlotId`, `playerPoolEntry.player.{fullName, defaultPositionId, injuryStatus}` | `readRoster`, `readRosters` | Confirmed live |
+| `mRoster` | `teams[].roster.entries[]`: `playerId`, `lineupSlotId`, `playerPoolEntry.player.{fullName, defaultPositionId, injuryStatus}`, `playerPoolEntry.lineupLocked` (per-player kickoff lock; field name unconfirmed until a live capture) | `readRoster`, `readRosters` | Confirmed live |
 | `mSettings` | `settings.rosterSettings.lineupSlotCounts` (the league's slot shape) and `scoringPeriodId` | `readRoster`, `fetchDraftTotals` | Confirmed live, 08-11 |
 | `mTeam` | `teams[]` with `lineupLocked`, `rosterLocked` and `transactionCounter` | `readRoster`, session checks | Confirmed live |
 | `mPendingTransactions` | `pendingTransactions[]`. **The key is missing when nothing is pending.** | `readPendingTrades` | Empty state confirmed live, 10-03. Populated shape unverified. |

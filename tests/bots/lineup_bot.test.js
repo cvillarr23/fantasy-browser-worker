@@ -2,8 +2,12 @@ const { resolveSlotId, planSwaps } = require("../../src/bots/lineup_bot");
 
 const noopLog = () => {};
 
-function roster(slotByPlayerId, slotCounts, injuryStatusByPlayerId = {}) {
+function roster(slotByPlayerId, slotCounts, injuryStatusByPlayerId = {}, lockedPlayerIds = []) {
   return {
+    lockedByPlayerId: new Map(
+      Object.keys(slotByPlayerId).map((id) => [id, lockedPlayerIds.includes(id)]),
+    ),
+    nameByPlayerId: new Map(Object.keys(slotByPlayerId).map((id) => [id, `Player ${id}`])),
     slotByPlayerId: new Map(Object.entries(slotByPlayerId)),
     slotCounts,
     injuryStatusByPlayerId: new Map(Object.entries(injuryStatusByPlayerId)),
@@ -534,5 +538,73 @@ describe("planSwaps IR moves", () => {
       noopLog,
     );
     expect(items).toHaveLength(2);
+  });
+});
+
+describe("planSwaps locked players", () => {
+  const locked = expect.objectContaining({ permanent: true });
+
+  it("refuses to bench a locked drop, naming the player", () => {
+    const r = roster({ "100": 4, "200": 20 }, DEFAULT_SLOT_COUNTS, {}, ["100"]);
+    const plan = () =>
+      planSwaps([{ drop_player_id: "100", add_player_id: "200", slot: "WR1" }], r, noopLog);
+    expect(plan).toThrow(/player 100 \(drop, Player 100\) is locked/);
+    expect(plan).toThrow(locked);
+  });
+
+  it("refuses to promote a locked add", () => {
+    const r = roster({ "100": 4, "200": 20 }, DEFAULT_SLOT_COUNTS, {}, ["200"]);
+    expect(() =>
+      planSwaps([{ drop_player_id: "100", add_player_id: "200", slot: "WR1" }], r, noopLog),
+    ).toThrow(/player 200 \(add, Player 200\) is locked/);
+  });
+
+  it("refuses a locked player in a slot move", () => {
+    const r = roster({ "300": 20 }, DEFAULT_SLOT_COUNTS, {}, ["300"]);
+    expect(() =>
+      planSwaps([{ kind: "move", player_id: "300", slot: "WR2" }], r, noopLog),
+    ).toThrow(locked);
+  });
+
+  it("refuses a locked player in an IR move", () => {
+    const r = roster({ "300": 20 }, DEFAULT_SLOT_COUNTS, { "300": "OUT" }, ["300"]);
+    expect(() =>
+      planSwaps([{ kind: "ir", player_id: "300", slot: "IR" }], r, noopLog),
+    ).toThrow(/is locked/);
+  });
+
+  it("refuses a locked player in an activate_ir move", () => {
+    const r = roster({ "300": 23 }, DEFAULT_SLOT_COUNTS, {}, ["300"]);
+    expect(() =>
+      planSwaps([{ kind: "activate_ir", player_id: "300", slot: "BENCH" }], r, noopLog),
+    ).toThrow(/is locked/);
+  });
+
+  it("leaves a locked player already in the target slot as a no-op", () => {
+    const r = roster({ "300": 4 }, DEFAULT_SLOT_COUNTS, {}, ["300"]);
+    const { items, skipped } = planSwaps(
+      [{ kind: "move", player_id: "300", slot: "WR2" }],
+      r,
+      noopLog,
+    );
+    expect(items).toEqual([]);
+    expect(skipped).toBe(1);
+  });
+
+  it("plans an unlocked item, but throws if any item in the batch touches a locked player", () => {
+    const r = roster({ "100": 20, "300": 20 }, DEFAULT_SLOT_COUNTS, {}, ["300"]);
+    expect(
+      planSwaps([{ kind: "move", player_id: "100", slot: "WR2" }], r, noopLog).items,
+    ).toHaveLength(1);
+    expect(() =>
+      planSwaps(
+        [
+          { kind: "move", player_id: "100", slot: "WR2" },
+          { kind: "move", player_id: "300", slot: "WR1" },
+        ],
+        r,
+        noopLog,
+      ),
+    ).toThrow(/Swap #2: player 300/);
   });
 });

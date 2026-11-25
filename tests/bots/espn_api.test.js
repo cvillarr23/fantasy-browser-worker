@@ -164,6 +164,41 @@ describe("D/ST negative player ids", () => {
     expect(roster.injuryStatusByPlayerId.get("3916148")).toBeNull();
   });
 
+  it("readRoster flags each entry ESPN has locked, treating an absent flag as unlocked", async () => {
+    const context = {
+      request: {
+        get: jest.fn().mockResolvedValue({
+          ok: () => true,
+          json: async () => ({
+            scoringPeriodId: 4,
+            teams: [
+              {
+                id: 8,
+                roster: {
+                  entries: [
+                    { playerId: 1, lineupSlotId: 0, playerPoolEntry: { lineupLocked: true } },
+                    { playerId: 2, lineupSlotId: 2, playerPoolEntry: { lineupLocked: false } },
+                    { playerId: 3, lineupSlotId: 20 },
+                  ],
+                },
+              },
+            ],
+          }),
+        }),
+      },
+    };
+
+    const roster = await readRoster(context, {
+      leagueId: "1234567890",
+      seasonId: "2026",
+      teamId: "8",
+    });
+
+    expect(roster.lockedByPlayerId.get("1")).toBe(true);
+    expect(roster.lockedByPlayerId.get("2")).toBe(false);
+    expect(roster.lockedByPlayerId.get("3")).toBe(false);
+  });
+
   it("readRosters returns several teams from a single league read", async () => {
     const get = jest.fn().mockResolvedValue({
       ok: () => true,
