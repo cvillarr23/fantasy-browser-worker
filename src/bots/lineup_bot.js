@@ -252,6 +252,20 @@ function requireFieldedSlot(index, slot, slotId, slotCounts) {
   }
 }
 
+/**
+ * Refuses a move of a player ESPN has locked at their game's kickoff. ESPN rejects, or half-applies,
+ * a transaction that touches one, so this fails before anything is submitted. It is called only for
+ * players that would actually move, so a redelivery of an already-applied item stays a no-op.
+ */
+function assertNotLocked(roster, playerId, label, index) {
+  if (!roster.lockedByPlayerId?.get(playerId)) return;
+  const name = roster.nameByPlayerId?.get(playerId) ?? null;
+  throw new PermanentError(
+    `Swap #${index + FIRST_SWAP_NUMBER}: player ${playerId} (${label}${name ? `, ${name}` : ""}) ` +
+      "is locked by ESPN (their game has started) and cannot be moved.",
+  );
+}
+
 /** A `kind: "swap"` entry: `drop_player_id` to the bench, `add_player_id` into `slot`. */
 function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
   const dropId = requirePlayerId(
@@ -279,10 +293,14 @@ function planBenchAndPromote(_kind, swap, index, roster, { claimPlayer, currentS
 
   // Demote before promoting, so the target slot is free by the time the promotion lands.
   const moves = [];
-  if (dropFrom !== BENCH_SLOT_ID)
+  if (dropFrom !== BENCH_SLOT_ID) {
+    assertNotLocked(roster, dropId, "drop", index);
     moves.push({ id: dropId, from: dropFrom, to: BENCH_SLOT_ID });
-  if (addFrom !== targetSlotId)
+  }
+  if (addFrom !== targetSlotId) {
+    assertNotLocked(roster, addId, "add", index);
     moves.push({ id: addId, from: addFrom, to: targetSlotId });
+  }
 
   return {
     moves,
@@ -323,6 +341,7 @@ function planIrMove(kind, swap, index, roster, { claimPlayer, currentSlotOf }) {
   const from = currentSlotOf(playerId, "player", index);
   const satisfied = `${playerId} in ${describeSlot(targetSlotId)}`;
   if (from === targetSlotId) return { moves: [], endState: [], satisfied };
+  assertNotLocked(roster, playerId, "player", index);
 
   if (kind === IR_KIND) {
     // Checked here so the failure names the status. ESPN would reject it anyway with a 409.
@@ -367,6 +386,7 @@ function planSlotMove(_kind, swap, index, roster, { claimPlayer, currentSlotOf }
   const from = currentSlotOf(playerId, "player", index);
   const satisfied = `${playerId} in ${describeSlot(targetSlotId)}`;
   if (from === targetSlotId) return { moves: [], endState: [], satisfied };
+  assertNotLocked(roster, playerId, "player", index);
   if (from === IR_SLOT_ID) {
     throw new PermanentError(
       `Swap #${index + 1}: player ${playerId} is in IR; use kind "${ACTIVATE_IR_KIND}" to move ` +
@@ -626,6 +646,9 @@ async function executeLineupAdjustments(payload) {
       // because building this object must not throw and mask the original error.
       roster_injury_status: roster?.injuryStatusByPlayerId
         ? Object.fromEntries(roster.injuryStatusByPlayerId)
+        : null,
+      roster_locked_players: roster?.lockedByPlayerId
+        ? [...roster.lockedByPlayerId].filter(([, locked]) => locked).map(([id]) => id)
         : null,
       planned_items: planned ? planned.items : null,
       err: error,

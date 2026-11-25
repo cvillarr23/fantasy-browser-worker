@@ -90,11 +90,15 @@ describe("summarizeRoster", () => {
         ["100", "OUT"],
         ["200", null],
       ]),
+      lockedByPlayerId: new Map([
+        ["100", true],
+        ["200", false],
+      ]),
     });
 
     expect(summary.players).toEqual([
-      { playerId: "100", name: "A", lineupSlotId: 20, injuryStatus: "OUT" },
-      { playerId: "200", name: "B", lineupSlotId: 2, injuryStatus: null },
+      { playerId: "100", name: "A", lineupSlotId: 20, injuryStatus: "OUT", locked: true },
+      { playerId: "200", name: "B", lineupSlotId: 2, injuryStatus: null, locked: false },
     ]);
     expect(summary.slotByPlayerId).toEqual({ 100: 20, 200: 2 });
   });

@@ -105,6 +105,14 @@ async function fetchLeagueRosters(context, { leagueId, seasonId }) {
   return response.json();
 }
 
+/**
+ * Whether ESPN reports this roster entry as locked. The field is read from one place so a live
+ * capture that shows a different name is a one-line change; an absent field means unlocked.
+ */
+function isEntryLocked(entry) {
+  return entry.playerPoolEntry?.lineupLocked === true;
+}
+
 function parseTeamRoster(body, { leagueId, teamId }) {
   const team = (body.teams || []).find((t) => String(t.id) === String(teamId));
   if (!team) {
@@ -125,6 +133,9 @@ function parseTeamRoster(body, { leagueId, teamId }) {
   // playerId -> ESPN's injuryStatus ("ACTIVE", "OUT", "INJURY_RESERVE", ...), null when omitted.
   // lineup_bot.js checks it before an IR move: ESPN, not Sleeper, decides IR eligibility.
   const injuryStatusByPlayerId = new Map();
+  // playerId -> whether ESPN has locked this entry (their game has kicked off). Locks are per
+  // player, so a team whose lineupLocked is still false can hold started players.
+  const lockedByPlayerId = new Map();
   for (const entry of team.roster?.entries || []) {
     slotByPlayerId.set(String(entry.playerId), entry.lineupSlotId);
     positionByPlayerId.set(
@@ -139,6 +150,7 @@ function parseTeamRoster(body, { leagueId, teamId }) {
       String(entry.playerId),
       entry.playerPoolEntry?.player?.injuryStatus ?? null,
     );
+    lockedByPlayerId.set(String(entry.playerId), isEntryLocked(entry));
   }
 
   return {
@@ -146,6 +158,7 @@ function parseTeamRoster(body, { leagueId, teamId }) {
     nameByPlayerId,
     positionByPlayerId,
     injuryStatusByPlayerId,
+    lockedByPlayerId,
     scoringPeriodId: body.scoringPeriodId,
     slotCounts: body.settings?.rosterSettings?.lineupSlotCounts || {},
     entryCount: slotByPlayerId.size,

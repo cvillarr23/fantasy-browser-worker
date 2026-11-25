@@ -169,6 +169,7 @@ function summarizeRoster(roster) {
       name: roster.nameByPlayerId.get(playerId) ?? null,
       lineupSlotId,
       injuryStatus: roster.injuryStatusByPlayerId.get(playerId) ?? null,
+      locked: roster.lockedByPlayerId.get(playerId) ?? false,
     })),
   };
 }
