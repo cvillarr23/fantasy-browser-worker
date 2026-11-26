@@ -2,7 +2,7 @@
 # tree, so it never auto-deploys via Argo CD. Apply/delete this by hand to exercise the digest
 # against the real fantasy-db.
 #
-# The production scheduled job lives in fantasy-infra (base/browser-worker/rumor-digest-bot-cronjob.yaml,
+# The production scheduled job lives in fantasy-infra (the rumor-digest-bot entry in charts/fantasy/files/catalog.yaml,
 # daily not RUMOR_DIGEST_INTERVAL-driven) - this manual Job stays for on-demand runs/debugging.
 #
 # Pulls from GHCR (.github/workflows/ci.yml builds+pushes on every push to main) rather than a
@@ -52,7 +52,8 @@ spec:
           command: ["node", "src/bots/rumor_digest_bot.js"]
           env:
             # Same fantasy-db credentials every other scheduled job in this repo uses (see
-            # base/browser-worker/espn-session-healthcheck-cronjob.yaml in fantasy-infra) — this
+            # the worker-llm and worker-session-check profiles' db secret in
+            # charts/fantasy/files/catalog.yaml in fantasy-infra) — this
             # is the shared instance both raw_signals and rumor_signals live in.
             - name: DB_HOST
               value: "fantasy-db.default.svc.cluster.local"
