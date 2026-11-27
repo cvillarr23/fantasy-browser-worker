@@ -142,6 +142,26 @@ describe("incoming score evidence", () => {
     expect(incomingEvaluationFor(entry)).toBeNull();
   });
 
+  it.each(["trade-score-v1", "trade-score-v2", "trade-score-v6"])(
+    "accepts evidence scored as %s",
+    (version) => {
+      const { input } = fixture();
+      const body = { ...input.body, scoring_version: version };
+      const evaluation = buildIncomingEvaluation({ ...input, body });
+      expect(evaluation).not.toBeNull();
+      expect(evaluation.score.scoring_version).toBe(version);
+    },
+  );
+
+  it.each(["trade-score-v0", "trade-score-v2-beta", "future", 2, null])(
+    "rejects a scoring_version that isn't trade-score-vN (%p)",
+    (version) => {
+      const { input } = fixture();
+      const body = { ...input.body, scoring_version: version };
+      expect(buildIncomingEvaluation({ ...input, body })).toBeNull();
+    },
+  );
+
   it("rejects invalid provenance or missing responses without throwing", () => {
     const { input } = fixture();
     expect(buildIncomingEvaluation({ ...input, body: null })).toBeNull();
