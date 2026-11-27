@@ -57,6 +57,10 @@ const DECISION_KEY_VERSION = "trade-response-v1";
 const FINGERPRINT_VERSION = "trade-inbox-v1";
 
 const INCOMING_EVALUATION_VERSION = "incoming-trade-evaluation-v1";
+// Core bumps trade-score-vN once per score change (src/schemas/trade_score.py
+// KNOWN_SCORING_VERSIONS), and every version only adds fields. So any vN is accepted here and
+// the sections below are what's actually checked; a new core version needs no worker change.
+const SCORING_VERSION_PATTERN = /^trade-score-v[1-9]\d*$/;
 // Bound the added JSONB content without truncating core's breakdown or blocking inbox refreshes.
 const MAX_INCOMING_EVALUATION_BYTES = 65_536;
 const MIN_SCORE_SEASON = 2000;
@@ -269,7 +273,8 @@ function validIncomingEvaluation(evaluation) {
       "strength_metric",
     ];
     if (
-      score.scoring_version !== "trade-score-v1" ||
+      typeof score.scoring_version !== "string" ||
+      !SCORING_VERSION_PATTERN.test(score.scoring_version) ||
       !sections.every((key) => isObject(score[key])) ||
       score.league_id !== request.league_id ||
       score.season !== request.season ||
@@ -813,6 +818,7 @@ function verifyResponse({ action, transactionId, trades, history }) {
 
 module.exports = {
   INCOMING_EVALUATION_VERSION,
+  SCORING_VERSION_PATTERN,
   MAX_INCOMING_EVALUATION_BYTES,
   buildIncomingEvaluation,
   incomingEvaluationFor,

@@ -279,7 +279,9 @@ retried on the next refresh. No LLM produces or adjusts any number.
 **Score evidence.** The entry's `counter_offer.evaluation` is nullable advisory
 evidence with version `incoming-trade-evaluation-v1`, `evaluated_at`,
 `scored_fingerprint`, the exact score `request`, and the complete `score` response
-(`trade-score-v1`). It retains lineup gains, schedule adjustments, horizon coverage
+(any `trade-score-vN`: core bumps N once per score change and versions only add
+fields, so the required sections are what's validated; `trade-score-v2` adds
+`score.components`). It retains lineup gains, schedule adjustments, horizon coverage
 and unscored-week reasons. The evaluation timestamp equals the flattened score's
 `scored_at`; its fingerprint must match both the summary and the current offer.
 The request preserves the scorer's default horizon by omitting `horizon`.
