@@ -19,7 +19,8 @@ function validCandidate(item) {
     players.every((player) => typeof player?.espn_id === "string" && PLAYER_ID_PATTERN.test(player.espn_id));
   return item && typeof item.counterparty?.team_id === "string" && /^[1-9]\d*$/.test(item.counterparty.team_id) &&
     validPlayers(item.receive) && validPlayers(item.send) && item.status === "proposable" &&
-    (item.final_score === null || Number.isFinite(item.final_score));
+    (item.final_score === null || Number.isFinite(item.final_score)) &&
+    (item.expected_score === null || Number.isFinite(item.expected_score));
 }
 
 // A list is a snapshot. Never combine pages from different job runs.
@@ -34,7 +35,7 @@ async function fetchTradeCandidates({ leagueId, season, week, now = Date.now() }
         season: String(season),
         week: String(week),
         status: "proposable",
-        sort: "final_score",
+        sort: "expected_score",
         limit: String(CANDIDATE_PAGE_SIZE),
         offset: String(items.length),
       });
@@ -66,7 +67,7 @@ function selectCandidatePackages(items, { fromTeamId, excluded, context }) {
   const ourCrunch = context?.teams?.[fromTeamId]?.bye_outlook?.crunch_weeks || [];
   const seen = new Set([fromTeamId, ...excluded]);
   const choices = [];
-  // The API sorts descending by final_score, with nulls last and a stable key tie-break.
+  // The API sorts descending by expected_score (final_score x acceptance likelihood), with nulls last and a stable key tie-break.
   const byTeam = new Map();
   for (const item of items) {
     const teamId = item.counterparty?.team_id;
@@ -87,7 +88,7 @@ function selectCandidatePackages(items, { fromTeamId, excluded, context }) {
     choices.push({
       package: toPackage(teamId, best),
       target: { team_id: teamId, ...(byePartner ? { bye_partner: true } : {}) },
-      storedScore: best.final_score,
+      storedScore: best.expected_score,
       candidateRank: FIRST_CANDIDATE_RANK,
       // Stored sort order; only used when the best package fails its live re-score.
       runnerUps: rest.slice(0, MAX_RUNNER_UPS_PER_COUNTERPARTY).map((item, index) => ({

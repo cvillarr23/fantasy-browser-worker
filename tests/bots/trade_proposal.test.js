@@ -394,8 +394,8 @@ test("with bye crunch weeks, teams whose byes miss ours are added as bye partner
 });
 
 const useCandidates = (items = [
-  { counterparty: { team_id: "3" }, receive: [{ espn_id: "300", player_id: "wrong-id" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },
-  { counterparty: { team_id: "2" }, receive: [{ espn_id: "200" }], send: [{ espn_id: "100" }], status: "proposable", final_score: 9 },
+  { counterparty: { team_id: "3" }, receive: [{ espn_id: "300", player_id: "wrong-id" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10, expected_score: 10 },
+  { counterparty: { team_id: "2" }, receive: [{ espn_id: "200" }], send: [{ espn_id: "100" }], status: "proposable", final_score: 9, expected_score: 9 },
 ]) => {
   pitch = () => ({ message: "This deal helps your lineup.", cited_evidence_ids: ["e1"] });
   return fetchTradeCandidates.mockResolvedValue({ status: "available", computedAt: "2026-10-20T12:00:00Z", items });
@@ -466,7 +466,7 @@ test("all live candidates failing gates stages nothing without generating replac
 
 const cand = (team, espnId, score, send = "100") => ({
   counterparty: { team_id: team }, receive: [{ espn_id: espnId }], send: [{ espn_id: send }],
-  status: "proposable", final_score: score,
+  status: "proposable", final_score: score, expected_score: score,
 });
 // Scores by team, with specific incoming ids overridden: a string reason rejects the live score.
 const liveBy = (overrides) => scoreTradePackage.mockImplementation(async ({ tradePackage }) => {
@@ -656,8 +656,8 @@ test("a team with a recent approval_pending pitch is excluded even for a differe
 
 test("a different package to the same team is still staged, as the runner-up", async () => {
   useCandidates([
-    { counterparty: { team_id: "3" }, receive: [{ espn_id: "300" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10 },
-    { counterparty: { team_id: "3" }, receive: [{ espn_id: "301" }], send: [{ espn_id: "102" }], status: "proposable", final_score: 8 },
+    { counterparty: { team_id: "3" }, receive: [{ espn_id: "300" }], send: [{ espn_id: "101" }], status: "proposable", final_score: 10, expected_score: 10 },
+    { counterparty: { team_id: "3" }, receive: [{ espn_id: "301" }], send: [{ espn_id: "102" }], status: "proposable", final_score: 8, expected_score: 8 },
   ]);
   fetchOpenOutgoingOffers.mockResolvedValue([openOffer("approved", "3", ["300"], ["101"])]);
   const result = await generateTradeProposal(payload);

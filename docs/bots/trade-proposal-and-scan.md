@@ -14,7 +14,7 @@ flowchart TD
     trigger -->|yes| claim["claim today's scan\n(advisory lock + execution_log)"]
     trigger -->|no| inbox["refresh trade inbox"]
     claim --> inbox["refresh trade inbox"]
-    inbox --> candidates["core: GET /v1/trade/candidates\nstatus=proposable, sort=final_score"]
+    inbox --> candidates["core: GET /v1/trade/candidates\nstatus=proposable, sort=expected_score"]
     candidates --> fresh{"available, nonempty,\nat most 36 hours old?"}
     fresh -->|yes| pick["best per counterparty, up to 3\nbye preference for close scores"]
     fresh -->|no| target["rank weak positions\n(up to 3 teams, + 2 bye partners)"]
@@ -49,9 +49,9 @@ The Sleeper NFL state API supplies `season` and `week`. Preseason, postseason, w
 
 ## How is a package chosen?
 
-The worker first reads `GET /v1/trade/candidates` for the scan’s league, season and week with `status=proposable&sort=final_score`. It reads all pages so repeated packages for one team cannot hide other counterparties. It keeps the highest-ranked stored package for each team and selects up to 3, excluding our team and teams with an open offer to us. Candidates can be selected even when no deficit target exists.
+The worker first reads `GET /v1/trade/candidates` for the scan’s league, season and week with `status=proposable&sort=expected_score`. It reads all pages so repeated packages for one team cannot hide other counterparties. Stored packages are ranked by `expected_score`, the schedule-weighted `final_score` scaled by how likely the manager is to accept, so likelier packages come first. Likelihood only ranks and never filters: every proposable package stays eligible. It keeps the highest-ranked stored package for each team and selects up to 3, excluding our team and teams with an open offer to us. Candidates can be selected even when no deficit target exists.
 
-Selection prefers a bye partner when its stored `final_score` is within 5% of the best remaining score. A bye partner has a known bye outlook whose crunch weeks do not overlap ours, and we must have crunch weeks ourselves. Null scores are only close to other null scores. After selection, live scores determine the existing final ranking.
+Selection prefers a bye partner when its stored `expected_score` is within 5% of the best remaining score. A bye partner has a known bye outlook whose crunch weeks do not overlap ours, and we must have crunch weeks ourselves. Null scores are only close to other null scores. After selection, live scores determine the existing final ranking.
 
 The list’s `computed_at` must be valid and no more than 36 hours old. A 404 (the candidate job has never run), other HTTP/network/JSON errors, empty results, stale data or malformed data use the LLM fallback below. A run changing between pages also triggers fallback. The worker logs `source` (`candidates` or `llm`) and the fallback reason, and stores `ranking.source` in every evaluation.
 
