@@ -75,7 +75,7 @@ Nothing queues a counter on its own. A person decides each turn.
 
 ## How does core learn how our own offers ended?
 
-`--refresh` also reports the outcome of offers we sent. It lists the offers core still shows as `submitted`, finds each one's ESPN transaction id (recorded when the offer was submitted), and skips any offer ESPN still lists as pending. For the rest it reads the trade history through the same classification the table above uses, then calls core's `POST /v1/trade/offers/{offer_key}/resolution` with `X-API-Key` (`CORE_PIPELINE_API_KEY`).
+`--refresh` also reports the outcome of offers we sent. It lists the offers core still shows as `submitted`, finds each one's ESPN transaction id (recorded when the offer was submitted), and skips any offer ESPN still lists as pending. Core keeps a resolved offer listed as `submitted` but sets its `resolution` field, and offers with that field are skipped, so each outcome is reported once. For the rest it reads the trade history through the same classification the table above uses, then calls core's `POST /v1/trade/offers/{offer_key}/resolution` with `X-API-Key` (`TRIGGER_API_KEY`).
 
 | History shows | Reported as |
 |---|---|
@@ -85,7 +85,7 @@ Nothing queues a counter on its own. A person decides each turn.
 | A cancel of our own offer | `withdrawn` |
 | A passed expiration, when the expiration was known | `expired` |
 
-Anything else is not reported: an accept still processing, a counter, an unexplained disappearance, or an offer submitted before its transaction id was recorded. Core then releases those players after `OUTGOING_COMMIT_HOURS`. A repeated report answers `duplicate: true` and counts as success. A `409` (a different outcome already on record) is logged and not retried. Any other failure is retried on the next refresh. Without `CORE_PIPELINE_API_KEY` nothing is reported. ESPN ids stay ESPN ids throughout; core's own player ids are never substituted. `--check` reports nothing.
+Anything else is not reported: an accept still processing, a counter, an unexplained disappearance, or an offer submitted before its transaction id was recorded. Core then releases those players after `OUTGOING_COMMIT_HOURS`. A repeated report answers `duplicate: true` and counts as success. A `409` (a different outcome already on record) is logged and not retried. Any other failure is retried on the next refresh. Without `TRIGGER_API_KEY` nothing is reported. ESPN ids stay ESPN ids throughout; core's own player ids are never substituted. `--check` reports nothing.
 
 ## What does a refresh emit?
 

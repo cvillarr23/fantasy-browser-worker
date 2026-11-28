@@ -200,7 +200,8 @@ const byExpiry = (a, b) =>
   new Date(a.expiration_date ?? Infinity).getTime() - new Date(b.expiration_date ?? Infinity).getTime();
 
 /**
- * Tells core how our sent offers ended. Core lists the offers it believes are still `submitted`;
+ * Tells core how our sent offers ended. Core lists the offers it still shows as `submitted`, minus
+ * those it already holds a resolution for;
  * the ones whose ESPN transaction has left ESPN's pending list get their outcome from the trade
  * history, through the same classification an incoming offer uses. An offer ESPN still shows as
  * pending is left alone, and so is one whose outcome the history doesn't name: core releases its
@@ -211,7 +212,11 @@ const byExpiry = (a, b) =>
 async function reportOutgoingResolutions(deps, { leagueId, season, teamId, outgoing, history, readHistory, now }) {
   const reported = [];
   try {
-    const submitted = await deps.fetchSubmittedOffers({ leagueId, season, fromTeamId: teamId });
+    // Core leaves an offer `submitted` after a resolution and lists it with `resolution` set, so
+    // that field is what makes each outcome reported exactly once.
+    const submitted = (await deps.fetchSubmittedOffers({ leagueId, season, fromTeamId: teamId })).filter(
+      (offer) => offer.resolution == null,
+    );
     if (submitted.length === 0) return reported;
     const transactionIds = await deps.findTransactionIds(submitted.map((offer) => offer.offer_key));
     const pendingIds = new Set(outgoing.map((t) => String(t.id)));

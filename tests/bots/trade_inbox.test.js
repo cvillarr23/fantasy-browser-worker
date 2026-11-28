@@ -714,6 +714,14 @@ describe("refreshTradeInbox: outgoing offer resolutions", () => {
     expect(result.resolutions).toEqual([{ offer_key: KEY, outcome: "declined", result: "ok" }]);
   });
 
+  it("skips an offer core already holds a resolution for, so each outcome is reported once", async () => {
+    deps.fetchSubmittedOffers.mockResolvedValue([{ ...submitted[0], resolution: { outcome: "declined" } }]);
+    deps.readHistory.mockResolvedValue([decline]);
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+    expect(result.resolutions).toEqual([]);
+  });
+
   it("leaves an offer ESPN still lists as pending alone", async () => {
     deps.readPending.mockResolvedValue({ trades: [ours()] });
     deps.readHistory.mockResolvedValue([decline]);

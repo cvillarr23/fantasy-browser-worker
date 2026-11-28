@@ -17,15 +17,15 @@ let warnedNoApiKey = false;
  * Tells core how a sent offer ended: POST /v1/trade/offers/{offer_key}/resolution. Core is
  * idempotent: the same outcome again answers `duplicate: true`, which is success here. A 409 is a
  * different outcome already on record, so it is logged and not retried. Anything else is a failure
- * the caller may retry on its next pass. Never throws. Without CORE_PIPELINE_API_KEY nothing is
+ * the caller may retry on its next pass. Never throws. Without TRIGGER_API_KEY nothing is
  * sent (SKIPPED), and core releases the players on its own clock.
  */
 async function postOfferResolution(offerKey, { outcome, resolvedAt, espnTransactionId }) {
-  const apiKey = process.env.CORE_PIPELINE_API_KEY;
+  const apiKey = process.env.TRIGGER_API_KEY;
   if (!apiKey) {
     if (!warnedNoApiKey) {
       warnedNoApiKey = true;
-      logger.warn("[Core] CORE_PIPELINE_API_KEY is not set; outgoing offer resolutions are not reported");
+      logger.warn("[Core] TRIGGER_API_KEY is not set; outgoing offer resolutions are not reported");
     }
     return { result: RESOLUTION_RESULT.SKIPPED };
   }

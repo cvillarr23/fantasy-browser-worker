@@ -270,7 +270,9 @@ async function finalizeTradeSubmission(id, status, errorMessage, espnTransaction
 }
 
 /**
- * ESPN transaction ids of submitted offers, as Map(offer_key -> espn_transaction_id). An offer
+ * ESPN transaction ids of submitted offers, as Map(offer_key -> espn_transaction_id). When a key
+ * has several submitted rows the newest wins: rows are read oldest first and later entries replace
+ * earlier ones in the Map. An offer
  * whose id was never recorded is absent. Throws on a DB error: the caller must not read a missing
  * key as "not recorded" when the database simply couldn't answer.
  */

@@ -9,11 +9,11 @@ describe("postOfferResolution", () => {
     jest.isolateModules(() => {
       core = require("../../src/lib/core_pipeline");
     });
-    process.env.CORE_PIPELINE_API_KEY = "test-key";
+    process.env.TRIGGER_API_KEY = "test-key";
   });
   afterEach(() => {
     delete global.fetch;
-    delete process.env.CORE_PIPELINE_API_KEY;
+    delete process.env.TRIGGER_API_KEY;
   });
 
   const reply = (status, body = {}) => jest.fn(async () => ({ ok: status >= 200 && status < 300, status, json: async () => body }));
@@ -63,7 +63,7 @@ describe("postOfferResolution", () => {
   });
 
   it("sends nothing without an API key", async () => {
-    delete process.env.CORE_PIPELINE_API_KEY;
+    delete process.env.TRIGGER_API_KEY;
     global.fetch = reply(200);
     expect(await core.postOfferResolution(OFFER_KEY, { outcome: "accepted" })).toEqual({ result: core.RESOLUTION_RESULT.SKIPPED });
     expect(global.fetch).not.toHaveBeenCalled();
