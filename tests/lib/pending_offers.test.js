@@ -1,5 +1,5 @@
 jest.mock("../../src/telemetry/logger", () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
-const { fetchOfferByKey, fetchOpenOutgoingOffers, pendingOfferConflict } = require("../../src/lib/pending_offers");
+const { fetchOfferByKey, fetchOpenOutgoingOffers, fetchSubmittedOutgoingOffers, pendingOfferConflict } = require("../../src/lib/pending_offers");
 
 const offer = (status, to, incoming, outgoing, from = "1") => ({
   status, from_team_id: from, to_team_id: to, incoming_player_ids: incoming, outgoing_player_ids: outgoing,
@@ -89,5 +89,25 @@ describe("fetchOfferByKey", () => {
   test("throws when core can't answer, so nothing is sent on a guess", async () => {
     global.fetch = jest.fn(async () => ({ ok: false, status: 503 }));
     await expect(fetchOfferByKey(KEY)).rejects.toThrow("offers HTTP 503");
+  });
+});
+
+describe("fetchSubmittedOutgoingOffers", () => {
+  afterEach(() => { delete global.fetch; });
+
+  test("reads only the submitted status and keeps only our offers", async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      json: async () => ({ offers: [offer("submitted", "3", ["1"], ["2"], "1"), offer("submitted", "3", ["4"], ["5"], "8")] }),
+    }));
+    const result = await fetchSubmittedOutgoingOffers({ leagueId: "123", season: 2026, fromTeamId: "1" });
+    expect(result).toEqual([offer("submitted", "3", ["1"], ["2"], "1")]);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(new URL(global.fetch.mock.calls[0][0]).searchParams.get("status")).toBe("submitted");
+  });
+
+  test("throws when core can't answer, so nothing is reported on a guess", async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503 }));
+    await expect(fetchSubmittedOutgoingOffers({ leagueId: "123", season: 2026, fromTeamId: "1" })).rejects.toThrow("503");
   });
 });

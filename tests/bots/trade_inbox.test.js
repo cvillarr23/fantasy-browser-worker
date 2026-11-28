@@ -81,6 +81,9 @@ beforeEach(() => {
     score: jest.fn().mockResolvedValue({ ok: true, body: scoreBody() }),
     store: memoryStore(),
     notify: jest.fn(async () => "sent"),
+    fetchSubmittedOffers: jest.fn().mockResolvedValue([]),
+    findTransactionIds: jest.fn().mockResolvedValue(new Map()),
+    reportResolution: jest.fn().mockResolvedValue({ result: "ok", duplicate: false }),
   };
 });
 
@@ -687,5 +690,86 @@ describe("refreshTradeInbox: job events", () => {
     const result = await refreshTradeInbox({ persist: true }, deps);
     expect(result.status).toBe("refreshed");
     expect(result.eventsEmitted).toBe(0);
+  });
+});
+
+describe("refreshTradeInbox: outgoing offer resolutions", () => {
+  const KEY = "k".repeat(64);
+  const submitted = [{ offer_key: KEY, status: "submitted", from_team_id: "8", to_team_id: "3" }];
+  const ours = (overrides = {}) => trade({ id: "out-1", proposingTeamId: "8", ...overrides });
+  const decline = { id: "later", type: "TRADE_DECLINE", status: "EXECUTED", relatedTransactionId: "out-1" };
+
+  beforeEach(() => {
+    deps.readPending.mockResolvedValue({ trades: [] });
+    deps.fetchSubmittedOffers.mockResolvedValue(submitted);
+    deps.findTransactionIds.mockResolvedValue(new Map([[KEY, "out-1"]]));
+  });
+
+  it("reports the outcome once when a submitted offer leaves the pending list", async () => {
+    deps.readHistory.mockResolvedValue([decline]);
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.fetchSubmittedOffers).toHaveBeenCalledWith({ leagueId: "1234567890", season: 2026, fromTeamId: "8" });
+    expect(deps.reportResolution).toHaveBeenCalledTimes(1);
+    expect(deps.reportResolution).toHaveBeenCalledWith(KEY, { outcome: "declined", espnTransactionId: "out-1" });
+    expect(result.resolutions).toEqual([{ offer_key: KEY, outcome: "declined", result: "ok" }]);
+  });
+
+  it("skips an offer core already holds a resolution for, so each outcome is reported once", async () => {
+    deps.fetchSubmittedOffers.mockResolvedValue([{ ...submitted[0], resolution: { outcome: "declined" } }]);
+    deps.readHistory.mockResolvedValue([decline]);
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+    expect(result.resolutions).toEqual([]);
+  });
+
+  it("leaves an offer ESPN still lists as pending alone", async () => {
+    deps.readPending.mockResolvedValue({ trades: [ours()] });
+    deps.readHistory.mockResolvedValue([decline]);
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+    expect(deps.readHistory).not.toHaveBeenCalled();
+  });
+
+  it("does not guess when the history doesn't name an outcome", async () => {
+    deps.readHistory.mockResolvedValue([]);
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+    expect(result.resolutions).toEqual([]);
+  });
+
+  it("does not match an offer with no recorded ESPN transaction id", async () => {
+    deps.findTransactionIds.mockResolvedValue(new Map());
+    deps.readHistory.mockResolvedValue([decline]);
+    await refreshTradeInbox({ persist: true }, deps);
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+  });
+
+  it("reports nothing when the history read fails, and still refreshes", async () => {
+    deps.readHistory.mockRejectedValue(new Error("HTTP 500"));
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(result.status).toBe("refreshed");
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+  });
+
+  it("reports nothing when core can't list submitted offers, and still refreshes", async () => {
+    deps.fetchSubmittedOffers.mockRejectedValue(new Error("offers HTTP 503"));
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(result.status).toBe("refreshed");
+    expect(deps.reportResolution).not.toHaveBeenCalled();
+  });
+
+  it("keeps a conflict or failed report from failing the refresh", async () => {
+    deps.readHistory.mockResolvedValue([decline]);
+    deps.reportResolution.mockResolvedValue({ result: "conflict" });
+    const result = await refreshTradeInbox({ persist: true }, deps);
+    expect(result.status).toBe("refreshed");
+    expect(result.resolutions).toEqual([{ offer_key: KEY, outcome: "declined", result: "conflict" }]);
+  });
+
+  it("reports nothing on a read-only check", async () => {
+    deps.readHistory.mockResolvedValue([decline]);
+    await refreshTradeInbox({ persist: false }, deps);
+    expect(deps.fetchSubmittedOffers).not.toHaveBeenCalled();
+    expect(deps.reportResolution).not.toHaveBeenCalled();
   });
 });

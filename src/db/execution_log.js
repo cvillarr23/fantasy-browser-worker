@@ -244,8 +244,12 @@ async function claimTradeSubmission(offerKey, row) {
   }
 }
 
-/** Best-effort: if this fails the row stays `submitting`, which fails closed on any redelivery. */
-async function finalizeTradeSubmission(id, status, errorMessage) {
+/**
+ * Best-effort: if this fails the row stays `submitting`, which fails closed on any redelivery.
+ * `espnTransactionId`, when known, is kept in counter_offer so the inbox refresh can later tell
+ * core how the offer ended.
+ */
+async function finalizeTradeSubmission(id, status, errorMessage, espnTransactionId) {
   await activity.event(
     "trade_" + status,
     { ledgerId: id, errorMessage },
@@ -254,12 +258,37 @@ async function finalizeTradeSubmission(id, status, errorMessage) {
   );
   try {
     await pool.query(
-      "UPDATE execution_log SET status = $2, error_message = $3 WHERE id = $1",
-      [id, status, errorMessage || null],
+      `UPDATE execution_log SET status = $2, error_message = $3,
+              counter_offer = CASE WHEN $4::text IS NULL THEN counter_offer
+                                   ELSE counter_offer || jsonb_build_object('espn_transaction_id', $4::text) END
+        WHERE id = $1`,
+      [id, status, errorMessage || null, espnTransactionId == null ? null : String(espnTransactionId)],
     );
   } catch (err) {
     logger.error("[Execution Log] Failed to finalize trade submission", { err });
   }
+}
+
+/**
+ * ESPN transaction ids of submitted offers, as Map(offer_key -> espn_transaction_id). When a key
+ * has several submitted rows the newest wins: rows are read oldest first and later entries replace
+ * earlier ones in the Map. An offer
+ * whose id was never recorded is absent. Throws on a DB error: the caller must not read a missing
+ * key as "not recorded" when the database simply couldn't answer.
+ */
+async function findSubmittedTransactionIds(offerKeys) {
+  if (offerKeys.length === 0) return new Map();
+  const { rows } = await pool.query(
+    `SELECT counter_offer->>'offer_key' AS offer_key, counter_offer->>'espn_transaction_id' AS espn_transaction_id
+       FROM execution_log
+      WHERE transaction_type = '${TRADE_SUBMIT_TYPE}'
+        AND status = 'submitted'
+        AND counter_offer->>'offer_key' = ANY($1)
+        AND counter_offer->>'espn_transaction_id' IS NOT NULL
+      ORDER BY executed_at`,
+    [offerKeys],
+  );
+  return new Map(rows.map((row) => [row.offer_key, row.espn_transaction_id]));
 }
 
 /** Best-effort record of a dry fill, same never-throw contract as recordTradeNegotiation.
@@ -367,5 +396,6 @@ module.exports = {
   findTradeSubmission,
   claimTradeSubmission,
   finalizeTradeSubmission,
+  findSubmittedTransactionIds,
   recordTradeOfferFill,
 };

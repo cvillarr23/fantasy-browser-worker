@@ -1042,11 +1042,36 @@ describe("submitTradeOffer: approval gate", () => {
     expect(claimTradeSubmission.mock.invocationCallOrder[0]).toBeLessThan(
       finalizeTradeSubmission.mock.invocationCallOrder[0],
     );
-    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined);
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined, undefined);
     // The click path's real body is checked against the inferred REST body (#124).
     expect(captureWriteArtifact).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "trade_proposal", bodyMismatches: [] }),
     );
+  });
+
+  it("records the offer's ESPN transaction id from the pending list when the submit succeeds", async () => {
+    armForLiveSubmit();
+    const offer = offerFixture();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    readPendingTrades.mockResolvedValue(pendingRead([pendingProposal(offer)]));
+
+    await submitTradeOffer(offer, { approval: approvalFor(offer) });
+
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined, "tx-1");
+  });
+
+  it("still finalizes submitted, without an id, when the pending read for it fails", async () => {
+    armForLiveSubmit();
+    const offer = offerFixture();
+    const { page } = makeBuilderPage([...THEIR_ROWS, ...OUR_ROWS]);
+    useSession(page);
+    readPendingTrades.mockRejectedValue(new Error("HTTP 500"));
+
+    const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
+
+    expect(result.status).toBe("submitted");
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined, undefined);
   });
 
   it("records, without failing the submit, where ESPN's real body differs from the inferred one", async () => {
@@ -1199,7 +1224,7 @@ describe("submitTradeOffer: approval gate", () => {
       seasonId: "2026",
       teamId: "8",
     });
-    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined);
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(42, "submitted", undefined, "tx-1");
     expect(state.clicks.filter((c) => c === "submit")).toHaveLength(1);
   });
 
@@ -1329,7 +1354,7 @@ describe("submitTradeOffer: redelivery", () => {
     const result = await submitTradeOffer(offer, { approval: approvalFor(offer) });
 
     expect(result).toMatchObject({ status: "already_submitted", confirmedBy: "pending_read" });
-    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined);
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined, "tx-1");
     expect(state.gotoUrls).toEqual([]);
     expect(state.clicks).toEqual([]);
   });
@@ -1532,7 +1557,7 @@ describe("submitTradeOffer: counter linkage", () => {
       status: "already_submitted",
       transactionId: "tx-9",
     });
-    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined);
+    expect(finalizeTradeSubmission).toHaveBeenCalledWith(7, "submitted", undefined, "tx-9");
   });
 
   it("passes a trade_submissions payload's linkage into the offer", async () => {

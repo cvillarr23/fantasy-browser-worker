@@ -73,6 +73,20 @@ Nothing queues a counter on its own. A person decides each turn.
 
 `TRADE_INBOX_SHADOW_ACCEPT_MIN_SCORE` and `TRADE_INBOX_SHADOW_DECLINE_MAX_SCORE` (both unset by default) record what a score threshold would do with each offer. Nothing acts on it. It abstains for stale scores, unmapped players, non-player items and roster overages.
 
+## How does core learn how our own offers ended?
+
+`--refresh` also reports the outcome of offers we sent. It lists the offers core still shows as `submitted`, finds each one's ESPN transaction id (recorded when the offer was submitted), and skips any offer ESPN still lists as pending. Core keeps a resolved offer listed as `submitted` but sets its `resolution` field, and offers with that field are skipped, so each outcome is reported once. For the rest it reads the trade history through the same classification the table above uses, then calls core's `POST /v1/trade/offers/{offer_key}/resolution` with `X-API-Key` (`TRIGGER_API_KEY`).
+
+| History shows | Reported as |
+|---|---|
+| An executed accept | `accepted` |
+| A decline | `declined` |
+| A veto | `vetoed` |
+| A cancel of our own offer | `withdrawn` |
+| A passed expiration, when the expiration was known | `expired` |
+
+Anything else is not reported: an accept still processing, a counter, an unexplained disappearance, or an offer submitted before its transaction id was recorded. Core then releases those players after `OUTGOING_COMMIT_HOURS`. A repeated report answers `duplicate: true` and counts as success. A `409` (a different outcome already on record) is logged and not retried. Any other failure is retried on the next refresh. Without `TRIGGER_API_KEY` nothing is reported. ESPN ids stay ESPN ids throughout; core's own player ids are never substituted. `--check` reports nothing.
+
 ## What does a refresh emit?
 
 For each offer seen for the first time, `--refresh` publishes a `trade.offer_received` event to core's `job_events` exchange once every new offer is stored. The subject is `trade_offer:<transaction id>`, and the payload carries the league id, transaction id, proposing team and expiration. A launcher job can subscribe to it through the catalog's `on_event`. `--check` emits nothing.
@@ -84,7 +98,7 @@ Publishing is best-effort: a broker failure is logged and the refresh still succ
 | Failure | Result |
 |---|---|
 | Pending-offer read fails | It throws before anything is written. Offers are retired only after a successful pending read and a successful history read. |
-| Core is unavailable | Scores are kept, marked stale and retried. |
+| Core is unavailable | Scores are kept, marked stale and retried. Outcome reports are retried on the next refresh. |
 | Broker unavailable | Events are skipped with a warning, after one ten-second attempt. |
 | Outside the regular season | Returns `off_season` and writes nothing. |
 

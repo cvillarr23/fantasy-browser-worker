@@ -22,6 +22,8 @@ const { createAuthenticatedSession, createSessionFromStoredState } = require("./
 const { readPendingTrades, readTradeHistory } = require("./espn_api");
 const { readSeason, resolvePeriod } = require("./trade_scan");
 const { loadInbox, updateEntry, setTriage } = require("../db/trade_inbox");
+const { findSubmittedTransactionIds } = require("../db/execution_log");
+const { fetchSubmittedOutgoingOffers } = require("../lib/pending_offers");
 const { notify } = require("../lib/notify");
 const { publishJobEvent } = require("../queue/events");
 const { incomingTradeOffer } = require("../lib/notifications");
@@ -41,12 +43,13 @@ const {
   rankInbox,
   shadowPolicy,
   resolveExit,
+  resolveOutgoingOffer,
   UNSETTLED_COUNTER_STATUSES,
   resolveCounter,
   buildThread,
   buildNegotiationPayload,
 } = require("../lib/trade_inbox");
-const { CORE_PIPELINE_URL } = require("../lib/core_pipeline");
+const { CORE_PIPELINE_URL, RESOLUTION_RESULT, postOfferResolution } = require("../lib/core_pipeline");
 const { logger } = require("../telemetry/logger");
 
 // The scorer solves both teams' lineups for every horizon week, which takes longer than
@@ -127,6 +130,9 @@ const defaultDeps = () => ({
   store: { load: loadInbox, update: updateEntry },
   notify,
   emitEvent: publishJobEvent,
+  fetchSubmittedOffers: fetchSubmittedOutgoingOffers,
+  findTransactionIds: findSubmittedTransactionIds,
+  reportResolution: postOfferResolution,
 });
 
 function requireLeagueAndTeam() {
@@ -192,6 +198,58 @@ function offerReceivedEvent(entry, leagueId) {
 
 const byExpiry = (a, b) =>
   new Date(a.expiration_date ?? Infinity).getTime() - new Date(b.expiration_date ?? Infinity).getTime();
+
+/**
+ * Tells core how our sent offers ended. Core lists the offers it still shows as `submitted`, minus
+ * those it already holds a resolution for;
+ * the ones whose ESPN transaction has left ESPN's pending list get their outcome from the trade
+ * history, through the same classification an incoming offer uses. An offer ESPN still shows as
+ * pending is left alone, and so is one whose outcome the history doesn't name: core releases its
+ * players itself after OUTGOING_COMMIT_HOURS. An offer sent before its transaction id was recorded
+ * can't be matched and is left the same way. ESPN ids only: a transaction id is never guessed from
+ * the players. Best-effort end to end, since a failed report is simply repeated next refresh.
+ */
+async function reportOutgoingResolutions(deps, { leagueId, season, teamId, outgoing, history, readHistory, now }) {
+  const reported = [];
+  try {
+    // Core leaves an offer `submitted` after a resolution and lists it with `resolution` set, so
+    // that field is what makes each outcome reported exactly once.
+    const submitted = (await deps.fetchSubmittedOffers({ leagueId, season, fromTeamId: teamId })).filter(
+      (offer) => offer.resolution == null,
+    );
+    if (submitted.length === 0) return reported;
+    const transactionIds = await deps.findTransactionIds(submitted.map((offer) => offer.offer_key));
+    const pendingIds = new Set(outgoing.map((t) => String(t.id)));
+    const ended = submitted.filter((offer) => {
+      const id = transactionIds.get(offer.offer_key);
+      return id !== undefined && !pendingIds.has(String(id));
+    });
+    const unlinked = submitted.filter((offer) => !transactionIds.has(offer.offer_key)).length;
+    if (unlinked > 0) {
+      logger.info(`[Trade Inbox] ${unlinked} submitted offer(s) have no recorded ESPN transaction id; core releases them on its own clock`);
+    }
+    if (ended.length === 0) return reported;
+
+    const rows = history ?? (await readHistory());
+    if (!rows) return reported;
+    for (const offer of ended) {
+      const espnTransactionId = transactionIds.get(offer.offer_key);
+      const resolution = resolveOutgoingOffer({ espnTransactionId, now, history: rows });
+      if (!resolution) {
+        logger.info(`[Trade Inbox] Offer ${offer.offer_key} (ESPN ${espnTransactionId}) left the pending list without a clear outcome; not reporting`);
+        continue;
+      }
+      const { result } = await deps.reportResolution(offer.offer_key, { outcome: resolution.outcome, espnTransactionId });
+      reported.push({ offer_key: offer.offer_key, outcome: resolution.outcome, result });
+      if (result === RESOLUTION_RESULT.OK) {
+        logger.info(`[Trade Inbox] Reported offer ${offer.offer_key} as ${resolution.outcome} (${resolution.reason})`);
+      }
+    }
+  } catch (error) {
+    logger.warn(`[Trade Inbox] Could not report outgoing offer resolutions: ${error.message}`);
+  }
+  return reported;
+}
 
 /**
  * One inbox refresh. `persist: false` is a read-only check: ESPN is read and core scores the
@@ -354,6 +412,25 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       }
     }
 
+    const resolutions = persist
+      ? await reportOutgoingResolutions(deps, {
+          leagueId,
+          season,
+          teamId,
+          outgoing,
+          history,
+          readHistory: async () => {
+            try {
+              return await deps.readHistory(session.context, { leagueId, seasonId: String(season) });
+            } catch (error) {
+              logger.warn(`[Trade Inbox] Trade history read failed; not reporting outgoing offer resolutions: ${error.message}`);
+              return null;
+            }
+          },
+          now,
+        })
+      : [];
+
     const ranked = rankInbox(entries, { now });
     return {
       status: persist ? "refreshed" : "checked",
@@ -363,6 +440,7 @@ async function refreshTradeInbox({ persist = true } = {}, overrides = {}) {
       eventsEmitted,
       exits,
       counterUpdates,
+      resolutions,
       openOfferTeamIds: [...new Set(incoming.map((t) => t.proposingTeamId))],
       ranked,
     };
