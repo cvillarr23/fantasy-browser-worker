@@ -5,7 +5,7 @@ const args = { leagueId: "123", season: 2026, week: 7, now };
 const candidate = (id, score = 10, extra = {}) => ({
   candidate_key: `key-${id}`, counterparty: { team_id: id, name: `Team ${id}` },
   receive: [{ espn_id: `${id}00`, player_id: "internal" }], send: [{ espn_id: "100" }],
-  status: "proposable", final_score: score, ...extra,
+  status: "proposable", final_score: score, expected_score: score, ...extra,
 });
 const list = (extra = {}) => ({
   league_id: "123", season: 2026, week: 7, horizon: 4,
@@ -17,14 +17,14 @@ let savedFetch;
 beforeEach(() => { savedFetch = global.fetch; global.fetch = jest.fn(); });
 afterEach(() => { global.fetch = savedFetch; });
 
-test("reads proposable candidates in final-score order, including later pages", async () => {
+test("reads proposable candidates in expected-score order, including later pages", async () => {
   global.fetch.mockResolvedValueOnce(response(list({ total: 2 })))
     .mockResolvedValueOnce(response(list({ total: 2, items: [candidate("3")] })));
   const result = await fetchTradeCandidates(args);
   expect(result).toMatchObject({ status: "available", items: [candidate("2"), candidate("3")] });
   const urls = global.fetch.mock.calls.map(([url]) => new URL(url));
   expect(Object.fromEntries(urls[0].searchParams)).toEqual({
-    league_id: "123", season: "2026", week: "7", status: "proposable", sort: "final_score", limit: "200", offset: "0",
+    league_id: "123", season: "2026", week: "7", status: "proposable", sort: "expected_score", limit: "200", offset: "0",
   });
   expect(urls[1].searchParams.get("offset")).toBe("1");
   expect(global.fetch.mock.calls[0][1].signal).toBeDefined();
@@ -106,4 +106,92 @@ test.each([
 ])("malformed candidate data falls back: %j", async (change) => {
   global.fetch.mockResolvedValue(response(list(change)));
   await expect(fetchTradeCandidates(args)).resolves.toMatchObject({ status: "fallback", reason: "invalid" });
+});
+
+test.each([
+  { items: [candidate("2", 10, { expected_score: "4" })] },
+  { items: [candidate("2", 10, { expected_score: Infinity })] },
+])("a non-finite expected_score falls back: %j", async (change) => {
+  global.fetch.mockResolvedValue(response(list(change)));
+  await expect(fetchTradeCandidates(args)).resolves.toMatchObject({ status: "fallback", reason: "invalid" });
+});
+
+test("accepts a null expected_score", async () => {
+  global.fetch.mockResolvedValue(response(list({ items: [candidate("2", 10, { expected_score: null })] })));
+  expect((await fetchTradeCandidates(args)).status).toBe("available");
+});
+
+test("ranks the best package and runner-ups by stored expected_score, not final_score", () => {
+  const withReceive = (score, expected, espnId) =>
+    candidate("2", score, { expected_score: expected, receive: [{ espn_id: espnId }] });
+  const picked = selectCandidatePackages([
+    withReceive(10, 8, "201"), withReceive(20, 6, "202"), withReceive(30, 1, "203"),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked[0]).toMatchObject({ storedScore: 8, package: { incoming_player_ids: ["201"] } });
+  expect(picked[0].runnerUps.map((entry) => entry.package.incoming_player_ids[0])).toEqual(["202", "203"]);
+});
+
+test("bye-partner closeness compares expected_score", () => {
+  const context = { teams: {
+    1: { bye_outlook: { crunch_weeks: [8] } },
+    2: { bye_outlook: { crunch_weeks: [8] } },
+    3: { bye_outlook: { crunch_weeks: [9] } },
+  } };
+  const withExpected = (id, final, expected) => candidate(id, final, { expected_score: expected });
+  // final_scores are far apart, expected_scores are within 5%.
+  const close = selectCandidatePackages([withExpected("2", 30, 10), withExpected("3", 12, 9.8)],
+    { fromTeamId: "1", excluded: new Set(), context });
+  expect(close.map((entry) => entry.package.to_team_id)).toEqual(["3", "2"]);
+  // final_scores are within 5%, expected_scores are not.
+  const far = selectCandidatePackages([withExpected("2", 10, 10), withExpected("3", 9.9, 5)],
+    { fromTeamId: "1", excluded: new Set(), context });
+  expect(far.map((entry) => entry.package.to_team_id)).toEqual(["2", "3"]);
+});
+
+test("a low-likelihood proposable candidate is still selected", () => {
+  const picked = selectCandidatePackages([candidate("2", 10, { expected_score: 0, acceptance_likelihood: 0 })],
+    { fromTeamId: "1", excluded: new Set() });
+  expect(picked).toHaveLength(1);
+});
+
+test("accepts a missing expected_score field", async () => {
+  global.fetch.mockResolvedValue(response(list({ items: [candidate("2", 10, { expected_score: undefined })] })));
+  expect((await fetchTradeCandidates(args)).status).toBe("available");
+});
+
+test("an all-null expected_score list is ranked by final_score, nulls last, stable on candidate_key", () => {
+  const nullExpected = (id, final, key) => candidate(id, final, { expected_score: null, candidate_key: key });
+  const picked = selectCandidatePackages([
+    nullExpected("2", null, "a"), nullExpected("3", 5, "b"), nullExpected("4", 9, "z"), nullExpected("5", 9, "c"),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["5", "4", "3"]);
+  expect(picked.map((entry) => entry.storedScore)).toEqual([9, 9, 5]);
+});
+
+test("a missing field is treated like null in the all-null fallback", () => {
+  const picked = selectCandidatePackages([
+    candidate("2", 3, { expected_score: undefined }), candidate("3", 8, { expected_score: undefined }),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["3", "2"]);
+});
+
+test("a mixed list keeps core's order with nulls last and uses expected_score", () => {
+  const picked = selectCandidatePackages([
+    candidate("2", 1, { expected_score: 4 }), candidate("3", 50, { expected_score: null }),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => [entry.package.to_team_id, entry.storedScore])).toEqual([["2", 4], ["3", null]]);
+});
+
+test("the bye-partner rule uses final_score under the all-null fallback", () => {
+  const context = { teams: {
+    1: { bye_outlook: { crunch_weeks: [8] } },
+    2: { bye_outlook: { crunch_weeks: [8] } },
+    3: { bye_outlook: { crunch_weeks: [9] } },
+    4: { bye_outlook: { crunch_weeks: [9] } },
+  } };
+  const nullExpected = (id, final) => candidate(id, final, { expected_score: null });
+  const picked = selectCandidatePackages([nullExpected("3", 2), nullExpected("2", 20), nullExpected("4", 19.5)],
+    { fromTeamId: "1", excluded: new Set(), context });
+  // Sorted by final_score: 2 (20), 4 (19.5, bye partner within 5%), 3 (2).
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["4", "2", "3"]);
 });
