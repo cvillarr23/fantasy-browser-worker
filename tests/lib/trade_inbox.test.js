@@ -10,6 +10,7 @@ const {
   rankInbox,
   shadowPolicy,
   resolveExit,
+  resolveOutgoingOffer,
   mergeEntry,
   buildNegotiationPayload,
   verifyResponse,
@@ -723,5 +724,51 @@ describe("buildThread", () => {
     const legacy = entry();
     delete legacy.thread_root_id;
     expect(buildThread([legacy], "tx-1").turns).toHaveLength(1);
+  });
+});
+
+describe("resolveOutgoingOffer", () => {
+  const base = { espnTransactionId: "tx-1", now: NOW, history: [] };
+  const related = (row) => [{ id: "later", relatedTransactionId: "tx-1", ...row }];
+
+  it.each([
+    [{ type: "TRADE_ACCEPT", status: "EXECUTED", isPending: false }, "accepted"],
+    [{ type: "TRADE_DECLINE", status: "EXECUTED" }, "declined"],
+    [{ type: "TRADE_VETO", status: "EXECUTED" }, "vetoed"],
+    [{ type: "TRADE_PROPOSAL", status: "EXECUTED", executionType: "CANCEL" }, "withdrawn"],
+  ])("reads %j in the history as %s", (row, outcome) => {
+    expect(resolveOutgoingOffer({ ...base, history: related(row) })).toMatchObject({ outcome });
+  });
+
+  it("reads a canceled original as withdrawn", () => {
+    const history = [{ id: "tx-1", type: "TRADE_PROPOSAL", status: "CANCELED" }];
+    expect(resolveOutgoingOffer({ ...base, history })).toMatchObject({ outcome: "withdrawn" });
+  });
+
+  it("reads an offer past its known expiration as expired", () => {
+    const expirationDate = Date.parse("2026-10-06T00:00:00Z");
+    expect(resolveOutgoingOffer({ ...base, expirationDate })).toMatchObject({ outcome: "expired" });
+  });
+
+  it("does not guess an expiry when the expiration date is unknown", () => {
+    expect(resolveOutgoingOffer(base)).toBeNull();
+  });
+
+  it("reports nothing while an accept is still being processed", () => {
+    const history = related({ type: "TRADE_ACCEPT", status: "PENDING", isPending: true });
+    expect(resolveOutgoingOffer({ ...base, history })).toBeNull();
+  });
+
+  it("reports nothing for a reply that is only a counter", () => {
+    expect(resolveOutgoingOffer({ ...base, history: related({ type: "TRADE_PROPOSAL", status: "PENDING" }) })).toBeNull();
+  });
+
+  it("reports nothing for a disappearance the history does not explain", () => {
+    expect(resolveOutgoingOffer({ ...base, history: related({ type: "TRADE_UPHOLD", status: "EXECUTED" }) })).toBeNull();
+  });
+
+  it("matches the transaction id as ESPN's string whatever its type", () => {
+    const history = [{ id: "later", relatedTransactionId: 77, type: "TRADE_DECLINE", status: "EXECUTED" }];
+    expect(resolveOutgoingOffer({ ...base, espnTransactionId: 77, history })).toMatchObject({ outcome: "declined" });
   });
 });

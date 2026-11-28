@@ -688,6 +688,33 @@ function resolveCounter(entry, { now, history, accepts, incoming, outgoing, ourT
   return { ...counter, status: exit.status, missed_reads: exit.missed_reads, exit_reason: exit.exit_reason };
 }
 
+// What core calls each way one of our sent offers can end. Every other status resolveExit can
+// return (still being processed, countered, closed unexplained) is not an outcome core can use.
+const OUTGOING_OUTCOMES = Object.freeze({
+  [STATUS.ACCEPTED]: "accepted",
+  [STATUS.DECLINED]: "declined",
+  [STATUS.VETOED]: "vetoed",
+  [STATUS.WITHDRAWN]: "withdrawn",
+  [STATUS.EXPIRED]: "expired",
+});
+
+/**
+ * How one of our sent offers ended, as core's outcome, or null when it can't be told. The caller
+ * has already seen the offer missing from ESPN's pending list. This is resolveExit's reading of
+ * the history, applied to our own offer, so incoming and outgoing offers share one classification.
+ * `expirationDate` is only known when the offer was seen pending, and without it an unexplained
+ * disappearance is never called an expiry. A single unexplained miss stays null too: only evidence
+ * names an outcome here, so a guess is left to core's own release timer.
+ */
+function resolveOutgoingOffer({ espnTransactionId, expirationDate = null, now, history }) {
+  const exit = resolveExit(
+    { espn_transaction_id: String(espnTransactionId), status: STATUS.OPEN, expiration_date: expirationDate, missed_reads: 0 },
+    { now, history, outgoing: [] },
+  );
+  const outcome = exit ? OUTGOING_OUTCOMES[exit.status] : undefined;
+  return outcome ? { outcome, reason: exit.exit_reason } : null;
+}
+
 const THREAD_STATE = Object.freeze({
   AWAITING_US: "awaiting_us",
   AWAITING_THEM: "awaiting_them",
@@ -839,6 +866,7 @@ module.exports = {
   rankInbox,
   shadowPolicy,
   resolveExit,
+  resolveOutgoingOffer,
   buildNegotiationPayload,
   UNSETTLED_COUNTER_STATUSES,
   toCounterRecord,

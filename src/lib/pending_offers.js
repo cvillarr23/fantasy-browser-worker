@@ -15,6 +15,7 @@ const MILLISECONDS_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR * SECONDS_PER_MINU
 const OPEN_OFFER_STATUSES = ["approval_pending", "approved", "submitting", "submitted"];
 // Once a person has approved an offer its outgoing players are spoken for.
 const COMMITTED_OFFER_STATUSES = new Set(OPEN_OFFER_STATUSES);
+const SUBMITTED_STATUS = "submitted";
 const PITCH_STATUSES = new Set(["approval_pending"]);
 // A person approved the offer. Core commits approval_pending before it starts the send and flips
 // it to approved after, so a send run can find either one.
@@ -64,6 +65,29 @@ async function fetchOpenOutgoingOffers({ leagueId, season, fromTeamId }) {
     logger.warn("[Trade Offers] Could not read open offers; scanning without the duplicate check", { err: error });
     return [];
   }
+  return offers;
+}
+
+/**
+ * Our offers that core lists as `submitted`, i.e. sent and not yet reported as resolved. Unlike
+ * fetchOpenOutgoingOffers this throws when core can't answer: the caller reports nothing then.
+ */
+async function fetchSubmittedOutgoingOffers({ leagueId, season, fromTeamId }) {
+  const offers = [];
+  let offset = 0;
+  let pageOffers;
+  do {
+    const query = new URLSearchParams({
+      status: SUBMITTED_STATUS,
+      league_id: leagueId,
+      season: String(season),
+      limit: String(OFFERS_PAGE_SIZE),
+      offset: String(offset),
+    });
+    pageOffers = await fetchStatusPage(query);
+    offers.push(...pageOffers.filter((offer) => String(offer.from_team_id) === String(fromTeamId)));
+    offset += pageOffers.length;
+  } while (pageOffers.length === OFFERS_PAGE_SIZE);
   return offers;
 }
 
@@ -137,6 +161,7 @@ module.exports = {
   APPROVED_OFFER_STATUSES,
   fetchOfferByKey,
   fetchOpenOutgoingOffers,
+  fetchSubmittedOutgoingOffers,
   pendingOfferConflict,
   recentPitchTeamIds,
   ALREADY_STAGED,

@@ -12,6 +12,7 @@ const {
   findTradeSubmission,
   claimTradeSubmission,
   finalizeTradeSubmission,
+  findSubmittedTransactionIds,
   recordTradeOfferFill,
   findTradeResponse,
   recordTradeResponseOutcome,
@@ -125,12 +126,38 @@ describe("finalizeTradeSubmission", () => {
   it("updates the claimed row by id", async () => {
     pool.query.mockResolvedValue({ rowCount: 1 });
     await finalizeTradeSubmission(11, "submitted");
-    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE execution_log/), [11, "submitted", null]);
+    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/UPDATE execution_log/), [11, "submitted", null, null]);
+  });
+
+  it("keeps the ESPN transaction id as a string when it is known", async () => {
+    pool.query.mockResolvedValue({ rowCount: 1 });
+    await finalizeTradeSubmission(11, "submitted", undefined, 4242);
+    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/espn_transaction_id/), [11, "submitted", null, "4242"]);
   });
 
   it("never throws: a stale submitting row fails closed on redelivery anyway", async () => {
     pool.query.mockRejectedValue(new Error("boom"));
     await expect(finalizeTradeSubmission(11, "submitted")).resolves.toBeUndefined();
+  });
+});
+
+describe("findSubmittedTransactionIds", () => {
+  it("maps each offer key to its recorded ESPN transaction id", async () => {
+    pool.query.mockResolvedValue({ rows: [{ offer_key: OFFER_KEY, espn_transaction_id: "4242" }] });
+    const ids = await findSubmittedTransactionIds([OFFER_KEY, "b".repeat(64)]);
+    expect(ids).toEqual(new Map([[OFFER_KEY, "4242"]]));
+    expect(pool.query).toHaveBeenCalledWith(expect.stringMatching(/status = 'submitted'/), [[OFFER_KEY, "b".repeat(64)]]);
+  });
+
+  it("does not query for no keys", async () => {
+    pool.query.mockClear();
+    expect(await findSubmittedTransactionIds([])).toEqual(new Map());
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it("throws when the database can't answer", async () => {
+    pool.query.mockRejectedValue(new Error("boom"));
+    await expect(findSubmittedTransactionIds([OFFER_KEY])).rejects.toThrow("boom");
   });
 });
 

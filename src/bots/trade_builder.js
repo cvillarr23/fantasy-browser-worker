@@ -440,7 +440,7 @@ async function reconcileStuckSubmission(existing, offer, { label, offerKey, prov
   }
 
   if (found) {
-    await finalizeTradeSubmission(existing.id, "submitted", undefined);
+    await finalizeTradeSubmission(existing.id, "submitted", undefined, found.id);
     logger.info(
       `${label} Offer ${offerKey}'s earlier attempt (row ${existing.id}) is pending in ESPN as ` +
         `transaction ${found.id}; marked submitted. No-op.`,
@@ -891,7 +891,7 @@ async function submitTradeOffer(
         readNote = `and the pending-trades read also failed (${readError.message})`;
       }
       if (!found) throw unknownOutcome(label, offerKey, `${detail}, ${readNote}`);
-      await finalizeTradeSubmission(claim.id, "submitted", undefined);
+      await finalizeTradeSubmission(claim.id, "submitted", undefined, found.id);
       logger.info(
         `${label} Offer ${offerKey} confirmed pending in ESPN as transaction ${found.id} (${detail}).`,
       );
@@ -949,7 +949,19 @@ async function submitTradeOffer(
       return await settleUnknown(detail);
     }
 
-    await finalizeTradeSubmission(claim.id, "submitted", undefined);
+    // The response body's shape is unverified, so the transaction id comes from the pending list,
+    // read with the same exact match that confirms an unknown outcome. Best-effort: an offer
+    // recorded without an id is simply never reported to core, which releases it on its own clock.
+    let transactionId;
+    try {
+      transactionId = (await findPendingOffer(context, offer, {
+        claimedAt,
+        comment: messageAttached ? offer.message : "",
+      }))?.id;
+    } catch (readError) {
+      logger.warn(`${label} Offer ${offerKey} submitted, but its ESPN transaction id could not be read: ${readError.message}`);
+    }
+    await finalizeTradeSubmission(claim.id, "submitted", undefined, transactionId);
     await captureDebugSnapshot(page, `${snapshotLabel}-submitted`);
     logger.info(`${label} Offer ${offerKey} submitted to team ${offer.toTeamId}.`);
     return submitted({});
