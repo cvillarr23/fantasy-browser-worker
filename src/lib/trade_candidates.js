@@ -20,7 +20,7 @@ function validCandidate(item) {
   return item && typeof item.counterparty?.team_id === "string" && /^[1-9]\d*$/.test(item.counterparty.team_id) &&
     validPlayers(item.receive) && validPlayers(item.send) && item.status === "proposable" &&
     (item.final_score === null || Number.isFinite(item.final_score)) &&
-    (item.expected_score === null || Number.isFinite(item.expected_score));
+    (item.expected_score == null || Number.isFinite(item.expected_score));
 }
 
 // A list is a snapshot. Never combine pages from different job runs.
@@ -63,11 +63,24 @@ async function fetchTradeCandidates({ leagueId, season, week, now = Date.now() }
   }
 }
 
-function selectCandidatePackages(items, { fromTeamId, excluded, context }) {
+// Compare by final_score descending, nulls last, then candidate_key for a stable order.
+function byFinalScore(a, b) {
+  if (a.final_score === b.final_score) return String(a.candidate_key ?? "").localeCompare(String(b.candidate_key ?? ""));
+  if (a.final_score === null) return 1;
+  if (b.final_score === null) return -1;
+  return b.final_score - a.final_score;
+}
+
+function selectCandidatePackages(candidates, { fromTeamId, excluded, context }) {
+  // Rows stored before expected_score existed carry null (or no field). When every row does, core's order is not
+  // score-based, so rank the whole list by final_score instead. Never mix the two scales within one list.
+  const useFinalScore = candidates.every((item) => item.expected_score == null);
+  const items = useFinalScore ? [...candidates].sort(byFinalScore) : candidates;
+  const scoreOf = (item) => (useFinalScore ? item.final_score : item.expected_score ?? null);
   const ourCrunch = context?.teams?.[fromTeamId]?.bye_outlook?.crunch_weeks || [];
   const seen = new Set([fromTeamId, ...excluded]);
   const choices = [];
-  // The API sorts descending by expected_score (final_score x acceptance likelihood), with nulls last and a stable key tie-break.
+  // Core sorts descending by expected_score (final_score x acceptance likelihood), nulls last; its tie-break is not enforced here.
   const byTeam = new Map();
   for (const item of items) {
     const teamId = item.counterparty?.team_id;
@@ -88,7 +101,7 @@ function selectCandidatePackages(items, { fromTeamId, excluded, context }) {
     choices.push({
       package: toPackage(teamId, best),
       target: { team_id: teamId, ...(byePartner ? { bye_partner: true } : {}) },
-      storedScore: best.expected_score,
+      storedScore: scoreOf(best),
       candidateRank: FIRST_CANDIDATE_RANK,
       // Stored sort order; only used when the best package fails its live re-score.
       runnerUps: rest.slice(0, MAX_RUNNER_UPS_PER_COUNTERPARTY).map((item, index) => ({

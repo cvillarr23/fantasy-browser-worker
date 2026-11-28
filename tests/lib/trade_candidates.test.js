@@ -109,10 +109,9 @@ test.each([
 });
 
 test.each([
-  { items: [candidate("2", 10, { expected_score: undefined })] },
   { items: [candidate("2", 10, { expected_score: "4" })] },
   { items: [candidate("2", 10, { expected_score: Infinity })] },
-])("a missing or non-finite expected_score falls back: %j", async (change) => {
+])("a non-finite expected_score falls back: %j", async (change) => {
   global.fetch.mockResolvedValue(response(list(change)));
   await expect(fetchTradeCandidates(args)).resolves.toMatchObject({ status: "fallback", reason: "invalid" });
 });
@@ -153,4 +152,46 @@ test("a low-likelihood proposable candidate is still selected", () => {
   const picked = selectCandidatePackages([candidate("2", 10, { expected_score: 0, acceptance_likelihood: 0 })],
     { fromTeamId: "1", excluded: new Set() });
   expect(picked).toHaveLength(1);
+});
+
+test("accepts a missing expected_score field", async () => {
+  global.fetch.mockResolvedValue(response(list({ items: [candidate("2", 10, { expected_score: undefined })] })));
+  expect((await fetchTradeCandidates(args)).status).toBe("available");
+});
+
+test("an all-null expected_score list is ranked by final_score, nulls last, stable on candidate_key", () => {
+  const nullExpected = (id, final, key) => candidate(id, final, { expected_score: null, candidate_key: key });
+  const picked = selectCandidatePackages([
+    nullExpected("2", null, "a"), nullExpected("3", 5, "b"), nullExpected("4", 9, "z"), nullExpected("5", 9, "c"),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["5", "4", "3"]);
+  expect(picked.map((entry) => entry.storedScore)).toEqual([9, 9, 5]);
+});
+
+test("a missing field is treated like null in the all-null fallback", () => {
+  const picked = selectCandidatePackages([
+    candidate("2", 3, { expected_score: undefined }), candidate("3", 8, { expected_score: undefined }),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["3", "2"]);
+});
+
+test("a mixed list keeps core's order with nulls last and uses expected_score", () => {
+  const picked = selectCandidatePackages([
+    candidate("2", 1, { expected_score: 4 }), candidate("3", 50, { expected_score: null }),
+  ], { fromTeamId: "1", excluded: new Set() });
+  expect(picked.map((entry) => [entry.package.to_team_id, entry.storedScore])).toEqual([["2", 4], ["3", null]]);
+});
+
+test("the bye-partner rule uses final_score under the all-null fallback", () => {
+  const context = { teams: {
+    1: { bye_outlook: { crunch_weeks: [8] } },
+    2: { bye_outlook: { crunch_weeks: [8] } },
+    3: { bye_outlook: { crunch_weeks: [9] } },
+    4: { bye_outlook: { crunch_weeks: [9] } },
+  } };
+  const nullExpected = (id, final) => candidate(id, final, { expected_score: null });
+  const picked = selectCandidatePackages([nullExpected("3", 2), nullExpected("2", 20), nullExpected("4", 19.5)],
+    { fromTeamId: "1", excluded: new Set(), context });
+  // Sorted by final_score: 2 (20), 4 (19.5, bye partner within 5%), 3 (2).
+  expect(picked.map((entry) => entry.package.to_team_id)).toEqual(["4", "2", "3"]);
 });
